@@ -1,0 +1,8 @@
+[workspace]
+members = ["checksum-cloud"]
+resolver = "2"
+
+[workspace.package]
+license = "MIT"
+edition = "2021"
+authors = ["Marko Malenic <mmalenic1@gmail.com>"]

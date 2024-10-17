@@ -1,0 +1,12 @@
+[package]
+name = "checksum-cloud"
+description = "A tool to calculate multiple checksums concurrently locally and in the cloud."
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
