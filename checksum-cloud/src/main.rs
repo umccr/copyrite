@@ -1,4 +1,4 @@
-use checksum_cloud::error::{Error, Result};
+use checksum_cloud::error::Result;
 use checksum_cloud::{Args, Checksum};
 use clap::Parser;
 use futures_util::future::join_all;
@@ -24,13 +24,18 @@ async fn main() -> Result<()> {
 
     let reader = BufReader::new(File::open(args.input).await?);
 
+    // Concurrently compute checksums using a channel.
     let (tx, md5rx) = broadcast::channel(1000);
     let sha1rx = tx.subscribe();
     let sha256rx = tx.subscribe();
 
+    // There's two kinds of tasks:
+    // 1. The read task which reads data into a buffer, and sends it over the channel:
     let mut tasks = vec![];
     tasks.push(tokio::spawn(async move { read_task(tx, reader).await }));
 
+    // 2. the checksum task, which receives data from the channel for each checksum type,
+    // and incrementally computes the checksum until there is no more data.
     if args.checksums.contains(&Checksum::MD5) {
         tasks.push(tokio::spawn(async move {
             checksum_task(
@@ -68,6 +73,7 @@ async fn main() -> Result<()> {
         }));
     }
 
+    // Each task is spawned to run concurrently. At the end, wait for all tasks to complete.
     join_all(tasks)
         .await
         .into_iter()
@@ -80,14 +86,18 @@ async fn main() -> Result<()> {
 /// Read data from a buffer and send it into the channel.
 async fn read_task(tx: Sender<Message>, mut reader: BufReader<File>) -> Result<()> {
     loop {
+        // Read data into a buffer.
         let mut buf = vec![0; 1000];
         let n = reader.read(&mut buf).await?;
 
+        // Send a stop message if there is no more data.
         if n == 0 {
             tx.send(Message::Stop)?;
             break;
         }
 
+        // Send the buffer. An Arc allows sharing the buffer across multiple receivers without
+        // copying it.
         tx.send(Message::Buf(Arc::from(buf)))?;
     }
 
@@ -105,7 +115,9 @@ async fn checksum_task<T, R>(
 where
     R: LowerHex,
 {
+    // Retrieve the message.
     let mut msg = rx.recv().await?;
+    // And compute the checksum until a stop message is received.
     while let Message::Buf(buf) = msg {
         consume(&mut ctx, buf);
         msg = rx.recv().await?;
@@ -114,5 +126,5 @@ where
     let digest = compute(ctx);
     println!("The {} digest is: {:x}", fmt, digest);
 
-    Ok::<_, Error>(())
+    Ok(())
 }
