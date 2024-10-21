@@ -36,11 +36,11 @@ pub enum Commands {
         #[arg(short, long, env)]
         output: Option<PathBuf>,
     },
-    /// Check an existing checksum.
+    /// Confirm a set of files is identical.
     Check {
-        /// The input file to check a checksum. By default, accepts standard input.
-        #[arg(short, long, env)]
-        input: Option<PathBuf>,
+        /// The input file to check a checksum. Requires at least two files.
+        #[arg(value_delimiter = ',', required = true, num_args = 2, short, long, env)]
+        files: Vec<PathBuf>,
     },
 }
 
