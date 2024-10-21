@@ -1,13 +1,13 @@
-use checksum_cloud::error::Result;
-use checksum_cloud::{Args, Checksum};
 use clap::Parser;
+use cloud_checksum::error::Result;
+use cloud_checksum::{Args, Checksum, Commands};
 use futures_util::future::join_all;
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::Sha256;
 use std::fmt::LowerHex;
 use std::sync::Arc;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::{stdin, AsyncRead, AsyncReadExt, BufReader};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::{Receiver, Sender};
 
@@ -22,17 +22,32 @@ pub enum Message {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let reader = BufReader::new(File::open(args.input).await?);
-
     // Concurrently compute checksums using a channel.
     let (tx, md5rx) = broadcast::channel(1000);
     let sha1rx = tx.subscribe();
     let sha256rx = tx.subscribe();
 
     // There's two kinds of tasks:
-    // 1. The read task which reads data into a buffer, and sends it over the channel:
     let mut tasks = vec![];
-    tasks.push(tokio::spawn(async move { read_task(tx, reader).await }));
+
+    match args.commands {
+        Commands::Generate { input, .. } => {
+            // 1. The read task which reads data into a buffer, and sends it over the channel:
+            match input {
+                None => {
+                    tasks.push(tokio::spawn(async move {
+                        read_task(tx, BufReader::new(stdin())).await
+                    }));
+                }
+                Some(input) => {
+                    tasks.push(tokio::spawn(async move {
+                        read_task(tx, BufReader::new(File::open(input).await?)).await
+                    }));
+                }
+            }
+        }
+        Commands::Check { .. } => todo!(),
+    };
 
     // 2. the checksum task, which receives data from the channel for each checksum type,
     // and incrementally computes the checksum until there is no more data.
@@ -84,7 +99,10 @@ async fn main() -> Result<()> {
 }
 
 /// Read data from a buffer and send it into the channel.
-async fn read_task(tx: Sender<Message>, mut reader: BufReader<File>) -> Result<()> {
+async fn read_task<T>(tx: Sender<Message>, mut reader: BufReader<T>) -> Result<()>
+where
+    T: AsyncRead + Unpin,
+{
     loop {
         // Read data into a buffer.
         let mut buf = vec![0; 1000];

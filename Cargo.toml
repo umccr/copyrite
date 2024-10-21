@@ -1,5 +1,5 @@
 [workspace]
-members = ["checksum-cloud"]
+members = ["cloud-checksum"]
 resolver = "2"
 
 [workspace.package]
