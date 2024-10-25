@@ -1,4 +1,6 @@
+pub mod checksum;
 pub mod error;
+pub mod reader;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use humantime::Duration;
@@ -45,7 +47,7 @@ pub enum Commands {
 }
 
 /// The checksum to use.
-#[derive(Debug, Clone, ValueEnum, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, ValueEnum, PartialEq, Eq, PartialOrd, Ord, Copy)]
 pub enum Checksum {
     /// Calculate the MD5 checksum.
     MD5,
