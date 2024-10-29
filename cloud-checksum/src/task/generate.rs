@@ -5,7 +5,6 @@ use crate::error::Result;
 use crate::reader::SharedReader;
 use crate::{checksum, Checksum};
 use futures_util::future::join_all;
-use hex::encode;
 use tokio::task::JoinHandle;
 
 /// Execute the generate checksums tasks.
@@ -21,7 +20,15 @@ impl GenerateTask {
         Ok(self)
     }
 
-    pub fn add_generate_task(mut self, checksum: Checksum, reader: &impl SharedReader) -> Self {
+    pub fn add_generate_task<F>(
+        mut self,
+        checksum: Checksum,
+        reader: &impl SharedReader,
+        on_digest: F,
+    ) -> Self
+    where
+        F: FnOnce(Vec<u8>, Checksum) + Send + 'static,
+    {
         let ctx = checksum::Checksum::from(checksum);
         let stream = reader.to_stream();
         self.tasks.push(tokio::spawn(async move {
@@ -29,21 +36,24 @@ impl GenerateTask {
 
             let digest = stream.await?;
 
-            println!("The {:#?} digest is: {}", checksum, encode(digest));
-
+            on_digest(digest, checksum);
             Ok(())
         }));
 
         self
     }
 
-    pub fn add_generate_tasks(
+    pub fn add_generate_tasks<F>(
         mut self,
         checksums: Vec<Checksum>,
         reader: &impl SharedReader,
-    ) -> Self {
+        on_digest: F,
+    ) -> Self
+    where
+        F: FnOnce(Vec<u8>, Checksum) + Clone + Send + 'static,
+    {
         for checksum in checksums {
-            self = self.add_generate_task(checksum, reader);
+            self = self.add_generate_task(checksum, reader, on_digest.clone());
         }
         self
     }

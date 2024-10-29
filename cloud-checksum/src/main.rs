@@ -3,6 +3,7 @@ use cloud_checksum::error::Result;
 use cloud_checksum::reader::channel::ChannelReader;
 use cloud_checksum::task::generate::GenerateTask;
 use cloud_checksum::{Commands, Subcommands};
+use hex::encode;
 use tokio::fs::File;
 use tokio::io::stdin;
 
@@ -19,7 +20,9 @@ async fn main() -> Result<()> {
                 );
 
                 GenerateTask::default()
-                    .add_generate_tasks(args.checksums, &reader)
+                    .add_generate_tasks(args.checksums, &reader, |digest, checksum| {
+                        println!("The {:#?} digest is: {}", checksum, encode(digest));
+                    })
                     .add_reader_task(reader)?
                     .run()
                     .await?;
@@ -31,7 +34,9 @@ async fn main() -> Result<()> {
                 );
 
                 GenerateTask::default()
-                    .add_generate_tasks(args.checksums, &reader)
+                    .add_generate_tasks(args.checksums, &reader, |digest, checksum| {
+                        println!("The {:#?} digest is: {}", checksum, encode(digest));
+                    })
                     .add_reader_task(reader)?
                     .run()
                     .await?;

@@ -8,6 +8,9 @@ use futures_util::Stream;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::sync::broadcast::Sender;
+use tokio::task::yield_now;
+
+const SLOW_DOWN_CAPACITY_RATIO: f32 = 0.9;
 
 /// Message type for passing byte data.
 #[derive(Debug, Clone)]
@@ -21,6 +24,7 @@ pub enum Message {
 pub struct ChannelReader<R> {
     inner: BufReader<R>,
     tx: Sender<Message>,
+    capacity: Option<usize>,
 }
 
 impl<R> ChannelReader<R>
@@ -32,6 +36,7 @@ where
         Self {
             inner: BufReader::new(inner),
             tx,
+            capacity: None,
         }
     }
 
@@ -39,6 +44,7 @@ where
         Self {
             inner: BufReader::new(inner),
             tx: Sender::new(capacity),
+            capacity: Some(capacity),
         }
     }
 
@@ -63,6 +69,13 @@ where
     /// Send data to the channel until the end of the reader is reached.
     pub async fn send_to_end(&mut self) -> Result<()> {
         loop {
+            // Make sure we don't exceed the capacity of the channel.
+            if let Some(capacity) = self.capacity {
+                if self.tx.len() >= (SLOW_DOWN_CAPACITY_RATIO * capacity as f32) as usize {
+                    yield_now().await;
+                }
+            }
+
             // Read data into a buffer.
             let mut buf = vec![0; 1000];
             let n = self.inner.read(&mut buf).await?;
