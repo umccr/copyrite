@@ -1,7 +1,10 @@
 //! Checksum calculation and logic.
 //!
 
+use crate::error::Result;
+use futures_util::{pin_mut, Stream, StreamExt};
 use sha1::Digest;
+use std::sync::Arc;
 
 /// The checksum calculator.
 pub enum Checksum {
@@ -55,5 +58,19 @@ impl Checksum {
             Checksum::CRC32 => todo!(),
             Checksum::QuickXor => todo!(),
         }
+    }
+
+    /// Generate a checksum from a stream of bytes.
+    pub async fn generate(
+        mut self,
+        stream: impl Stream<Item = Result<Arc<[u8]>>>,
+    ) -> Result<Vec<u8>> {
+        pin_mut!(stream);
+
+        while let Some(chunk) = stream.next().await {
+            self.update(&chunk?);
+        }
+
+        Ok(self.finalize())
     }
 }

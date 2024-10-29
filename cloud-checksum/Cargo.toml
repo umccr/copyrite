@@ -10,8 +10,11 @@ authors.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 thiserror = "1"
 
+# Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "io-std", "fs"] }
 futures-util = "0.3"
+async-stream = "0.3"
+trait-variant = "0.1"
 
 md5 = "0.7"
 sha1 = "0.10"
@@ -20,3 +23,11 @@ hex = "0.4"
 
 # Value parsing
 humantime = "2"
+
+[dev-dependencies]
+rand = "0.8"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "readers"
+harness = false
