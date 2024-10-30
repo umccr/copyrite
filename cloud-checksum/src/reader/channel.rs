@@ -15,6 +15,7 @@ pub struct ChannelReader<R> {
     inner: BufReader<R>,
     tx: Sender<Arc<[u8]>>,
     rx: Receiver<Arc<[u8]>>,
+    chunk_size: usize,
 }
 
 impl<R> ChannelReader<R>
@@ -22,12 +23,13 @@ where
     R: AsyncRead + Unpin,
 {
     /// Create a new shared reader.
-    pub fn new(inner: R) -> Self {
+    pub fn new(inner: R, chunk_size: usize) -> Self {
         let (tx, rx) = unbounded();
         Self {
             inner: BufReader::new(inner),
             tx,
             rx,
+            chunk_size,
         }
     }
 
@@ -54,7 +56,7 @@ where
     pub async fn send_to_end(&mut self) -> Result<()> {
         loop {
             // Read data into a buffer.
-            let mut buf = vec![0; 1000];
+            let mut buf = vec![0; self.chunk_size];
             let n = self.inner.read(&mut buf).await?;
 
             // Stop loop if there is no more data.

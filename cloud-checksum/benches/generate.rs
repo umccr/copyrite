@@ -23,7 +23,7 @@ fn generate_test_file() -> PathBuf {
 
     let file = root.join("data/benchmark_file");
 
-    if file.exists() {
+    if !file.exists() {
         let mut rng = StdRng::seed_from_u64(RANDOM_SEED);
         let mut buf = vec![0; BENCHMARK_FILE_SIZE];
         rng.fill_bytes(&mut buf);
@@ -37,7 +37,7 @@ fn generate_test_file() -> PathBuf {
 }
 
 async fn channel_reader(path: &Path) {
-    let reader = ChannelReader::new(File::open(path).await.unwrap());
+    let reader = ChannelReader::new(File::open(path).await.unwrap(), 1000);
 
     GenerateTask::default()
         .add_generate_tasks(
@@ -58,7 +58,7 @@ async fn channel_reader(path: &Path) {
 fn criterion_benchmark(c: &mut Criterion) {
     let path = generate_test_file();
 
-    c.bench_function("channel reader", |b| {
+    c.bench_function("generate with channel reader", |b| {
         b.to_async(Runtime::new().unwrap())
             .iter(|| channel_reader(&path))
     });
