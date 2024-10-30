@@ -6,7 +6,6 @@ use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use tokio::fs::File;
 use tokio::runtime::Runtime;
 
@@ -38,7 +37,7 @@ fn generate_test_file() -> PathBuf {
 }
 
 async fn channel_reader(path: &Path) {
-    let reader = ChannelReader::new_with_capacity(File::open(path).await.unwrap(), 10000);
+    let reader = ChannelReader::new(File::open(path).await.unwrap());
 
     GenerateTask::default()
         .add_generate_tasks(

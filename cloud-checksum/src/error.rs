@@ -3,7 +3,7 @@
 
 use std::{io, result};
 use thiserror::Error;
-use tokio::sync::broadcast::error::{RecvError, SendError};
+use tokio::sync::broadcast;
 use tokio::task::JoinError;
 
 /// The result type.
@@ -14,6 +14,8 @@ pub type Result<T> = result::Result<T, Error>;
 pub enum Error {
     #[error("in concurrency logic: {0}")]
     ConcurrencyError(String),
+    #[error("in memory logic: {0}")]
+    MemoryError(String),
     #[error("performing IO: {0}")]
     IOError(String),
 }
@@ -24,14 +26,26 @@ impl From<JoinError> for Error {
     }
 }
 
-impl From<RecvError> for Error {
-    fn from(err: RecvError) -> Self {
+impl From<broadcast::error::RecvError> for Error {
+    fn from(err: broadcast::error::RecvError) -> Self {
         Self::ConcurrencyError(err.to_string())
     }
 }
 
-impl<T> From<SendError<T>> for Error {
-    fn from(err: SendError<T>) -> Self {
+impl From<async_channel::RecvError> for Error {
+    fn from(err: async_channel::RecvError) -> Self {
+        Self::ConcurrencyError(err.to_string())
+    }
+}
+
+impl<T> From<broadcast::error::SendError<T>> for Error {
+    fn from(err: broadcast::error::SendError<T>) -> Self {
+        Self::ConcurrencyError(err.to_string())
+    }
+}
+
+impl<T> From<async_channel::SendError<T>> for Error {
+    fn from(err: async_channel::SendError<T>) -> Self {
         Self::ConcurrencyError(err.to_string())
     }
 }

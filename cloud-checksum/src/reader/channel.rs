@@ -3,28 +3,18 @@
 
 use crate::error::Result;
 use crate::reader::SharedReader;
+use async_channel::{unbounded, Receiver, Sender};
 use async_stream::stream;
 use futures_util::Stream;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
-use tokio::sync::broadcast::Sender;
-use tokio::task::yield_now;
-
-const SLOW_DOWN_CAPACITY_RATIO: f32 = 0.9;
-
-/// Message type for passing byte data.
-#[derive(Debug, Clone)]
-pub enum Message {
-    Buf(Arc<[u8]>),
-    Stop,
-}
 
 /// The shared reader implementation using channels.
 #[derive(Debug)]
 pub struct ChannelReader<R> {
     inner: BufReader<R>,
-    tx: Sender<Message>,
-    capacity: Option<usize>,
+    tx: Sender<Arc<[u8]>>,
+    rx: Receiver<Arc<[u8]>>,
 }
 
 impl<R> ChannelReader<R>
@@ -32,19 +22,12 @@ where
     R: AsyncRead + Unpin,
 {
     /// Create a new shared reader.
-    pub fn new(inner: R, tx: Sender<Message>) -> Self {
+    pub fn new(inner: R) -> Self {
+        let (tx, rx) = unbounded();
         Self {
             inner: BufReader::new(inner),
             tx,
-            capacity: None,
-        }
-    }
-
-    pub fn new_with_capacity(inner: R, capacity: usize) -> Self {
-        Self {
-            inner: BufReader::new(inner),
-            tx: Sender::new(capacity),
-            capacity: Some(capacity),
+            rx,
         }
     }
 
@@ -55,13 +38,14 @@ where
 
     /// Subscribe to the channel returning a stream of elements polled from the sender channel
     pub fn subscribe_stream(&self) -> impl Stream<Item = Result<Arc<[u8]>>> {
-        let mut rx = self.tx.subscribe();
+        let rx = self.rx.clone();
+
         stream! {
-            let mut msg = rx.recv().await?;
+            let mut msg = rx.recv().await;
             // Poll the channel until the end is reached.
-            while let Message::Buf(buf) = msg {
+            while let Ok(buf) = msg {
                 yield Ok(buf);
-                msg = rx.recv().await?;
+                msg = rx.recv().await;
             }
         }
     }
@@ -69,26 +53,18 @@ where
     /// Send data to the channel until the end of the reader is reached.
     pub async fn send_to_end(&mut self) -> Result<()> {
         loop {
-            // Make sure we don't exceed the capacity of the channel.
-            if let Some(capacity) = self.capacity {
-                if self.tx.len() >= (SLOW_DOWN_CAPACITY_RATIO * capacity as f32) as usize {
-                    yield_now().await;
-                }
-            }
-
             // Read data into a buffer.
             let mut buf = vec![0; 1000];
             let n = self.inner.read(&mut buf).await?;
 
-            // Send a stop message if there is no more data.
+            // Stop loop if there is no more data.
             if n == 0 {
-                self.tx.send(Message::Stop)?;
                 break;
             }
 
             // Send the buffer. An Arc allows sharing the buffer across multiple receivers without
             // copying it.
-            self.tx.send(Message::Buf(Arc::from(buf)))?;
+            self.tx.send(Arc::from(buf)).await?;
         }
 
         Ok(())
@@ -97,7 +73,7 @@ where
 
 impl<R> SharedReader for ChannelReader<R>
 where
-    R: AsyncRead + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send + Sync + 'static,
 {
     async fn read_task(&mut self) -> Result<()> {
         self.send_to_end().await
