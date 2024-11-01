@@ -17,7 +17,7 @@ pub enum Error {
     #[error("in memory logic: {0}")]
     MemoryError(String),
     #[error("performing IO: {0}")]
-    IOError(String),
+    IOError(#[from] io::Error),
 }
 
 impl From<JoinError> for Error {
@@ -32,8 +32,8 @@ impl From<broadcast::error::RecvError> for Error {
     }
 }
 
-impl From<async_channel::RecvError> for Error {
-    fn from(err: async_channel::RecvError) -> Self {
+impl From<async_broadcast::RecvError> for Error {
+    fn from(err: async_broadcast::RecvError) -> Self {
         Self::ConcurrencyError(err.to_string())
     }
 }
@@ -44,14 +44,8 @@ impl<T> From<broadcast::error::SendError<T>> for Error {
     }
 }
 
-impl<T> From<async_channel::SendError<T>> for Error {
-    fn from(err: async_channel::SendError<T>) -> Self {
+impl<T> From<async_broadcast::SendError<T>> for Error {
+    fn from(err: async_broadcast::SendError<T>) -> Self {
         Self::ConcurrencyError(err.to_string())
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Self {
-        Self::IOError(err.to_string())
     }
 }

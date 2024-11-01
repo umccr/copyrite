@@ -14,8 +14,11 @@ async fn main() -> Result<()> {
     match args.commands {
         Subcommands::Generate { input, .. } => match input {
             None => {
-                let reader =
-                    ChannelReader::new(stdin(), args.optimization.channel_reader_chunk_size);
+                let reader = ChannelReader::new(
+                    stdin(),
+                    args.optimization.channel_capacity,
+                    args.optimization.reader_chunk_size,
+                );
 
                 GenerateTask::default()
                     .add_generate_tasks(args.checksums, &reader, |digest, checksum| {
@@ -28,7 +31,8 @@ async fn main() -> Result<()> {
             Some(input) => {
                 let reader = ChannelReader::new(
                     File::open(input).await?,
-                    args.optimization.channel_reader_chunk_size,
+                    args.optimization.channel_capacity,
+                    args.optimization.reader_chunk_size,
                 );
 
                 GenerateTask::default()

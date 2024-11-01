@@ -37,7 +37,7 @@ fn generate_test_file() -> PathBuf {
 }
 
 async fn channel_reader(path: &Path) {
-    let reader = ChannelReader::new(File::open(path).await.unwrap(), 1000);
+    let reader = ChannelReader::new(File::open(path).await.unwrap(), 1000, 3);
 
     GenerateTask::default()
         .add_generate_tasks(

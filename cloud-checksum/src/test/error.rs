@@ -2,7 +2,7 @@ use std::{io, result};
 use thiserror::Error;
 
 /// The result type for the test module.
-pub type Result<T> = result::Result<T, crate::error::Error>;
+pub type Result<T> = result::Result<T, Error>;
 
 /// Error types for the test module.
 #[derive(Error, Debug)]

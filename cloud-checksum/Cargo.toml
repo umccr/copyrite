@@ -9,13 +9,15 @@ authors.workspace = true
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 thiserror = "1"
+rand = "0.8"
 
 # Async
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "io-std", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "test-util", "io-util", "io-std", "fs"] }
 futures-util = "0.3"
 async-stream = "0.3"
 trait-variant = "0.1"
 async-channel = "2"
+async-broadcast = "0.7"
 
 md-5 = "0.10"
 sha1 = "0.10"
@@ -26,8 +28,8 @@ hex = "0.4"
 humantime = "2"
 
 [dev-dependencies]
-rand = "0.8"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+anyhow = "1"
 
 [[bench]]
 name = "generate"
