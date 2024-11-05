@@ -67,9 +67,7 @@ impl ChecksumCtx {
     ) -> Result<Vec<u8>> {
         pin_mut!(stream);
 
-        println!("update chunk");
         while let Some(chunk) = stream.next().await {
-            println!("update chunk: {:?}", chunk);
             self.update(&chunk?);
         }
 
@@ -87,20 +85,10 @@ pub(crate) mod test {
     use anyhow::Result;
     use hex::encode;
     use tokio::fs::File;
-    use tokio::io::AsyncReadExt;
+    use tokio::join;
 
     #[tokio::test]
     async fn test_md5() -> Result<()> {
-        let mut ctx = md5::Md5::new();
-        let mut data = vec![];
-        let mut f = File::open("../data/test_file").await?;
-        f.read_to_end(&mut data).await?;
-
-        ctx.update(data);
-
-        let d = ctx.finalize();
-        println!("{}", encode(d));
-
         test_checksum(Checksum::MD5, expected_md5_sum()).await
     }
 
@@ -115,7 +103,7 @@ pub(crate) mod test {
     }
 
     pub(crate) fn expected_md5_sum() -> &'static str {
-        "d889d6c2b0bb0efc473ce1c9233a6078"
+        "d93e71879054f205ede90d35c8081ca5"
     }
 
     pub(crate) fn expected_sha1_sum() -> &'static str {
@@ -132,12 +120,12 @@ pub(crate) mod test {
 
         let checksum = ChecksumCtx::from(checksum);
 
-        let stream = reader.to_stream();
-        reader.read_task().await?;
+        let stream = reader.as_stream();
+        let task = tokio::spawn(async move { reader.read_task().await });
 
-        let digest = checksum.generate(stream).await?;
+        let (digest, _) = join!(checksum.generate(stream), task);
 
-        assert_eq!(expected, encode(digest));
+        assert_eq!(expected, encode(digest?));
 
         Ok(())
     }

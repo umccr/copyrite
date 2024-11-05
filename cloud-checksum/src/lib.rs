@@ -76,8 +76,9 @@ pub enum Checksum {
 #[group(required = false)]
 pub struct Optimization {
     /// The capacity of the sender channel for the channel reader. This controls the
-    /// number of elements that can be stored in the reader channel.
-    #[arg(global = true, short = 'p', long, env, default_value_t = 1000)]
+    /// number of elements that can be stored in the reader channel for waiting for checksum
+    /// processes to catch up.
+    #[arg(global = true, short = 'p', long, env, default_value_t = 100)]
     pub channel_capacity: usize,
     /// The chunk size of the channel reader in bytes. This controls how many bytes are read
     /// by the reader before they are passed into the channel.

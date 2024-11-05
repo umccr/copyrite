@@ -14,14 +14,10 @@ async fn main() -> Result<()> {
     match args.commands {
         Subcommands::Generate { input, .. } => match input {
             None => {
-                let reader = ChannelReader::new(
-                    stdin(),
-                    args.optimization.channel_capacity,
-                    args.optimization.reader_chunk_size,
-                );
+                let mut reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
 
                 GenerateTask::default()
-                    .add_generate_tasks(args.checksums, &reader, |digest, checksum| {
+                    .add_generate_tasks(args.checksums, &mut reader, |digest, checksum| {
                         println!("The {:#?} digest is: {}", checksum, encode(digest));
                     })
                     .add_reader_task(reader)?
@@ -29,14 +25,13 @@ async fn main() -> Result<()> {
                     .await?;
             }
             Some(input) => {
-                let reader = ChannelReader::new(
+                let mut reader = ChannelReader::new(
                     File::open(input).await?,
                     args.optimization.channel_capacity,
-                    args.optimization.reader_chunk_size,
                 );
 
                 GenerateTask::default()
-                    .add_generate_tasks(args.checksums, &reader, |digest, checksum| {
+                    .add_generate_tasks(args.checksums, &mut reader, |digest, checksum| {
                         println!("The {:#?} digest is: {}", checksum, encode(digest));
                     })
                     .add_reader_task(reader)?

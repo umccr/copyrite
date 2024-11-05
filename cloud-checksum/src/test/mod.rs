@@ -20,7 +20,7 @@ pub const BENCH_FILE_SIZE: u64 = 10485760;
 pub const BENCH_FILE_NAME: &str = "bench_file";
 
 /// The default test file size. 1 GB.
-pub const TEST_FILE_SIZE: u64 = 10000000;
+pub const TEST_FILE_SIZE: u64 = 1073741824;
 
 /// The default test file name.
 pub const TEST_FILE_NAME: &str = "test_file";

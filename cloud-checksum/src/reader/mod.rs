@@ -17,5 +17,5 @@ pub trait SharedReader {
 
     /// Convert the shared reader into a stream of the resulting bytes of reading
     /// the chunks.
-    fn to_stream(&self) -> impl Stream<Item = Result<Arc<[u8]>>> + 'static;
+    fn as_stream(&mut self) -> impl Stream<Item = Result<Arc<[u8]>>> + 'static;
 }

@@ -1,40 +1,21 @@
 //! A shared reader implementation which makes use on channels.
 //!
 
+use crate::error::Error::ConcurrencyError;
 use crate::error::Result;
-use crate::reader::channel::Message::{Buf, Stop};
 use crate::reader::SharedReader;
-use async_broadcast::{broadcast, Receiver, Sender};
 use async_stream::stream;
 use futures_util::Stream;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
-use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc, Notify, Semaphore};
-use tokio::task::yield_now;
-use tokio::time::sleep;
-
-/// Message type for passing byte data.
-#[derive(Debug, Clone)]
-pub enum Message {
-    Buf(Arc<[u8]>),
-    Stop,
-}
-
-const SLOW_DOWN_CAPACITY_RATIO: f32 = 0.9;
+use tokio::sync::mpsc;
 
 /// The shared reader implementation using channels.
 #[derive(Debug)]
 pub struct ChannelReader<R> {
     inner: BufReader<R>,
-    tx: Option<broadcast::Sender<Message>>,
-    rx: broadcast::Receiver<Message>,
-    back_tx: mpsc::Sender<bool>,
-    back_rx: Option<mpsc::Receiver<bool>>,
-    chunk_size: usize,
-    semaphore: Semaphore,
-    notify: Notify,
+    txs: Vec<mpsc::Sender<Arc<[u8]>>>,
+    capacity: usize,
 }
 
 impl<R> ChannelReader<R>
@@ -42,19 +23,11 @@ where
     R: AsyncRead + Unpin,
 {
     /// Create a new shared reader.
-    pub fn new(inner: R, chunk_size: usize, subscribers: usize) -> Self {
-        let (mut tx, rx) = broadcast::channel(1);
-
-        let (back_tx, back_rx) = mpsc::channel(5);
+    pub fn new(inner: R, capacity: usize) -> Self {
         Self {
             inner: BufReader::new(inner),
-            tx: Some(tx),
-            rx,
-            chunk_size,
-            back_rx: Some(back_rx),
-            back_tx,
-            semaphore: Semaphore::new(1),
-            notify: Notify::new(),
+            txs: vec![],
+            capacity,
         }
     }
 
@@ -64,62 +37,57 @@ where
     }
 
     /// Subscribe to the channel returning a stream of elements polled from the sender channel
-    pub fn subscribe_stream(&self) -> impl Stream<Item = Result<Arc<[u8]>>> {
-        let mut rx = self.tx.as_ref().unwrap().subscribe();
-        let back_tx = self.back_tx.clone();
-        stream! {
-            let mut msg = rx.recv().await?;
+    pub fn subscribe_stream(&mut self) -> impl Stream<Item = Result<Arc<[u8]>>> {
+        let (tx, mut rx) = mpsc::channel(self.capacity);
+        self.txs.push(tx);
 
+        stream! {
+            let mut msg = rx.recv().await;
             // Poll the channel until the end is reached.
-            while let Buf(buf) = msg {
-                back_tx.send(true).await.unwrap();
+            while let Some(buf) = msg {
                 yield Ok(buf);
-                msg = rx.recv().await?;
+                msg = rx.recv().await;
             }
         }
     }
 
     /// Send data to the channel until the end of the reader is reached.
     pub async fn send_to_end(&mut self) -> Result<()> {
-        // Get the sender and drop it at the end of this function to signal the end of the stream.
-        let tx = self
-            .tx
-            .take()
-            .expect("cannot call send_to_end more than once");
-        let back_tx = self.back_tx.send(true).await.unwrap();
-        let mut rx = self.back_rx.take().unwrap();
-
+        let txs = self.txs.drain(..);
         loop {
-            let proceed = rx.recv().await.unwrap();
-
             // Read data into a buffer.
-            let mut buf = vec![0; self.chunk_size];
+            let mut buf = vec![0; 1000];
             let n = self.inner.read(&mut buf).await?;
 
-            // Stop loop if there is no more data.
+            // Send a stop message if there is no more data.
             if n == 0 {
-                tx.send(Stop)?;
                 break;
             }
 
-            // Send the buffer given the number of bytes read. An Arc allows sharing the
-            // buffer across multiple receivers without copying it.
-            tx.send(Buf(Arc::from(&buf[0..n])))?;
+            // Send the buffer. An Arc allows sharing the buffer across multiple receivers without
+            // copying it.
+            let buf: Arc<[u8]> = Arc::from(&buf[0..n]);
+            for tx in txs.as_ref() {
+                tx.send(buf.clone())
+                    .await
+                    .map_err(|err| ConcurrencyError(err.to_string()))?;
+            }
         }
 
+        // Drop senders to signal closed channel.
         Ok(())
     }
 }
 
 impl<R> SharedReader for ChannelReader<R>
 where
-    R: AsyncRead + Unpin + Send + Sync + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
 {
     async fn read_task(&mut self) -> Result<()> {
         self.send_to_end().await
     }
 
-    fn to_stream(&self) -> impl Stream<Item = Result<Arc<[u8]>>> + 'static {
+    fn as_stream(&mut self) -> impl Stream<Item = Result<Arc<[u8]>>> + 'static {
         self.subscribe_stream()
     }
 }
@@ -140,7 +108,7 @@ pub(crate) mod test {
         rng.fill_bytes(&mut data);
 
         let mut reader = channel_reader(Cursor::new(data.clone())).await;
-        let stream = reader.to_stream();
+        let stream = reader.as_stream();
         reader.read_task().await?;
 
         let result: Vec<_> = stream
@@ -162,6 +130,6 @@ pub(crate) mod test {
     where
         R: AsyncRead + Unpin,
     {
-        ChannelReader::new(inner, 1000, 1000)
+        ChannelReader::new(inner, 1000)
     }
 }

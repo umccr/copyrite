@@ -23,14 +23,14 @@ impl GenerateTask {
     pub fn add_generate_task<F>(
         mut self,
         checksum: Checksum,
-        reader: &impl SharedReader,
+        reader: &mut impl SharedReader,
         on_digest: F,
     ) -> Self
     where
         F: FnOnce(Vec<u8>, Checksum) + Send + 'static,
     {
         let ctx = checksum::ChecksumCtx::from(checksum);
-        let stream = reader.to_stream();
+        let stream = reader.as_stream();
         self.tasks.push(tokio::spawn(async move {
             let stream = ctx.generate(stream);
 
@@ -46,7 +46,7 @@ impl GenerateTask {
     pub fn add_generate_tasks<F>(
         mut self,
         checksums: Vec<Checksum>,
-        reader: &impl SharedReader,
+        reader: &mut impl SharedReader,
         on_digest: F,
     ) -> Self
     where
@@ -70,7 +70,7 @@ impl GenerateTask {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::checksum::test::{expected_md5_sum, expected_sha1_sum};
+    use crate::checksum::test::{expected_md5_sum, expected_sha1_sum, expected_sha256_sum};
     use crate::reader::channel::test::channel_reader;
     use crate::test::TestFileBuilder;
     use anyhow::Result;
@@ -80,15 +80,16 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_generate() -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
-        let reader = channel_reader(File::open(test_file).await?).await;
+        let mut reader = channel_reader(File::open(test_file).await?).await;
 
         GenerateTask::default()
             .add_generate_tasks(
-                vec![Checksum::SHA1, Checksum::MD5],
-                &reader,
+                vec![Checksum::SHA1, Checksum::MD5, Checksum::SHA256],
+                &mut reader,
                 |digest, checksum| match checksum {
                     Checksum::MD5 => assert_eq!(encode(digest), expected_md5_sum()),
                     Checksum::SHA1 => assert_eq!(encode(digest), expected_sha1_sum()),
+                    Checksum::SHA256 => assert_eq!(encode(digest), expected_sha256_sum()),
                     _ => {}
                 },
             )
