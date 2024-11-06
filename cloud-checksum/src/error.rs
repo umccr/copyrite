@@ -1,10 +1,9 @@
 //! Error handling logic.
 //!
 
-use std::sync::mpsc;
 use std::{io, result};
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::task::JoinError;
 
 /// The result type.
@@ -27,26 +26,8 @@ impl From<JoinError> for Error {
     }
 }
 
-impl From<broadcast::error::RecvError> for Error {
-    fn from(err: broadcast::error::RecvError) -> Self {
-        Self::ConcurrencyError(err.to_string())
-    }
-}
-
-impl From<mpsc::RecvError> for Error {
-    fn from(err: mpsc::RecvError) -> Self {
-        Self::ConcurrencyError(err.to_string())
-    }
-}
-
-impl<T> From<mpsc::SendError<T>> for Error {
-    fn from(err: mpsc::SendError<T>) -> Self {
-        Self::ConcurrencyError(err.to_string())
-    }
-}
-
-impl<T> From<async_broadcast::SendError<T>> for Error {
-    fn from(err: async_broadcast::SendError<T>) -> Self {
+impl<T> From<mpsc::error::SendError<T>> for Error {
+    fn from(err: mpsc::error::SendError<T>) -> Self {
         Self::ConcurrencyError(err.to_string())
     }
 }

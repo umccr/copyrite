@@ -1,7 +1,6 @@
 //! A shared reader implementation which makes use on channels.
 //!
 
-use crate::error::Error::ConcurrencyError;
 use crate::error::Result;
 use crate::reader::SharedReader;
 use async_stream::stream;
@@ -68,9 +67,7 @@ where
             // copying it.
             let buf: Arc<[u8]> = Arc::from(&buf[0..n]);
             for tx in txs.as_ref() {
-                tx.send(buf.clone())
-                    .await
-                    .map_err(|err| ConcurrencyError(err.to_string()))?;
+                tx.send(buf.clone()).await?;
             }
         }
 

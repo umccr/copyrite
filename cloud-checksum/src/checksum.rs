@@ -67,16 +67,9 @@ impl ChecksumCtx {
     ) -> Result<Vec<u8>> {
         pin_mut!(stream);
 
-        let mut total = 0;
-        let mut size = 0;
-
         while let Some(chunk) = stream.next().await {
-            total += 1;
-            let chunk = chunk?;
-            size += chunk.len();
-            self.update(&chunk);
+            self.update(&chunk?);
         }
-        println!("total chunks, n_chunks: {}, total_size: {}", total, size);
 
         Ok(self.finalize())
     }

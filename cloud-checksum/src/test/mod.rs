@@ -5,11 +5,14 @@
 
 pub mod error;
 
+use crate::test::error::Error::FileGenerate;
 use crate::test::error::Result;
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
 
 const CONSTANT_SEED: u64 = 42;
 
@@ -27,6 +30,11 @@ pub const TEST_FILE_NAME: &str = "test_file";
 
 /// The default directory name.
 pub const DIRECTORY: &str = "data";
+
+/// Keep some state locked behind a mutex for writing files synchronously when running tests in
+/// parallel.
+static GENERATED_FILES: LazyLock<Mutex<HashMap<String, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashMap::default()));
 
 /// Generate large test files in an ignored directory.
 pub struct TestFileBuilder {
@@ -113,6 +121,17 @@ impl TestFileBuilder {
 
     /// Generate the file.
     pub fn generate(&mut self) -> Result<PathBuf> {
+        // The files must be generated synchronously for the whole process because otherwise some
+        // tests might see an incomplete file before it is written. Keep global static state is
+        // probably the simplest way to accomplish this.
+        let mut files = GENERATED_FILES
+            .lock()
+            .map_err(|err| FileGenerate(err.to_string()))?;
+
+        if files.contains_key(&self.file_name) {
+            return Ok(files[&self.file_name].clone());
+        }
+
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -134,6 +153,8 @@ impl TestFileBuilder {
 
             fs::write(&file, buf)?;
         }
+
+        files.insert(self.file_name.to_string(), file.clone());
 
         Ok(file)
     }
