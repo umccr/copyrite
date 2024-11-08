@@ -17,13 +17,15 @@ futures-util = "0.3"
 async-stream = "0.3"
 trait-variant = "0.1"
 
+# Checksums
 md-5 = "0.10"
 sha1 = "0.10"
 sha2 = "0.10"
-hex = "0.4"
+crc32fast = "1"
 
 # Value parsing
 humantime = "2"
+hex = "0.4"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }

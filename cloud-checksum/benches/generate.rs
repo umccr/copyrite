@@ -1,7 +1,7 @@
 use cloud_checksum::reader::channel::ChannelReader;
 use cloud_checksum::task::generate::GenerateTask;
 use cloud_checksum::test::TestFileBuilder;
-use cloud_checksum::Checksum;
+use cloud_checksum::{Checksum, Endianness};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::path::Path;
 use tokio::fs::File;
@@ -12,7 +12,13 @@ async fn channel_reader(path: &Path) {
 
     GenerateTask::default()
         .add_generate_tasks(
-            vec![Checksum::MD5, Checksum::SHA1, Checksum::SHA256],
+            vec![
+                Checksum::MD5,
+                Checksum::SHA1,
+                Checksum::SHA256,
+                Checksum::CRC32,
+            ],
+            Endianness::BigEndian,
             &mut reader,
             |digest, checksum| {
                 black_box(digest);

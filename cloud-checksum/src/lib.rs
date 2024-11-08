@@ -24,6 +24,11 @@ pub struct Commands {
     #[arg(global = true, short, long, env)]
     pub timeout: Option<Duration>,
 
+    /// The endianness to use for CRC-based checksums. This only affects CRC-based checksums.
+    /// The default uses big-endian outputs, which matches cloud providers and other CLI tools.
+    #[arg(global = true, short, long, env, default_value = "big-endian")]
+    pub endianness: Endianness,
+
     /// The subcommands for cloud-checksum.
     #[command(subcommand)]
     pub commands: Subcommands,
@@ -69,6 +74,15 @@ pub enum Checksum {
     CRC32,
     /// Calculate the QuickXor checksum.
     QuickXor,
+}
+
+/// The endianness to use for CRC-based checksums.
+#[derive(Debug, Clone, ValueEnum, PartialEq, Eq, PartialOrd, Ord, Copy)]
+pub enum Endianness {
+    /// Use little-endian representation.
+    LittleEndian,
+    /// Use big-endian representation.
+    BigEndian,
 }
 
 /// Commands related to optimizing IO and CPU tasks.

@@ -2,6 +2,7 @@
 //!
 
 use crate::error::Result;
+use crate::{Checksum, Endianness};
 use futures_util::{pin_mut, Stream, StreamExt};
 use sha1::Digest;
 use std::sync::Arc;
@@ -17,25 +18,33 @@ pub enum ChecksumCtx {
     /// Calculate the AWS ETag.
     AWSETag,
     /// Calculate a CRC32.
-    CRC32,
+    CRC32(crc32fast::Hasher, Endianness),
     /// Calculate the QuickXor checksum.
     QuickXor,
 }
 
-impl From<crate::Checksum> for ChecksumCtx {
-    fn from(checksum: crate::Checksum) -> Self {
+impl From<Checksum> for ChecksumCtx {
+    fn from(checksum: Checksum) -> Self {
         match checksum {
-            crate::Checksum::MD5 => Self::MD5(md5::Md5::new()),
-            crate::Checksum::SHA1 => Self::SHA1(sha1::Sha1::new()),
-            crate::Checksum::SHA256 => Self::SHA256(sha2::Sha256::new()),
-            crate::Checksum::AWSETag => todo!(),
-            crate::Checksum::CRC32 => todo!(),
-            crate::Checksum::QuickXor => todo!(),
+            Checksum::MD5 => Self::MD5(md5::Md5::new()),
+            Checksum::SHA1 => Self::SHA1(sha1::Sha1::new()),
+            Checksum::SHA256 => Self::SHA256(sha2::Sha256::new()),
+            Checksum::AWSETag => todo!(),
+            Checksum::CRC32 => Self::CRC32(crc32fast::Hasher::new(), Endianness::BigEndian),
+            Checksum::QuickXor => todo!(),
         }
     }
 }
 
 impl ChecksumCtx {
+    /// Set the endianness if this is a CRC-based checksum.
+    pub fn with_endianness(self, endianness: Endianness) -> Self {
+        match self {
+            Self::CRC32(ctx, _) => Self::CRC32(ctx, endianness),
+            checksum => checksum,
+        }
+    }
+
     /// Update a checksum with some data.
     pub fn update(&mut self, data: &[u8]) {
         match self {
@@ -43,7 +52,7 @@ impl ChecksumCtx {
             ChecksumCtx::SHA1(ctx) => ctx.update(data),
             ChecksumCtx::SHA256(ctx) => ctx.update(data),
             ChecksumCtx::AWSETag => todo!(),
-            ChecksumCtx::CRC32 => todo!(),
+            ChecksumCtx::CRC32(ctx, _) => ctx.update(data),
             ChecksumCtx::QuickXor => todo!(),
         }
     }
@@ -55,7 +64,10 @@ impl ChecksumCtx {
             ChecksumCtx::SHA1(ctx) => ctx.finalize().to_vec(),
             ChecksumCtx::SHA256(ctx) => ctx.finalize().to_vec(),
             ChecksumCtx::AWSETag => todo!(),
-            ChecksumCtx::CRC32 => todo!(),
+            ChecksumCtx::CRC32(ctx, endianness) => match endianness {
+                Endianness::LittleEndian => ctx.finalize().to_le_bytes().to_vec(),
+                Endianness::BigEndian => ctx.finalize().to_be_bytes().to_vec(),
+            },
             ChecksumCtx::QuickXor => todo!(),
         }
     }
@@ -89,17 +101,37 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn test_md5() -> Result<()> {
-        test_checksum(Checksum::MD5, expected_md5_sum()).await
+        test_checksum(Checksum::MD5, Endianness::BigEndian, expected_md5_sum()).await
     }
 
     #[tokio::test]
     async fn test_sha1() -> Result<()> {
-        test_checksum(Checksum::SHA1, expected_sha1_sum()).await
+        test_checksum(Checksum::SHA1, Endianness::BigEndian, expected_sha1_sum()).await
     }
 
     #[tokio::test]
     async fn test_sha256() -> Result<()> {
-        test_checksum(Checksum::SHA256, expected_sha256_sum()).await
+        test_checksum(
+            Checksum::SHA256,
+            Endianness::BigEndian,
+            expected_sha256_sum(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_crc32_be() -> Result<()> {
+        test_checksum(Checksum::CRC32, Endianness::BigEndian, expected_crc32_be()).await
+    }
+
+    #[tokio::test]
+    async fn test_crc32_le() -> Result<()> {
+        test_checksum(
+            Checksum::CRC32,
+            Endianness::LittleEndian,
+            expected_crc32_le(),
+        )
+        .await
     }
 
     pub(crate) fn expected_md5_sum() -> &'static str {
@@ -114,11 +146,23 @@ pub(crate) mod test {
         "29ffbd53cbe43179ab2fa62dbd958c0ec30b340ab50ce7c785e8a7a4b4771e39"
     }
 
-    async fn test_checksum(checksum: Checksum, expected: &str) -> Result<()> {
+    pub(crate) fn expected_crc32_be() -> &'static str {
+        "3320f39e"
+    }
+
+    pub(crate) fn expected_crc32_le() -> &'static str {
+        "9ef32033"
+    }
+
+    async fn test_checksum(
+        checksum: Checksum,
+        endianness: Endianness,
+        expected: &str,
+    ) -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
         let mut reader = channel_reader(File::open(test_file).await?).await;
 
-        let checksum = ChecksumCtx::from(checksum);
+        let checksum = ChecksumCtx::from(checksum).with_endianness(endianness);
 
         let stream = reader.as_stream();
         let task = tokio::spawn(async move { reader.read_task().await });
