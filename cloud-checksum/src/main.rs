@@ -18,8 +18,8 @@ async fn main() -> Result<()> {
 
                 GenerateTask::default()
                     .add_generate_tasks(
-                        args.checksums,
-                        args.endianness,
+                        args.checksum,
+                        args.crc32_endianness,
                         &mut reader,
                         |digest, checksum| {
                             println!("The {:#?} digest is: {}", checksum, encode(digest));
@@ -37,8 +37,8 @@ async fn main() -> Result<()> {
 
                 GenerateTask::default()
                     .add_generate_tasks(
-                        args.checksums,
-                        args.endianness,
+                        args.checksum,
+                        args.crc32_endianness,
                         &mut reader,
                         |digest, checksum| {
                             println!("The {:#?} digest is: {}", checksum, encode(digest));

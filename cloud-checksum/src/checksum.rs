@@ -3,6 +3,7 @@
 
 use crate::error::Result;
 use crate::{Checksum, Endianness};
+use crc32c::crc32c_append;
 use futures_util::{pin_mut, Stream, StreamExt};
 use sha1::Digest;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ pub enum ChecksumCtx {
     AWSETag,
     /// Calculate a CRC32.
     CRC32(crc32fast::Hasher, Endianness),
+    CRC32C(u32, Endianness),
     /// Calculate the QuickXor checksum.
     QuickXor,
 }
@@ -31,6 +33,7 @@ impl From<Checksum> for ChecksumCtx {
             Checksum::SHA256 => Self::SHA256(sha2::Sha256::new()),
             Checksum::AWSETag => todo!(),
             Checksum::CRC32 => Self::CRC32(crc32fast::Hasher::new(), Endianness::BigEndian),
+            Checksum::CRC32C => Self::CRC32C(0, Endianness::BigEndian),
             Checksum::QuickXor => todo!(),
         }
     }
@@ -41,6 +44,7 @@ impl ChecksumCtx {
     pub fn with_endianness(self, endianness: Endianness) -> Self {
         match self {
             Self::CRC32(ctx, _) => Self::CRC32(ctx, endianness),
+            Self::CRC32C(ctx, _) => Self::CRC32C(ctx, endianness),
             checksum => checksum,
         }
     }
@@ -53,6 +57,7 @@ impl ChecksumCtx {
             ChecksumCtx::SHA256(ctx) => ctx.update(data),
             ChecksumCtx::AWSETag => todo!(),
             ChecksumCtx::CRC32(ctx, _) => ctx.update(data),
+            ChecksumCtx::CRC32C(ctx, _) => *ctx = crc32c_append(*ctx, data),
             ChecksumCtx::QuickXor => todo!(),
         }
     }
@@ -67,6 +72,10 @@ impl ChecksumCtx {
             ChecksumCtx::CRC32(ctx, endianness) => match endianness {
                 Endianness::LittleEndian => ctx.finalize().to_le_bytes().to_vec(),
                 Endianness::BigEndian => ctx.finalize().to_be_bytes().to_vec(),
+            },
+            ChecksumCtx::CRC32C(ctx, endianness) => match endianness {
+                Endianness::LittleEndian => ctx.to_le_bytes().to_vec(),
+                Endianness::BigEndian => ctx.to_be_bytes().to_vec(),
             },
             ChecksumCtx::QuickXor => todo!(),
         }
@@ -134,6 +143,26 @@ pub(crate) mod test {
         .await
     }
 
+    #[tokio::test]
+    async fn test_crc32c_be() -> Result<()> {
+        test_checksum(
+            Checksum::CRC32C,
+            Endianness::BigEndian,
+            expected_crc32c_be(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_crc32c_le() -> Result<()> {
+        test_checksum(
+            Checksum::CRC32C,
+            Endianness::LittleEndian,
+            expected_crc32c_le(),
+        )
+        .await
+    }
+
     pub(crate) fn expected_md5_sum() -> &'static str {
         "d93e71879054f205ede90d35c8081ca5"
     }
@@ -152,6 +181,14 @@ pub(crate) mod test {
 
     pub(crate) fn expected_crc32_le() -> &'static str {
         "9ef32033"
+    }
+
+    pub(crate) fn expected_crc32c_be() -> &'static str {
+        "4920106a"
+    }
+
+    pub(crate) fn expected_crc32c_le() -> &'static str {
+        "6a102049"
     }
 
     async fn test_checksum(

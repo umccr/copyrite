@@ -18,7 +18,7 @@ async fn channel_reader(path: &Path) {
                 Checksum::SHA256,
                 Checksum::CRC32,
             ],
-            Endianness::BigEndian,
+            vec![Endianness::BigEndian],
             &mut reader,
             |digest, checksum| {
                 black_box(digest);

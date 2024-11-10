@@ -47,7 +47,7 @@ impl GenerateTask {
     pub fn add_generate_tasks<F>(
         mut self,
         checksums: Vec<Checksum>,
-        endianness: Endianness,
+        endiannesses: Vec<Endianness>,
         reader: &mut impl SharedReader,
         on_digest: F,
     ) -> Self
@@ -55,7 +55,9 @@ impl GenerateTask {
         F: FnOnce(Vec<u8>, Checksum) + Clone + Send + 'static,
     {
         for checksum in checksums {
-            self = self.add_generate_task(checksum, endianness, reader, on_digest.clone());
+            for endianness in endiannesses.clone() {
+                self = self.add_generate_task(checksum, endianness, reader, on_digest.clone());
+            }
         }
         self
     }
@@ -89,7 +91,7 @@ pub(crate) mod test {
         GenerateTask::default()
             .add_generate_tasks(
                 vec![Checksum::SHA1, Checksum::MD5, Checksum::SHA256],
-                Endianness::BigEndian,
+                vec![Endianness::BigEndian],
                 &mut reader,
                 |digest, checksum| match checksum {
                     Checksum::MD5 => assert_eq!(encode(digest), expected_md5_sum()),

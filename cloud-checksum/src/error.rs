@@ -18,6 +18,8 @@ pub enum Error {
     MemoryError(String),
     #[error("performing IO: {0}")]
     IOError(#[from] io::Error),
+    #[error("parsing arguments: {0}")]
+    ParseError(String),
 }
 
 impl From<JoinError> for Error {
