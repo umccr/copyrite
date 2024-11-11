@@ -33,3 +33,9 @@ impl<T> From<mpsc::error::SendError<T>> for Error {
         Self::ConcurrencyError(err.to_string())
     }
 }
+
+impl From<clap::Error> for Error {
+    fn from(err: clap::Error) -> Self {
+        Self::ParseError(err.to_string())
+    }
+}

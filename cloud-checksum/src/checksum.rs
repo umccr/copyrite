@@ -1,14 +1,17 @@
 //! Checksum calculation and logic.
 //!
 
-use crate::error::Result;
+use crate::error::Error::ParseError;
+use crate::error::{Error, Result};
 use crate::{Checksum, Endianness};
 use crc32c::crc32c_append;
 use futures_util::{pin_mut, Stream, StreamExt};
 use sha1::Digest;
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// The checksum calculator.
+#[derive(Debug, Clone)]
 pub enum ChecksumCtx {
     /// Calculate the MD5 checksum.
     MD5(md5::Md5),
@@ -25,9 +28,17 @@ pub enum ChecksumCtx {
     QuickXor,
 }
 
-impl From<Checksum> for ChecksumCtx {
-    fn from(checksum: Checksum) -> Self {
-        match checksum {
+impl FromStr for ChecksumCtx {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let ctx = Self::parse_ctx_endianness(s)?;
+        if let Some(ctx) = ctx {
+            return Ok(ctx);
+        }
+
+        let checksum = <Checksum as FromStr>::from_str(s)?;
+        let ctx = match checksum {
             Checksum::MD5 => Self::MD5(md5::Md5::new()),
             Checksum::SHA1 => Self::SHA1(sha1::Sha1::new()),
             Checksum::SHA256 => Self::SHA256(sha2::Sha256::new()),
@@ -35,11 +46,51 @@ impl From<Checksum> for ChecksumCtx {
             Checksum::CRC32 => Self::CRC32(crc32fast::Hasher::new(), Endianness::BigEndian),
             Checksum::CRC32C => Self::CRC32C(0, Endianness::BigEndian),
             Checksum::QuickXor => todo!(),
+        };
+        Ok(ctx)
+    }
+}
+
+impl From<&ChecksumCtx> for Checksum {
+    fn from(checksum: &ChecksumCtx) -> Self {
+        match checksum {
+            ChecksumCtx::MD5(_) => Self::MD5,
+            ChecksumCtx::SHA1(_) => Self::SHA1,
+            ChecksumCtx::SHA256(_) => Self::SHA256,
+            ChecksumCtx::AWSETag => Self::AWSETag,
+            ChecksumCtx::CRC32(_, _) => Self::CRC32,
+            ChecksumCtx::CRC32C(_, _) => Self::CRC32C,
+            ChecksumCtx::QuickXor => Self::QuickXor,
         }
     }
 }
 
 impl ChecksumCtx {
+    /// Parse into a `ChecksumCtx` for values that use endianness.
+    pub fn parse_ctx_endianness(s: &str) -> Result<Option<Self>> {
+        if let Some(s) = s.strip_suffix("-le") {
+            let ctx = match <Checksum as FromStr>::from_str(s)? {
+                Checksum::CRC32 => {
+                    ChecksumCtx::CRC32(crc32fast::Hasher::new(), Endianness::LittleEndian)
+                }
+                Checksum::CRC32C => ChecksumCtx::CRC32C(0, Endianness::LittleEndian),
+                _ => return Err(ParseError("invalid suffix -le for checksum".to_string())),
+            };
+            Ok(Some(ctx))
+        } else if let Some(s) = s.strip_suffix("-be") {
+            let ctx = match <Checksum as FromStr>::from_str(s)? {
+                Checksum::CRC32 => {
+                    ChecksumCtx::CRC32(crc32fast::Hasher::new(), Endianness::BigEndian)
+                }
+                Checksum::CRC32C => ChecksumCtx::CRC32C(0, Endianness::BigEndian),
+                _ => return Err(ParseError("invalid suffix -be for checksum".to_string())),
+            };
+            Ok(Some(ctx))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Set the endianness if this is a CRC-based checksum.
     pub fn with_endianness(self, endianness: Endianness) -> Self {
         match self {
@@ -102,7 +153,6 @@ pub(crate) mod test {
     use crate::reader::channel::test::channel_reader;
     use crate::reader::SharedReader;
     use crate::test::TestFileBuilder;
-    use crate::Checksum;
     use anyhow::Result;
     use hex::encode;
     use tokio::fs::File;
@@ -110,57 +160,37 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn test_md5() -> Result<()> {
-        test_checksum(Checksum::MD5, Endianness::BigEndian, expected_md5_sum()).await
+        test_checksum("md5", expected_md5_sum()).await
     }
 
     #[tokio::test]
     async fn test_sha1() -> Result<()> {
-        test_checksum(Checksum::SHA1, Endianness::BigEndian, expected_sha1_sum()).await
+        test_checksum("sha1", expected_sha1_sum()).await
     }
 
     #[tokio::test]
     async fn test_sha256() -> Result<()> {
-        test_checksum(
-            Checksum::SHA256,
-            Endianness::BigEndian,
-            expected_sha256_sum(),
-        )
-        .await
+        test_checksum("sha256", expected_sha256_sum()).await
     }
 
     #[tokio::test]
     async fn test_crc32_be() -> Result<()> {
-        test_checksum(Checksum::CRC32, Endianness::BigEndian, expected_crc32_be()).await
+        test_checksum("crc32", expected_crc32_be()).await
     }
 
     #[tokio::test]
     async fn test_crc32_le() -> Result<()> {
-        test_checksum(
-            Checksum::CRC32,
-            Endianness::LittleEndian,
-            expected_crc32_le(),
-        )
-        .await
+        test_checksum("crc32-le", expected_crc32_le()).await
     }
 
     #[tokio::test]
     async fn test_crc32c_be() -> Result<()> {
-        test_checksum(
-            Checksum::CRC32C,
-            Endianness::BigEndian,
-            expected_crc32c_be(),
-        )
-        .await
+        test_checksum("crc32c", expected_crc32c_be()).await
     }
 
     #[tokio::test]
     async fn test_crc32c_le() -> Result<()> {
-        test_checksum(
-            Checksum::CRC32C,
-            Endianness::LittleEndian,
-            expected_crc32c_le(),
-        )
-        .await
+        test_checksum("crc32c-le", expected_crc32c_le()).await
     }
 
     pub(crate) fn expected_md5_sum() -> &'static str {
@@ -191,15 +221,11 @@ pub(crate) mod test {
         "6a102049"
     }
 
-    async fn test_checksum(
-        checksum: Checksum,
-        endianness: Endianness,
-        expected: &str,
-    ) -> Result<()> {
+    async fn test_checksum(checksum: &str, expected: &str) -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
         let mut reader = channel_reader(File::open(test_file).await?).await;
 
-        let checksum = ChecksumCtx::from(checksum).with_endianness(endianness);
+        let checksum = ChecksumCtx::from_str(checksum)?;
 
         let stream = reader.as_stream();
         let task = tokio::spawn(async move { reader.read_task().await });

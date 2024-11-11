@@ -8,10 +8,13 @@ pub mod task;
 #[doc(hidden)]
 pub mod test;
 
+use crate::checksum::ChecksumCtx;
+use crate::error::Error;
 use crate::error::Error::ParseError;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::Duration;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 /// Args for the checksum-cloud CLI.
 #[derive(Parser, Debug)]
@@ -20,36 +23,12 @@ pub struct Commands {
     /// Checksums to use. Can be specified multiple times or comma-separated.
     /// At least one checksum is required.
     #[arg(value_delimiter = ',', required = true, short, long)]
-    pub checksum: Vec<Checksum>,
+    pub checksum: Vec<ChecksumCtx>,
 
     /// The amount of time to calculate checksums for. Once this timeout is reached the partial
     /// checksum will be saved to the partial checksum file.
     #[arg(global = true, short, long, env)]
     pub timeout: Option<Duration>,
-
-    /// The endianness to use for CRC32 checksums. The default uses big-endian outputs, which
-    /// matches cloud providers and other CLI tools. Multiple values can be specified to output
-    /// multiple formats.
-    #[arg(
-        global = true,
-        value_delimiter = ',',
-        long,
-        env,
-        default_value = "big-endian"
-    )]
-    pub crc32_endianness: Vec<Endianness>,
-
-    /// The endianness to use for CRC32C checksums. The default uses big-endian outputs, which
-    /// matches cloud providers and other CLI tools. Multiple values can be specified to output
-    /// multiple formats.
-    #[arg(
-        global = true,
-        value_delimiter = ',',
-        long,
-        env,
-        default_value = "big-endian"
-    )]
-    pub crc32c_endianness: Vec<Endianness>,
 
     /// The chunk sizes to compute for AWS etags. Specify multiple chunk sizes to compute multiple
     /// etags. The default computes an etag with an 8MiB chunk size.
@@ -100,6 +79,7 @@ pub enum Checksum {
     /// Calculate the SHA256 checksum.
     SHA256,
     /// Calculate the AWS ETag.
+    #[value(name = "aws-etag")]
     AWSETag,
     /// Calculate a CRC32.
     CRC32,
@@ -107,6 +87,14 @@ pub enum Checksum {
     CRC32C,
     /// Calculate the QuickXor checksum.
     QuickXor,
+}
+
+impl FromStr for Checksum {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        <Checksum as ValueEnum>::from_str(s, true).map_err(ParseError)
+    }
 }
 
 /// The endianness to use for CRC-based checksums.

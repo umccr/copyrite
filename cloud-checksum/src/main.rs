@@ -17,14 +17,9 @@ async fn main() -> Result<()> {
                 let mut reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
 
                 GenerateTask::default()
-                    .add_generate_tasks(
-                        args.checksum,
-                        args.crc32_endianness,
-                        &mut reader,
-                        |digest, checksum| {
-                            println!("The {:#?} digest is: {}", checksum, encode(digest));
-                        },
-                    )
+                    .add_generate_tasks(args.checksum, &mut reader, |digest, checksum| {
+                        println!("The {:#?} digest is: {}", checksum, encode(digest));
+                    })
                     .add_reader_task(reader)?
                     .run()
                     .await?;
@@ -36,14 +31,9 @@ async fn main() -> Result<()> {
                 );
 
                 GenerateTask::default()
-                    .add_generate_tasks(
-                        args.checksum,
-                        args.crc32_endianness,
-                        &mut reader,
-                        |digest, checksum| {
-                            println!("The {:#?} digest is: {}", checksum, encode(digest));
-                        },
-                    )
+                    .add_generate_tasks(args.checksum, &mut reader, |digest, checksum| {
+                        println!("The {:#?} digest is: {}", checksum, encode(digest));
+                    })
                     .add_reader_task(reader)?
                     .run()
                     .await?;
