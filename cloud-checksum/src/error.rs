@@ -18,6 +18,8 @@ pub enum Error {
     MemoryError(String),
     #[error("performing IO: {0}")]
     IOError(#[from] io::Error),
+    #[error("parsing arguments: {0}")]
+    ParseError(String),
 }
 
 impl From<JoinError> for Error {
@@ -29,5 +31,11 @@ impl From<JoinError> for Error {
 impl<T> From<mpsc::error::SendError<T>> for Error {
     fn from(err: mpsc::error::SendError<T>) -> Self {
         Self::ConcurrencyError(err.to_string())
+    }
+}
+
+impl From<clap::Error> for Error {
+    fn from(err: clap::Error) -> Self {
+        Self::ParseError(err.to_string())
     }
 }

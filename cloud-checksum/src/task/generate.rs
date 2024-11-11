@@ -1,9 +1,10 @@
 //! Generate checksums for files.
 //!
 
+use crate::checksum::ChecksumCtx;
 use crate::error::Result;
 use crate::reader::SharedReader;
-use crate::{checksum, Checksum};
+use crate::Checksum;
 use futures_util::future::join_all;
 use tokio::task::JoinHandle;
 
@@ -22,16 +23,16 @@ impl GenerateTask {
 
     pub fn add_generate_task<F>(
         mut self,
-        checksum: Checksum,
+        ctx: ChecksumCtx,
         reader: &mut impl SharedReader,
         on_digest: F,
     ) -> Self
     where
         F: FnOnce(Vec<u8>, Checksum) + Send + 'static,
     {
-        let ctx = checksum::ChecksumCtx::from(checksum);
         let stream = reader.as_stream();
         self.tasks.push(tokio::spawn(async move {
+            let checksum = Checksum::from(&ctx);
             let stream = ctx.generate(stream);
 
             let digest = stream.await?;
@@ -45,7 +46,7 @@ impl GenerateTask {
 
     pub fn add_generate_tasks<F>(
         mut self,
-        checksums: Vec<Checksum>,
+        checksums: Vec<ChecksumCtx>,
         reader: &mut impl SharedReader,
         on_digest: F,
     ) -> Self
@@ -70,7 +71,9 @@ impl GenerateTask {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::checksum::test::{expected_md5_sum, expected_sha1_sum, expected_sha256_sum};
+    use crate::checksum::test::{
+        expected_crc32_be, expected_md5_sum, expected_sha1_sum, expected_sha256_sum,
+    };
     use crate::reader::channel::test::channel_reader;
     use crate::test::TestFileBuilder;
     use anyhow::Result;
@@ -84,12 +87,19 @@ pub(crate) mod test {
 
         GenerateTask::default()
             .add_generate_tasks(
-                vec![Checksum::SHA1, Checksum::MD5, Checksum::SHA256],
+                vec![
+                    "sha1".parse()?,
+                    "sha256".parse()?,
+                    "md5".parse()?,
+                    "crc32".parse()?,
+                    "crc32c".parse()?,
+                ],
                 &mut reader,
                 |digest, checksum| match checksum {
                     Checksum::MD5 => assert_eq!(encode(digest), expected_md5_sum()),
                     Checksum::SHA1 => assert_eq!(encode(digest), expected_sha1_sum()),
                     Checksum::SHA256 => assert_eq!(encode(digest), expected_sha256_sum()),
+                    Checksum::CRC32 => assert_eq!(encode(digest), expected_crc32_be()),
                     _ => {}
                 },
             )

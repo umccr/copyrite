@@ -1,7 +1,6 @@
 use cloud_checksum::reader::channel::ChannelReader;
 use cloud_checksum::task::generate::GenerateTask;
 use cloud_checksum::test::TestFileBuilder;
-use cloud_checksum::Checksum;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::path::Path;
 use tokio::fs::File;
@@ -12,7 +11,13 @@ async fn channel_reader(path: &Path) {
 
     GenerateTask::default()
         .add_generate_tasks(
-            vec![Checksum::MD5, Checksum::SHA1, Checksum::SHA256],
+            vec![
+                "sha1".parse().unwrap(),
+                "sha256".parse().unwrap(),
+                "md5".parse().unwrap(),
+                "crc32".parse().unwrap(),
+                "crc32c".parse().unwrap(),
+            ],
             &mut reader,
             |digest, checksum| {
                 black_box(digest);

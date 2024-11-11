@@ -127,6 +127,6 @@ pub(crate) mod test {
     where
         R: AsyncRead + Unpin,
     {
-        ChannelReader::new(inner, 1000)
+        ChannelReader::new(inner, 1073741825)
     }
 }
