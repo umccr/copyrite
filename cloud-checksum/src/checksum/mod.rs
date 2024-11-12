@@ -1,6 +1,8 @@
 //! Checksum calculation and logic.
 //!
 
+pub mod file;
+
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use crate::{Checksum, Endianness};
