@@ -31,10 +31,12 @@ pub struct Commands {
     #[arg(global = true, short, long, env)]
     pub timeout: Option<Duration>,
 
-    /// The chunk sizes to compute for AWS etags. Specify multiple chunk sizes to compute multiple
-    /// etags. The default computes an etag with an 8MiB chunk size.
-    #[arg(global = true, value_delimiter = ',', value_parser = parse_size, long, env, default_value = "8mib")]
-    pub aws_etag_chunk_sizes: Vec<u64>,
+    /// Overwrite the output file. By default, only checksums that are missing are computed and
+    /// added to an existing output file. Any existing checksums are preserved (even if not
+    /// specified in --checksums). This option allows overwriting any existing output file. This
+    /// will recompute all checksums specified.
+    #[arg(global = true, short, long, env)]
+    pub force_overwrite: bool,
 
     /// The subcommands for cloud-checksum.
     #[command(subcommand)]
@@ -43,10 +45,6 @@ pub struct Commands {
     /// Commands related to optimizing IO and CPU tasks.
     #[command(flatten)]
     pub optimization: Optimization,
-}
-
-fn parse_size(s: &str) -> Result<u64> {
-    parse_size::parse_size(s).map_err(|err| ParseError(err.to_string()))
 }
 
 /// The subcommands for cloud-checksum.

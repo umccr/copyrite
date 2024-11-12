@@ -17,20 +17,48 @@ pub enum Task {
     ChecksumTask((ChecksumCtx, Vec<u8>)),
 }
 
-/// Execute the generate checksums tasks.
+/// Build a generate task.
 #[derive(Debug, Default)]
-pub struct GenerateTask {
-    tasks: Vec<JoinHandle<Result<Task>>>,
+pub struct GenerateTaskBuilder {
     input_file_name: String,
+    overwrite: bool,
 }
 
-impl GenerateTask {
+impl GenerateTaskBuilder {
     /// Set the input file name.
     pub fn with_input_file_name(mut self, input_file_name: String) -> Self {
         self.input_file_name = input_file_name;
         self
     }
 
+    /// Set whether to overwrite existing files.
+    pub fn with_overwrite(mut self, overwrite: bool) -> Self {
+        self.overwrite = overwrite;
+        self
+    }
+
+    /// Build a generate task.
+    pub async fn build(self) -> Result<GenerateTask> {
+        let existing_output = OutputFile::read_from(&self.input_file_name).await;
+        Ok(GenerateTask {
+            input_file_name: self.input_file_name,
+            overwrite: self.overwrite,
+            existing_output: existing_output.ok(),
+            ..Default::default()
+        })
+    }
+}
+
+/// Execute the generate checksums tasks.
+#[derive(Debug, Default)]
+pub struct GenerateTask {
+    tasks: Vec<JoinHandle<Result<Task>>>,
+    input_file_name: String,
+    overwrite: bool,
+    existing_output: Option<OutputFile>,
+}
+
+impl GenerateTask {
     /// Spawns a task which reads from the buffered reader.
     pub fn add_reader_task(mut self, mut reader: impl SharedReader + 'static) -> Result<Self> {
         self.tasks.push(tokio::spawn(async move {
@@ -64,7 +92,14 @@ impl GenerateTask {
         reader: &mut impl SharedReader,
     ) -> Self {
         for checksum in checksums {
-            self = self.add_generate_task(checksum, reader);
+            if self.overwrite
+                || !self
+                    .existing_output
+                    .as_ref()
+                    .is_some_and(|file| file.checksums.contains_key(&checksum.to_string()))
+            {
+                self = self.add_generate_task(checksum, reader);
+            }
         }
         self
     }
@@ -98,7 +133,13 @@ impl GenerateTask {
 
         let checksums = HashMap::from_iter(checksums);
 
-        Ok(OutputFile::new(self.input_file_name, file_size, checksums))
+        let new_file = OutputFile::new(self.input_file_name, file_size, checksums);
+        let output = match self.existing_output {
+            Some(file) if !self.overwrite => file.merge(new_file),
+            _ => new_file,
+        };
+
+        Ok(output)
     }
 }
 
@@ -121,8 +162,10 @@ pub(crate) mod test {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
         let mut reader = channel_reader(File::open(test_file).await?).await;
 
-        let file = GenerateTask::default()
+        let file = GenerateTaskBuilder::default()
             .with_input_file_name("name".to_string())
+            .build()
+            .await?
             .add_generate_tasks(
                 vec![
                     "sha1".parse()?,
