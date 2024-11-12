@@ -9,6 +9,7 @@ use tokio::fs;
 
 /// A file containing multiple checksums.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
 pub struct OutputFile {
     pub(crate) name: String,
     pub(crate) size: u64,
@@ -58,6 +59,7 @@ impl OutputFile {
 
 /// The output of a checksum.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
 pub struct OutputChecksum {
     pub(crate) checksum: String,
     pub(crate) part_size: Option<u64>,
@@ -178,8 +180,8 @@ pub(crate) mod test {
             "size": 123,
             "aws-etag": {
                 "checksum": expected_md5,
-                "part_size": 1,
-                "part_checksums": [expected_md5]
+                "part-size": 1,
+                "part-checksums": [expected_md5]
             }
         })
     }
