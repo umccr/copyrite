@@ -13,7 +13,7 @@ pub mod channel;
 pub trait SharedReader {
     /// Start the IO-based read task, which reads chunks of data from a reader
     /// until the end.
-    async fn read_task(&mut self) -> Result<()>;
+    async fn read_task(&mut self) -> Result<u64>;
 
     /// Convert the shared reader into a stream of the resulting bytes of reading
     /// the chunks.

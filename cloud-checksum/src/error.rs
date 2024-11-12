@@ -18,8 +18,12 @@ pub enum Error {
     MemoryError(String),
     #[error("performing IO: {0}")]
     IOError(#[from] io::Error),
-    #[error("parsing arguments: {0}")]
+    #[error("parsing: {0}")]
     ParseError(String),
+    #[error("overflow converting numbers")]
+    OverflowError,
+    #[error("serde: {0}")]
+    SerdeError(String),
 }
 
 impl From<JoinError> for Error {
@@ -37,5 +41,11 @@ impl<T> From<mpsc::error::SendError<T>> for Error {
 impl From<clap::Error> for Error {
     fn from(err: clap::Error) -> Self {
         Self::ParseError(err.to_string())
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(err: serde_json::Error) -> Self {
+        Self::SerdeError(err.to_string())
     }
 }

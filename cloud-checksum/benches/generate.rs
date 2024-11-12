@@ -9,7 +9,7 @@ use tokio::runtime::Runtime;
 async fn channel_reader(path: &Path) {
     let mut reader = ChannelReader::new(File::open(path).await.unwrap(), 100);
 
-    GenerateTask::default()
+    let result = GenerateTask::default()
         .add_generate_tasks(
             vec![
                 "sha1".parse().unwrap(),
@@ -19,16 +19,14 @@ async fn channel_reader(path: &Path) {
                 "crc32c".parse().unwrap(),
             ],
             &mut reader,
-            |digest, checksum| {
-                black_box(digest);
-                black_box(checksum);
-            },
         )
         .add_reader_task(reader)
         .unwrap()
         .run()
         .await
         .unwrap();
+
+    black_box(result);
 }
 
 fn criterion_benchmark(c: &mut Criterion) {

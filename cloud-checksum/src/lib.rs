@@ -1,4 +1,5 @@
 use error::Result;
+use std::fmt::{Display, Formatter};
 
 pub mod checksum;
 pub mod error;
@@ -104,6 +105,15 @@ pub enum Endianness {
     LittleEndian,
     /// Use big-endian representation.
     BigEndian,
+}
+
+impl Display for Endianness {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Endianness::LittleEndian => f.write_str("le"),
+            Endianness::BigEndian => f.write_str("be"),
+        }
+    }
 }
 
 /// Commands related to optimizing IO and CPU tasks.
