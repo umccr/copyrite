@@ -113,6 +113,7 @@ pub(crate) mod test {
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
     use anyhow::Result;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use hex::decode;
     use tokio::fs::File;
 
     #[tokio::test]
@@ -153,7 +154,7 @@ pub(crate) mod test {
         );
         assert_eq!(
             file.checksums["aws-etag"],
-            OutputChecksum::new(STANDARD.encode(expected_md5_sum()), None, None)
+            OutputChecksum::new(STANDARD.encode(decode(expected_md5_sum())?), None, None)
         );
         assert_eq!(
             file.checksums["crc32"],

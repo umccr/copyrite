@@ -11,31 +11,37 @@ async fn main() -> Result<()> {
     let args = Commands::parse();
 
     match args.commands {
-        Subcommands::Generate { input, .. } => match input {
-            None => {
+        Subcommands::Generate {
+            input,
+            stdin: use_stdin,
+            ..
+        } => {
+            if use_stdin {
                 let mut reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
 
                 GenerateTask::default()
                     .add_generate_tasks(args.checksum, &mut reader)
                     .add_reader_task(reader)?
                     .run()
-                    .await?;
-            }
-            Some(input) => {
-                let name = input.to_string_lossy().to_string();
+                    .await?
+                    .write()
+                    .await?
+            } else {
                 let mut reader = ChannelReader::new(
-                    File::open(input).await?,
+                    File::open(&input).await?,
                     args.optimization.channel_capacity,
                 );
 
                 GenerateTask::default()
-                    .with_input_file_name(name)
+                    .with_input_file_name(input)
                     .add_generate_tasks(args.checksum, &mut reader)
                     .add_reader_task(reader)?
                     .run()
-                    .await?;
+                    .await?
+                    .write()
+                    .await?
             }
-        },
+        }
         Subcommands::Check { .. } => todo!(),
     };
 

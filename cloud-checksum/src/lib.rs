@@ -54,13 +54,12 @@ fn parse_size(s: &str) -> Result<u64> {
 pub enum Subcommands {
     /// Generate a checksum.
     Generate {
-        /// The input file to calculate the checksum for. By default, accepts standard input.
-        #[arg(short, long)]
-        input: Option<PathBuf>,
-
-        /// The output file to write the checksum to. By default, writes to standard output.
-        #[arg(short, long)]
-        output: Option<PathBuf>,
+        /// The input file to calculate the checksum for. By default, accepts a file name.
+        /// use --stdin to accept input from stdin.
+        #[arg(index = 1, default_value = "", exclusive = true)]
+        input: String,
+        #[arg(long, hide = true)]
+        stdin: bool,
     },
     /// Confirm a set of files is identical.
     Check {
