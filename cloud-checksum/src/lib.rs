@@ -117,6 +117,6 @@ pub struct Optimization {
     pub channel_capacity: usize,
     /// The chunk size of the channel reader in bytes. This controls how many bytes are read
     /// by the reader before they are passed into the channel.
-    #[arg(global = true, short = 's', long, env, default_value_t = 10048576)]
+    #[arg(global = true, short = 's', long, env, default_value_t = 1048576)]
     pub reader_chunk_size: usize,
 }

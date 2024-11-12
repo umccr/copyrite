@@ -16,13 +16,13 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub enum ChecksumCtx {
     /// Calculate the MD5 checksum.
-    MD5(md5::Md5),
+    MD5(md5::Md5, u32),
     /// Calculate the SHA1 checksum.
-    SHA1(sha1::Sha1),
+    SHA1(sha1::Sha1, u32),
     /// Calculate the SHA256 checksum.
-    SHA256(sha2::Sha256),
+    SHA256(sha2::Sha256, u32),
     /// Calculate the AWS ETag.
-    AWSETag,
+    AWSETag(md5::Md5, u32),
     /// Calculate a CRC32.
     CRC32(crc32fast::Hasher, Endianness),
     CRC32C(u32, Endianness),
@@ -34,17 +34,21 @@ impl FromStr for ChecksumCtx {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let ctx = Self::parse_ctx_endianness(s)?;
+        let ctx = Self::parse_endianness(s)?;
+        if let Some(ctx) = ctx {
+            return Ok(ctx);
+        }
+        let ctx = Self::parse_part_size(s)?;
         if let Some(ctx) = ctx {
             return Ok(ctx);
         }
 
         let checksum = <Checksum as FromStr>::from_str(s)?;
         let ctx = match checksum {
-            Checksum::MD5 => Self::MD5(md5::Md5::new()),
-            Checksum::SHA1 => Self::SHA1(sha1::Sha1::new()),
-            Checksum::SHA256 => Self::SHA256(sha2::Sha256::new()),
-            Checksum::AWSETag => todo!(),
+            Checksum::MD5 => Self::MD5(md5::Md5::new(), 1),
+            Checksum::SHA1 => Self::SHA1(sha1::Sha1::new(), 1),
+            Checksum::SHA256 => Self::SHA256(sha2::Sha256::new(), 1),
+            Checksum::AWSETag => Self::AWSETag(md5::Md5::new(), 1),
             Checksum::CRC32 => Self::CRC32(crc32fast::Hasher::new(), Endianness::BigEndian),
             Checksum::CRC32C => Self::CRC32C(0, Endianness::BigEndian),
             Checksum::QuickXor => todo!(),
@@ -56,10 +60,10 @@ impl FromStr for ChecksumCtx {
 impl From<&ChecksumCtx> for Checksum {
     fn from(checksum: &ChecksumCtx) -> Self {
         match checksum {
-            ChecksumCtx::MD5(_) => Self::MD5,
-            ChecksumCtx::SHA1(_) => Self::SHA1,
-            ChecksumCtx::SHA256(_) => Self::SHA256,
-            ChecksumCtx::AWSETag => Self::AWSETag,
+            ChecksumCtx::MD5(_, _) => Self::MD5,
+            ChecksumCtx::SHA1(_, _) => Self::SHA1,
+            ChecksumCtx::SHA256(_, _) => Self::SHA256,
+            ChecksumCtx::AWSETag(_, _) => Self::AWSETag,
             ChecksumCtx::CRC32(_, _) => Self::CRC32,
             ChecksumCtx::CRC32C(_, _) => Self::CRC32C,
             ChecksumCtx::QuickXor => Self::QuickXor,
@@ -69,7 +73,7 @@ impl From<&ChecksumCtx> for Checksum {
 
 impl ChecksumCtx {
     /// Parse into a `ChecksumCtx` for values that use endianness.
-    pub fn parse_ctx_endianness(s: &str) -> Result<Option<Self>> {
+    pub fn parse_endianness(s: &str) -> Result<Option<Self>> {
         if let Some(s) = s.strip_suffix("-le") {
             let ctx = match <Checksum as FromStr>::from_str(s)? {
                 Checksum::CRC32 => {
@@ -93,6 +97,33 @@ impl ChecksumCtx {
         }
     }
 
+    /// Parse into a `ChecksumCtx` for values that use endianness.
+    pub fn parse_part_size(s: &str) -> Result<Option<Self>> {
+        let mut iter = s.rsplitn(2, "-aws-");
+        let part_size = iter.next();
+        let checksum = iter.next();
+
+        if let (Some(checksum), Some(part_size)) = (checksum, part_size) {
+            let part_size = part_size
+                .parse()
+                .map_err(|err| ParseError(format!("invalid part size: {}", err)))?;
+            let ctx = match <Checksum as FromStr>::from_str(checksum)? {
+                Checksum::MD5 => ChecksumCtx::MD5(md5::Md5::new(), part_size),
+                Checksum::SHA1 => ChecksumCtx::SHA1(sha1::Sha1::new(), part_size),
+                Checksum::SHA256 => ChecksumCtx::SHA256(sha2::Sha256::new(), part_size),
+                _ => {
+                    return Err(ParseError(format!(
+                        "invalid suffix -{} for checksum",
+                        part_size
+                    )))
+                }
+            };
+            Ok(Some(ctx))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Set the endianness if this is a CRC-based checksum.
     pub fn with_endianness(self, endianness: Endianness) -> Self {
         match self {
@@ -105,10 +136,11 @@ impl ChecksumCtx {
     /// Update a checksum with some data.
     pub fn update(&mut self, data: &[u8]) {
         match self {
-            ChecksumCtx::MD5(ctx) => ctx.update(data),
-            ChecksumCtx::SHA1(ctx) => ctx.update(data),
-            ChecksumCtx::SHA256(ctx) => ctx.update(data),
-            ChecksumCtx::AWSETag => todo!(),
+            ChecksumCtx::MD5(ctx, _) => ctx.update(data),
+            ChecksumCtx::SHA1(ctx, _) => ctx.update(data),
+            ChecksumCtx::SHA256(ctx, _) => ctx.update(data),
+            // Just doing regular MD5 for now, not yet doing parts.
+            ChecksumCtx::AWSETag(ctx, _) => ctx.update(data),
             ChecksumCtx::CRC32(ctx, _) => ctx.update(data),
             ChecksumCtx::CRC32C(ctx, _) => *ctx = crc32c_append(*ctx, data),
             ChecksumCtx::QuickXor => todo!(),
@@ -118,10 +150,10 @@ impl ChecksumCtx {
     /// Finalize the checksum.
     pub fn finalize(self) -> Vec<u8> {
         match self {
-            ChecksumCtx::MD5(ctx) => ctx.finalize().to_vec(),
-            ChecksumCtx::SHA1(ctx) => ctx.finalize().to_vec(),
-            ChecksumCtx::SHA256(ctx) => ctx.finalize().to_vec(),
-            ChecksumCtx::AWSETag => todo!(),
+            ChecksumCtx::MD5(ctx, _) => ctx.finalize().to_vec(),
+            ChecksumCtx::SHA1(ctx, _) => ctx.finalize().to_vec(),
+            ChecksumCtx::SHA256(ctx, _) => ctx.finalize().to_vec(),
+            ChecksumCtx::AWSETag(ctx, _) => ctx.finalize().to_vec(),
             ChecksumCtx::CRC32(ctx, endianness) => match endianness {
                 Endianness::LittleEndian => ctx.finalize().to_le_bytes().to_vec(),
                 Endianness::BigEndian => ctx.finalize().to_be_bytes().to_vec(),
@@ -193,6 +225,16 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_crc32c_le() -> Result<()> {
         test_checksum("crc32c-le", expected_crc32c_le()).await
+    }
+
+    #[tokio::test]
+    async fn test_aws_etag_md5() -> Result<()> {
+        test_checksum("md5-aws-1", expected_md5_sum()).await
+    }
+
+    #[tokio::test]
+    async fn test_aws_etag() -> Result<()> {
+        test_checksum("aws-etag", expected_md5_sum()).await
     }
 
     pub(crate) fn expected_md5_sum() -> &'static str {
