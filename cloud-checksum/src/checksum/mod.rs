@@ -11,6 +11,8 @@ use crc32c::crc32c_append;
 use futures_util::{pin_mut, Stream, StreamExt};
 use sha1::Digest;
 use std::fmt::{Display, Formatter};
+use std::hash::{Hash, Hasher};
+use std::mem::discriminant;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -32,6 +34,20 @@ pub enum ChecksumCtx {
     CRC32C(u32, Endianness),
     /// Calculate the QuickXor checksum.
     QuickXor,
+}
+
+impl Eq for ChecksumCtx {}
+
+impl PartialEq for ChecksumCtx {
+    fn eq(&self, other: &Self) -> bool {
+        discriminant(self) == discriminant(other)
+    }
+}
+
+impl Hash for ChecksumCtx {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        discriminant(self).hash(state)
+    }
 }
 
 impl FromStr for ChecksumCtx {

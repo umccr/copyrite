@@ -3,11 +3,13 @@
 
 use crate::checksum::file::{OutputChecksum, OutputFile};
 use crate::checksum::ChecksumCtx;
-use crate::error::Result;
+use crate::error::Error::GenerateBuilderError;
+use crate::error::{Error, Result};
 use crate::reader::SharedReader;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use futures_util::future::join_all;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use tokio::task::JoinHandle;
 
 /// Define the kind of task that is running.
@@ -22,6 +24,7 @@ pub enum Task {
 pub struct GenerateTaskBuilder {
     input_file_name: String,
     overwrite: bool,
+    verify: bool,
 }
 
 impl GenerateTaskBuilder {
@@ -37,16 +40,51 @@ impl GenerateTaskBuilder {
         self
     }
 
+    /// Set whether to overwrite existing files.
+    pub fn with_verify(mut self, verify: bool) -> Self {
+        self.verify = verify;
+        self
+    }
+
     /// Build a generate task.
     pub async fn build(self) -> Result<GenerateTask> {
-        let existing_output = OutputFile::read_from(&self.input_file_name).await;
+        let existing_output = if !self.input_file_name.is_empty() {
+            OutputFile::read_from(self.input_file_name.to_string())
+                .await
+                .ok()
+        } else {
+            None
+        };
+
+        if self.overwrite && self.verify {
+            return Err(GenerateBuilderError(
+                "cannot verify and overwrite checksums".to_string(),
+            ));
+        }
+
+        let mode = if self.overwrite {
+            OverwriteMode::Overwrite
+        } else if self.verify {
+            OverwriteMode::Verify
+        } else {
+            OverwriteMode::None
+        };
+
         Ok(GenerateTask {
             input_file_name: self.input_file_name,
-            overwrite: self.overwrite,
-            existing_output: existing_output.ok(),
+            overwrite: mode,
+            existing_output,
             ..Default::default()
         })
     }
+}
+
+#[derive(Debug, Default)]
+enum OverwriteMode {
+    #[default]
+    None,
+    Verify,
+    Overwrite,
 }
 
 /// Execute the generate checksums tasks.
@@ -54,7 +92,7 @@ impl GenerateTaskBuilder {
 pub struct GenerateTask {
     tasks: Vec<JoinHandle<Result<Task>>>,
     input_file_name: String,
-    overwrite: bool,
+    overwrite: OverwriteMode,
     existing_output: Option<OutputFile>,
 }
 
@@ -85,23 +123,44 @@ impl GenerateTask {
         self
     }
 
-    /// Spawns tasks for a series of checksums.
-    pub fn add_generate_tasks(
+    fn add_generate_tasks_direct(
         mut self,
-        checksums: Vec<ChecksumCtx>,
+        checksums: HashSet<ChecksumCtx>,
         reader: &mut impl SharedReader,
     ) -> Self {
         for checksum in checksums {
-            if self.overwrite
-                || !self
-                    .existing_output
-                    .as_ref()
-                    .is_some_and(|file| file.checksums.contains_key(&checksum.to_string()))
-            {
-                self = self.add_generate_task(checksum, reader);
-            }
+            self = self.add_generate_task(checksum, reader);
         }
         self
+    }
+
+    /// Spawns tasks for a series of checksums.
+    pub fn add_generate_tasks(
+        mut self,
+        mut checksums: HashSet<ChecksumCtx>,
+        reader: &mut impl SharedReader,
+    ) -> Result<Self> {
+        let existing = self.existing_output.as_ref();
+
+        match self.overwrite {
+            OverwriteMode::Verify => {
+                existing
+                    .map(|file| {
+                        for name in file.checksums.keys() {
+                            checksums.insert(ChecksumCtx::from_str(name)?);
+                        }
+                        Ok::<_, Error>(())
+                    })
+                    .transpose()?;
+
+                self = self.add_generate_tasks_direct(checksums, reader);
+            }
+            OverwriteMode::Overwrite | OverwriteMode::None => {
+                self = self.add_generate_tasks_direct(checksums, reader);
+            }
+        }
+
+        Ok(self)
     }
 
     /// Runs the generate task, returning an output file.
@@ -135,7 +194,9 @@ impl GenerateTask {
 
         let new_file = OutputFile::new(self.input_file_name, file_size, checksums);
         let output = match self.existing_output {
-            Some(file) if !self.overwrite => file.merge(new_file),
+            Some(file) if !matches!(self.overwrite, OverwriteMode::Overwrite) => {
+                file.merge(new_file)?
+            }
             _ => new_file,
         };
 
@@ -167,16 +228,16 @@ pub(crate) mod test {
             .build()
             .await?
             .add_generate_tasks(
-                vec![
+                HashSet::from_iter(vec![
                     "sha1".parse()?,
                     "sha256".parse()?,
                     "md5".parse()?,
                     "aws-etag".parse()?,
                     "crc32".parse()?,
                     "crc32c".parse()?,
-                ],
+                ]),
                 &mut reader,
-            )
+            )?
             .add_reader_task(reader)?
             .run()
             .await?;

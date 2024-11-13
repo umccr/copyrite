@@ -22,8 +22,7 @@ use std::str::FromStr;
 #[command(author, version, about, long_about)]
 pub struct Commands {
     /// Checksums to use. Can be specified multiple times or comma-separated.
-    /// At least one checksum is required.
-    #[arg(value_delimiter = ',', required = true, short, long)]
+    #[arg(global = true, value_delimiter = ',', short, long)]
     pub checksum: Vec<ChecksumCtx>,
 
     /// The amount of time to calculate checksums for. Once this timeout is reached the partial
@@ -35,8 +34,15 @@ pub struct Commands {
     /// added to an existing output file. Any existing checksums are preserved (even if not
     /// specified in --checksums). This option allows overwriting any existing output file. This
     /// will recompute all checksums specified.
-    #[arg(global = true, short, long, env)]
+    #[arg(global = true, short, long, env, conflicts_with = "verify")]
     pub force_overwrite: bool,
+
+    /// Verify the contents of existing output files when generating checksums. By default,
+    /// existing checksum files are assumed to contain checksums that have correct values. This
+    /// option allows computing existing output file checksums and updating the file to ensure
+    /// that it is correct.
+    #[arg(global = true, short, long, env, conflicts_with = "force_overwrite")]
+    pub verify: bool,
 
     /// The subcommands for cloud-checksum.
     #[command(subcommand)]
@@ -53,11 +59,9 @@ pub enum Subcommands {
     /// Generate a checksum.
     Generate {
         /// The input file to calculate the checksum for. By default, accepts a file name.
-        /// use --stdin to accept input from stdin.
-        #[arg(index = 1, default_value = "", exclusive = true)]
+        /// use - to accept input from stdin. If using stdin, the output will be written to stdout.
+        #[arg(index = 1, required = true)]
         input: String,
-        #[arg(long, hide = true)]
-        stdin: bool,
     },
     /// Confirm a set of files is identical.
     Check {

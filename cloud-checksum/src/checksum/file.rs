@@ -1,17 +1,23 @@
 //! Defines the file format that outputs checksum results
 //!
 
+use crate::error::Error::OutputFileError;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string_pretty};
 use std::collections::HashMap;
 use tokio::fs;
 
+/// The current version of the output file.
+pub const OUTPUT_FILE_VERSION: &str = "0.1.0";
+
 /// A file containing multiple checksums.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct OutputFile {
+    #[serde(skip)]
     pub(crate) name: String,
+    pub(crate) version: String,
     pub(crate) size: u64,
     #[serde(flatten)]
     pub(crate) checksums: HashMap<String, OutputChecksum>,
@@ -22,6 +28,7 @@ impl OutputFile {
     pub fn new(name: String, size: u64, checksums: HashMap<String, OutputChecksum>) -> Self {
         Self {
             name,
+            version: OUTPUT_FILE_VERSION.to_string(),
             size,
             checksums,
         }
@@ -31,29 +38,39 @@ impl OutputFile {
         format!("{}.sums", name)
     }
 
+    /// Convert to a JSON string.
+    pub fn to_json_string(&self) -> Result<String> {
+        Ok(to_string_pretty(&self)?)
+    }
+
     /// Write the output file.
     pub async fn write(&self) -> Result<()> {
         let path = Self::format_file(&self.name);
-        Ok(fs::write(path, to_string_pretty(&self)?).await?)
+        Ok(fs::write(path, self.to_json_string()?).await?)
     }
 
-    /// Write the output file.
-    pub async fn read_from(name: &str) -> Result<Self> {
-        let path = Self::format_file(name);
-        Ok(from_slice(&fs::read(path).await?)?)
+    /// Read an existing output file.
+    pub async fn read_from(name: String) -> Result<Self> {
+        let path = Self::format_file(&name);
+        let mut value: Self = from_slice(&fs::read(&path).await?)?;
+        value.name = name;
+
+        Ok(value)
     }
 
-    /// Merge with another output file, preserving existing checksums.
-    pub fn merge(mut self, other: Self) -> Self {
+    /// Merge with another output file, overwriting existing checksums.
+    pub fn merge(mut self, other: Self) -> Result<Self> {
         if self.name != other.name && self.size != other.size {
-            return self;
+            return Err(OutputFileError(
+                "the name and size of output files do not match".to_string(),
+            ));
         }
 
         for (key, checksum) in other.checksums {
-            self.checksums.entry(key).or_insert(checksum);
+            self.checksums.insert(key, checksum);
         }
 
-        self
+        Ok(self)
     }
 }
 
@@ -134,7 +151,7 @@ pub(crate) mod test {
             ),
         );
 
-        let result = file_one.clone().merge(file_two);
+        let result = file_one.clone().merge(file_two)?;
         assert_eq!(result.name, file_one.name);
         assert_eq!(result.size, file_one.size);
         assert_eq!(
@@ -152,7 +169,7 @@ pub(crate) mod test {
                     "aws-etag".to_string(),
                     OutputChecksum::new(
                         expected_md5.to_string(),
-                        Some(2),
+                        Some(1),
                         Some(vec![expected_md5.to_string()]),
                     )
                 ),
@@ -171,12 +188,12 @@ pub(crate) mod test {
                 Some(vec![expected_md5.to_string()]),
             ),
         )];
-        OutputFile::new("name".to_string(), 123, HashMap::from_iter(checksums))
+        OutputFile::new("".to_string(), 123, HashMap::from_iter(checksums))
     }
 
     fn expected_output_json(expected_md5: &str) -> Value {
         json!({
-            "name": "name",
+            "version": OUTPUT_FILE_VERSION,
             "size": 123,
             "aws-etag": {
                 "checksum": expected_md5,

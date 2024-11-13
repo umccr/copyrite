@@ -24,6 +24,10 @@ pub enum Error {
     OverflowError,
     #[error("serde: {0}")]
     SerdeError(String),
+    #[error("output file: {0}")]
+    OutputFileError(String),
+    #[error("generate builder: {0}")]
+    GenerateBuilderError(String),
 }
 
 impl From<JoinError> for Error {

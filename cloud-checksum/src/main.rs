@@ -3,6 +3,7 @@ use cloud_checksum::error::Result;
 use cloud_checksum::reader::channel::ChannelReader;
 use cloud_checksum::task::generate::GenerateTaskBuilder;
 use cloud_checksum::{Commands, Subcommands};
+use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::stdin;
 
@@ -11,24 +12,22 @@ async fn main() -> Result<()> {
     let args = Commands::parse();
 
     match args.commands {
-        Subcommands::Generate {
-            input,
-            stdin: use_stdin,
-            ..
-        } => {
-            if use_stdin {
+        Subcommands::Generate { input, .. } => {
+            if input == "-" {
                 let mut reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
 
-                GenerateTaskBuilder::default()
+                let output = GenerateTaskBuilder::default()
                     .with_overwrite(args.force_overwrite)
+                    .with_verify(args.verify)
                     .build()
                     .await?
-                    .add_generate_tasks(args.checksum, &mut reader)
+                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader)?
                     .add_reader_task(reader)?
                     .run()
                     .await?
-                    .write()
-                    .await?
+                    .to_json_string()?;
+
+                println!("{}", output);
             } else {
                 let mut reader = ChannelReader::new(
                     File::open(&input).await?,
@@ -37,10 +36,11 @@ async fn main() -> Result<()> {
 
                 GenerateTaskBuilder::default()
                     .with_overwrite(args.force_overwrite)
+                    .with_verify(args.verify)
                     .with_input_file_name(input)
                     .build()
                     .await?
-                    .add_generate_tasks(args.checksum, &mut reader)
+                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader)?
                     .add_reader_task(reader)?
                     .run()
                     .await?
