@@ -216,37 +216,84 @@ pub(crate) mod test {
     use anyhow::Result;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use hex::decode;
+    use tempfile::{tempdir, TempDir};
     use tokio::fs::File;
 
     #[tokio::test]
-    async fn test_generate() -> Result<()> {
+    async fn test_generate_overwrite() -> Result<()> {
+        let tmp = tempdir()?;
+        let name = write_existing(tmp).await?;
+
+        test_generate(
+            name,
+            true,
+            false,
+            vec!["sha1", "sha256", "md5", "aws-etag", "crc32", "crc32c"],
+            expected_md5_sum(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_generate_verify() -> Result<()> {
+        let tmp = tempdir()?;
+        let name = write_existing(tmp).await?;
+
+        test_generate(
+            name,
+            false,
+            true,
+            vec!["sha1", "sha256", "aws-etag", "crc32", "crc32c"],
+            expected_md5_sum(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_generate_no_verify() -> Result<()> {
+        let tmp = tempdir()?;
+        let name = write_existing(tmp).await?;
+
+        test_generate(
+            name,
+            false,
+            false,
+            vec!["sha1", "sha256", "aws-etag", "crc32", "crc32c"],
+            "123",
+        )
+        .await
+    }
+
+    async fn test_generate(
+        name: String,
+        overwrite: bool,
+        verify: bool,
+        tasks: Vec<&str>,
+        md5: &str,
+    ) -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
         let mut reader = channel_reader(File::open(test_file).await?).await;
 
+        let tasks = tasks
+            .into_iter()
+            .map(|task| Ok(task.parse()?))
+            .collect::<Result<Vec<_>>>()?;
         let file = GenerateTaskBuilder::default()
-            .with_input_file_name("name".to_string())
+            .with_input_file_name(name.to_string())
+            .with_overwrite(overwrite)
+            .with_verify(verify)
             .build()
             .await?
-            .add_generate_tasks(
-                HashSet::from_iter(vec![
-                    "sha1".parse()?,
-                    "sha256".parse()?,
-                    "md5".parse()?,
-                    "aws-etag".parse()?,
-                    "crc32".parse()?,
-                    "crc32c".parse()?,
-                ]),
-                &mut reader,
-            )?
+            .add_generate_tasks(HashSet::from_iter(tasks), &mut reader)?
             .add_reader_task(reader)?
             .run()
             .await?;
 
-        assert_eq!(file.name, "name");
+        assert_eq!(file.name, name);
         assert_eq!(file.size, TEST_FILE_SIZE);
         assert_eq!(
             file.checksums["md5"],
-            OutputChecksum::new(expected_md5_sum().to_string(), None, None)
+            OutputChecksum::new(md5.to_string(), None, None)
         );
         assert_eq!(
             file.checksums["sha1"],
@@ -270,5 +317,19 @@ pub(crate) mod test {
         );
 
         Ok(())
+    }
+
+    async fn write_existing(tmp: TempDir) -> Result<String, Error> {
+        let name = tmp.path().to_string_lossy().to_string() + "name";
+        let existing = OutputFile::new(
+            name.to_string(),
+            TEST_FILE_SIZE,
+            HashMap::from_iter(vec![(
+                "md5".to_string(),
+                OutputChecksum::new("123".to_string(), None, None),
+            )]),
+        );
+        existing.write().await?;
+        Ok(name)
     }
 }
