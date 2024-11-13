@@ -1,9 +1,9 @@
 use clap::Parser;
 use cloud_checksum::error::Result;
 use cloud_checksum::reader::channel::ChannelReader;
-use cloud_checksum::task::generate::GenerateTask;
+use cloud_checksum::task::generate::GenerateTaskBuilder;
 use cloud_checksum::{Commands, Subcommands};
-use hex::encode;
+use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::stdin;
 
@@ -12,33 +12,42 @@ async fn main() -> Result<()> {
     let args = Commands::parse();
 
     match args.commands {
-        Subcommands::Generate { input, .. } => match input {
-            None => {
+        Subcommands::Generate { input, .. } => {
+            if input == "-" {
                 let mut reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
 
-                GenerateTask::default()
-                    .add_generate_tasks(args.checksum, &mut reader, |digest, checksum| {
-                        println!("The {:#?} digest is: {}", checksum, encode(digest));
-                    })
+                let output = GenerateTaskBuilder::default()
+                    .with_overwrite(args.force_overwrite)
+                    .with_verify(args.verify)
+                    .build()
+                    .await?
+                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader)?
                     .add_reader_task(reader)?
                     .run()
-                    .await?;
-            }
-            Some(input) => {
+                    .await?
+                    .to_json_string()?;
+
+                println!("{}", output);
+            } else {
                 let mut reader = ChannelReader::new(
-                    File::open(input).await?,
+                    File::open(&input).await?,
                     args.optimization.channel_capacity,
                 );
 
-                GenerateTask::default()
-                    .add_generate_tasks(args.checksum, &mut reader, |digest, checksum| {
-                        println!("The {:#?} digest is: {}", checksum, encode(digest));
-                    })
+                GenerateTaskBuilder::default()
+                    .with_overwrite(args.force_overwrite)
+                    .with_verify(args.verify)
+                    .with_input_file_name(input)
+                    .build()
+                    .await?
+                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader)?
                     .add_reader_task(reader)?
                     .run()
-                    .await?;
+                    .await?
+                    .write()
+                    .await?
             }
-        },
+        }
         Subcommands::Check { .. } => todo!(),
     };
 

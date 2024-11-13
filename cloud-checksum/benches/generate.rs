@@ -2,6 +2,7 @@ use cloud_checksum::reader::channel::ChannelReader;
 use cloud_checksum::task::generate::GenerateTask;
 use cloud_checksum::test::TestFileBuilder;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use std::collections::HashSet;
 use std::path::Path;
 use tokio::fs::File;
 use tokio::runtime::Runtime;
@@ -9,26 +10,25 @@ use tokio::runtime::Runtime;
 async fn channel_reader(path: &Path) {
     let mut reader = ChannelReader::new(File::open(path).await.unwrap(), 100);
 
-    GenerateTask::default()
+    let result = GenerateTask::default()
         .add_generate_tasks(
-            vec![
+            HashSet::from_iter(vec![
                 "sha1".parse().unwrap(),
                 "sha256".parse().unwrap(),
                 "md5".parse().unwrap(),
                 "crc32".parse().unwrap(),
                 "crc32c".parse().unwrap(),
-            ],
+            ]),
             &mut reader,
-            |digest, checksum| {
-                black_box(digest);
-                black_box(checksum);
-            },
         )
+        .unwrap()
         .add_reader_task(reader)
         .unwrap()
         .run()
         .await
         .unwrap();
+
+    black_box(result);
 }
 
 fn criterion_benchmark(c: &mut Criterion) {

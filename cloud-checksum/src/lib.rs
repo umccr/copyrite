@@ -1,4 +1,5 @@
 use error::Result;
+use std::fmt::{Display, Formatter};
 
 pub mod checksum;
 pub mod error;
@@ -21,8 +22,7 @@ use std::str::FromStr;
 #[command(author, version, about, long_about)]
 pub struct Commands {
     /// Checksums to use. Can be specified multiple times or comma-separated.
-    /// At least one checksum is required.
-    #[arg(value_delimiter = ',', required = true, short, long)]
+    #[arg(global = true, value_delimiter = ',', short, long)]
     pub checksum: Vec<ChecksumCtx>,
 
     /// The amount of time to calculate checksums for. Once this timeout is reached the partial
@@ -30,10 +30,19 @@ pub struct Commands {
     #[arg(global = true, short, long, env)]
     pub timeout: Option<Duration>,
 
-    /// The chunk sizes to compute for AWS etags. Specify multiple chunk sizes to compute multiple
-    /// etags. The default computes an etag with an 8MiB chunk size.
-    #[arg(global = true, value_delimiter = ',', value_parser = parse_size, long, env, default_value = "8mib")]
-    pub aws_etag_chunk_sizes: Vec<u64>,
+    /// Overwrite the output file. By default, only checksums that are missing are computed and
+    /// added to an existing output file. Any existing checksums are preserved (even if not
+    /// specified in --checksums). This option allows overwriting any existing output file. This
+    /// will recompute all checksums specified.
+    #[arg(global = true, short, long, env, conflicts_with = "verify")]
+    pub force_overwrite: bool,
+
+    /// Verify the contents of existing output files when generating checksums. By default,
+    /// existing checksum files are assumed to contain checksums that have correct values. This
+    /// option allows computing existing output file checksums and updating the file to ensure
+    /// that it is correct.
+    #[arg(global = true, short, long, env, conflicts_with = "force_overwrite")]
+    pub verify: bool,
 
     /// The subcommands for cloud-checksum.
     #[command(subcommand)]
@@ -44,22 +53,15 @@ pub struct Commands {
     pub optimization: Optimization,
 }
 
-fn parse_size(s: &str) -> Result<u64> {
-    parse_size::parse_size(s).map_err(|err| ParseError(err.to_string()))
-}
-
 /// The subcommands for cloud-checksum.
 #[derive(Subcommand, Debug)]
 pub enum Subcommands {
     /// Generate a checksum.
     Generate {
-        /// The input file to calculate the checksum for. By default, accepts standard input.
-        #[arg(short, long)]
-        input: Option<PathBuf>,
-
-        /// The output file to write the checksum to. By default, writes to standard output.
-        #[arg(short, long)]
-        output: Option<PathBuf>,
+        /// The input file to calculate the checksum for. By default, accepts a file name.
+        /// use - to accept input from stdin. If using stdin, the output will be written to stdout.
+        #[arg(index = 1, required = true)]
+        input: String,
     },
     /// Confirm a set of files is identical.
     Check {
@@ -104,6 +106,15 @@ pub enum Endianness {
     LittleEndian,
     /// Use big-endian representation.
     BigEndian,
+}
+
+impl Display for Endianness {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Endianness::LittleEndian => f.write_str("le"),
+            Endianness::BigEndian => f.write_str("be"),
+        }
+    }
 }
 
 /// Commands related to optimizing IO and CPU tasks.

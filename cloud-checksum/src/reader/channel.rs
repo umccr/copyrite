@@ -1,6 +1,7 @@
 //! A shared reader implementation which makes use on channels.
 //!
 
+use crate::error::Error::OverflowError;
 use crate::error::Result;
 use crate::reader::SharedReader;
 use async_stream::stream;
@@ -50,9 +51,10 @@ where
         }
     }
 
-    /// Send data to the channel until the end of the reader is reached.
-    pub async fn send_to_end(&mut self) -> Result<()> {
+    /// Send data to the channel until the end of the reader is reached. Returns the size of the file.
+    pub async fn send_to_end(&mut self) -> Result<u64> {
         let txs = self.txs.drain(..);
+        let mut size = 0;
         loop {
             // Read data into a buffer.
             let mut buf = vec![0; 1000];
@@ -63,6 +65,8 @@ where
                 break;
             }
 
+            size += n;
+
             // Send the buffer. An Arc allows sharing the buffer across multiple receivers without
             // copying it.
             let buf: Arc<[u8]> = Arc::from(&buf[0..n]);
@@ -72,7 +76,7 @@ where
         }
 
         // Drop senders to signal closed channel.
-        Ok(())
+        u64::try_from(size).map_err(|_| OverflowError)
     }
 }
 
@@ -80,7 +84,7 @@ impl<R> SharedReader for ChannelReader<R>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    async fn read_task(&mut self) -> Result<()> {
+    async fn read_task(&mut self) -> Result<u64> {
         self.send_to_end().await
     }
 
