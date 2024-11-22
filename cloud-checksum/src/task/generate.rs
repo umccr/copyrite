@@ -2,7 +2,7 @@
 //!
 
 use crate::checksum::file::{OutputChecksum, OutputFile};
-use crate::checksum::ChecksumCtx;
+use crate::checksum::Checksummer;
 use crate::error::Error::GenerateBuilderError;
 use crate::error::{Error, Result};
 use crate::reader::SharedReader;
@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 #[derive(Debug)]
 pub enum Task {
     ReadTask(u64),
-    ChecksumTask((ChecksumCtx, Vec<u8>)),
+    ChecksumTask((Checksummer, Vec<u8>)),
 }
 
 /// Build a generate task.
@@ -108,7 +108,7 @@ impl GenerateTask {
     /// Spawns a task which generates checksums.
     pub fn add_generate_task(
         mut self,
-        mut ctx: ChecksumCtx,
+        mut ctx: Checksummer,
         reader: &mut impl SharedReader,
     ) -> Self {
         let stream = reader.as_stream();
@@ -125,7 +125,7 @@ impl GenerateTask {
 
     fn add_generate_tasks_direct(
         mut self,
-        checksums: HashSet<ChecksumCtx>,
+        checksums: HashSet<Checksummer>,
         reader: &mut impl SharedReader,
     ) -> Self {
         for checksum in checksums {
@@ -137,7 +137,7 @@ impl GenerateTask {
     /// Spawns tasks for a series of checksums.
     pub fn add_generate_tasks(
         mut self,
-        mut checksums: HashSet<ChecksumCtx>,
+        mut checksums: HashSet<Checksummer>,
         reader: &mut impl SharedReader,
     ) -> Result<Self> {
         let existing = self.existing_output.as_ref();
@@ -147,7 +147,7 @@ impl GenerateTask {
                 existing
                     .map(|file| {
                         for name in file.checksums.keys() {
-                            checksums.insert(ChecksumCtx::from_str(name)?);
+                            checksums.insert(Checksummer::from_str(name)?);
                         }
                         Ok::<_, Error>(())
                     })

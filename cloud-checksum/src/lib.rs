@@ -9,7 +9,7 @@ pub mod task;
 #[doc(hidden)]
 pub mod test;
 
-use crate::checksum::ChecksumCtx;
+use crate::checksum::Checksummer;
 use crate::error::Error;
 use crate::error::Error::ParseError;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -23,7 +23,7 @@ use std::str::FromStr;
 pub struct Commands {
     /// Checksums to use. Can be specified multiple times or comma-separated.
     #[arg(global = true, value_delimiter = ',', short, long)]
-    pub checksum: Vec<ChecksumCtx>,
+    pub checksum: Vec<Checksummer>,
 
     /// The amount of time to calculate checksums for. Once this timeout is reached the partial
     /// checksum will be saved to the partial checksum file.
