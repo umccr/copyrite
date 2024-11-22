@@ -88,7 +88,7 @@ impl FromStr for ChecksumCtx {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let ctx = Self::parse_endianness(s)?;
+        let (s, ctx) = Self::parse_endianness(s)?;
         if let Some(ctx) = ctx {
             return Ok(ctx);
         }
@@ -99,7 +99,9 @@ impl FromStr for ChecksumCtx {
 
         let checksum = <Checksum as FromStr>::from_str(s)?;
         let ctx = match checksum {
-            Checksum::MD5 => Self::MD5(ChecksumAlgorithm::new(Some(md5::Md5::new()), None)),
+            Checksum::MD5 | Checksum::AWSETag => {
+                Self::MD5(ChecksumAlgorithm::new(Some(md5::Md5::new()), None))
+            }
             Checksum::SHA1 => Self::SHA1(ChecksumAlgorithm::new(Some(sha1::Sha1::new()), None)),
             Checksum::SHA256 => {
                 Self::SHA256(ChecksumAlgorithm::new(Some(sha2::Sha256::new()), None))
@@ -163,7 +165,7 @@ impl ChecksumCtx {
 
     /// Parse into a `ChecksumCtx` for values that use endianness. Uses an -le suffix for
     /// little-endian and -be for big-endian.
-    pub fn parse_endianness(s: &str) -> Result<Option<Self>> {
+    pub fn parse_endianness(s: &str) -> Result<(&str, Option<Self>)> {
         if let Some(s) = s.strip_suffix("-le") {
             let ctx = match <Checksum as FromStr>::from_str(s)? {
                 Checksum::CRC32 => ChecksumCtx::CRC32(
@@ -176,7 +178,7 @@ impl ChecksumCtx {
                 ),
                 _ => return Err(ParseError("invalid suffix -le for checksum".to_string())),
             };
-            Ok(Some(ctx))
+            Ok((s, Some(ctx)))
         } else if let Some(s) = s.strip_suffix("-be") {
             let ctx = match <Checksum as FromStr>::from_str(s)? {
                 Checksum::CRC32 => ChecksumCtx::CRC32(
@@ -189,9 +191,9 @@ impl ChecksumCtx {
                 ),
                 _ => return Err(ParseError("invalid suffix -be for checksum".to_string())),
             };
-            Ok(Some(ctx))
+            Ok((s, Some(ctx)))
         } else {
-            Ok(None)
+            Ok((s, None))
         }
     }
 
@@ -208,21 +210,27 @@ impl ChecksumCtx {
                 .parse()
                 .map_err(|err| ParseError(format!("invalid part size: {}", err)))?;
             let ctx = match <Checksum as FromStr>::from_str(checksum)? {
-                Checksum::MD5 => {
-                    ChecksumCtx::MD5(ChecksumAlgorithm::new(Some(md5::Md5::new()), None))
-                }
-                Checksum::SHA1 => {
-                    ChecksumCtx::SHA1(ChecksumAlgorithm::new(Some(sha1::Sha1::new()), None))
-                }
-                Checksum::SHA256 => {
-                    ChecksumCtx::SHA256(ChecksumAlgorithm::new(Some(sha2::Sha256::new()), None))
-                }
-                _ => {
-                    return Err(ParseError(format!(
-                        "invalid suffix -{} for checksum",
-                        part_size
-                    )))
-                }
+                Checksum::MD5 | Checksum::AWSETag => ChecksumCtx::MD5(ChecksumAlgorithm::new(
+                    Some(md5::Md5::new()),
+                    Some(part_size),
+                )),
+                Checksum::SHA1 => ChecksumCtx::SHA1(ChecksumAlgorithm::new(
+                    Some(sha1::Sha1::new()),
+                    Some(part_size),
+                )),
+                Checksum::SHA256 => ChecksumCtx::SHA256(ChecksumAlgorithm::new(
+                    Some(sha2::Sha256::new()),
+                    Some(part_size),
+                )),
+                Checksum::CRC32 => Self::CRC32(
+                    ChecksumAlgorithm::new(Some(crc32fast::Hasher::new()), Some(part_size)),
+                    Endianness::BigEndian,
+                ),
+                Checksum::CRC32C => Self::CRC32C(
+                    ChecksumAlgorithm::new(Some(0), Some(part_size)),
+                    Endianness::BigEndian,
+                ),
+                Checksum::QuickXor => todo!(),
             };
             Ok(Some(ctx))
         } else {
@@ -240,13 +248,15 @@ impl ChecksumCtx {
     }
 
     /// Update a checksum with some data.
-    pub fn update(&mut self, data: &[u8]) {
+    pub fn update(&mut self, data: Arc<[u8]>) {
         match self {
-            ChecksumCtx::MD5(ctx) => ctx.get_mut().update(data),
-            ChecksumCtx::SHA1(ctx) => ctx.get_mut().update(data),
-            ChecksumCtx::SHA256(ctx) => ctx.get_mut().update(data),
-            ChecksumCtx::CRC32(ctx, _) => ctx.get_mut().update(data),
-            ChecksumCtx::CRC32C(ctx, _) => ctx.checksum = Some(crc32c_append(*ctx.get_mut(), data)),
+            ChecksumCtx::MD5(ctx) => ctx.get_mut().update(&data),
+            ChecksumCtx::SHA1(ctx) => ctx.get_mut().update(&data),
+            ChecksumCtx::SHA256(ctx) => ctx.get_mut().update(&data),
+            ChecksumCtx::CRC32(ctx, _) => ctx.get_mut().update(&data),
+            ChecksumCtx::CRC32C(ctx, _) => {
+                ctx.checksum = Some(crc32c_append(*ctx.get_mut(), &data))
+            }
             ChecksumCtx::QuickXor => todo!(),
         }
     }
@@ -277,10 +287,37 @@ impl ChecksumCtx {
         pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
-            self.update(&chunk?);
+            self.update(chunk?);
         }
 
         Ok(self.finalize())
+    }
+
+    /// Reset the checksum state.
+    pub fn reset(&self) -> Self {
+        match self {
+            ChecksumCtx::MD5(ctx) => ChecksumCtx::MD5(ChecksumAlgorithm::new(
+                Some(md5::Md5::new()),
+                ctx.aws_etag_part_size,
+            )),
+            ChecksumCtx::SHA1(ctx) => ChecksumCtx::SHA1(ChecksumAlgorithm::new(
+                Some(sha1::Sha1::new()),
+                ctx.aws_etag_part_size,
+            )),
+            ChecksumCtx::SHA256(ctx) => ChecksumCtx::SHA256(ChecksumAlgorithm::new(
+                Some(sha2::Sha256::new()),
+                ctx.aws_etag_part_size,
+            )),
+            ChecksumCtx::CRC32(ctx, endianness) => ChecksumCtx::CRC32(
+                ChecksumAlgorithm::new(Some(crc32fast::Hasher::new()), ctx.aws_etag_part_size),
+                *endianness,
+            ),
+            ChecksumCtx::CRC32C(ctx, endianness) => ChecksumCtx::CRC32C(
+                ChecksumAlgorithm::new(Some(0), ctx.aws_etag_part_size),
+                *endianness,
+            ),
+            ChecksumCtx::QuickXor => todo!(),
+        }
     }
 }
 
