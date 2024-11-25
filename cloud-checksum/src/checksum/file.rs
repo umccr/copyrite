@@ -101,7 +101,7 @@ impl OutputChecksum {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::checksum::test::expected_md5_sum;
+    use crate::checksum::standard::test::expected_md5_sum;
     use serde_json::{from_value, json, to_value, Value};
 
     #[test]

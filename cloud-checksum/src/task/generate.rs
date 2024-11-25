@@ -2,7 +2,7 @@
 //!
 
 use crate::checksum::file::{OutputChecksum, OutputFile};
-use crate::checksum::Checksummer;
+use crate::checksum::Ctx;
 use crate::error::Error::GenerateBuilderError;
 use crate::error::{Error, Result};
 use crate::reader::SharedReader;
@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 #[derive(Debug)]
 pub enum Task {
     ReadTask(u64),
-    ChecksumTask((Checksummer, Vec<u8>)),
+    ChecksumTask((Ctx, Vec<u8>)),
 }
 
 /// Build a generate task.
@@ -106,11 +106,7 @@ impl GenerateTask {
     }
 
     /// Spawns a task which generates checksums.
-    pub fn add_generate_task(
-        mut self,
-        mut ctx: Checksummer,
-        reader: &mut impl SharedReader,
-    ) -> Self {
+    pub fn add_generate_task(mut self, mut ctx: Ctx, reader: &mut impl SharedReader) -> Self {
         let stream = reader.as_stream();
         self.tasks.push(tokio::spawn(async move {
             let stream = ctx.generate(stream);
@@ -125,7 +121,7 @@ impl GenerateTask {
 
     fn add_generate_tasks_direct(
         mut self,
-        checksums: HashSet<Checksummer>,
+        checksums: HashSet<Ctx>,
         reader: &mut impl SharedReader,
     ) -> Self {
         for checksum in checksums {
@@ -137,7 +133,7 @@ impl GenerateTask {
     /// Spawns tasks for a series of checksums.
     pub fn add_generate_tasks(
         mut self,
-        mut checksums: HashSet<Checksummer>,
+        mut checksums: HashSet<Ctx>,
         reader: &mut impl SharedReader,
     ) -> Result<Self> {
         let existing = self.existing_output.as_ref();
@@ -147,7 +143,7 @@ impl GenerateTask {
                 existing
                     .map(|file| {
                         for name in file.checksums.keys() {
-                            checksums.insert(Checksummer::from_str(name)?);
+                            checksums.insert(Ctx::from_str(name)?);
                         }
                         Ok::<_, Error>(())
                     })
@@ -207,7 +203,7 @@ impl GenerateTask {
 pub(crate) mod test {
     use super::*;
     use crate::checksum::aws_etag::test::expected_md5_1gib;
-    use crate::checksum::test::{
+    use crate::checksum::standard::test::{
         expected_crc32_be, expected_crc32c_be, expected_md5_sum, expected_sha1_sum,
         expected_sha256_sum,
     };

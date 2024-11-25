@@ -38,7 +38,7 @@ fn criterion_benchmark(c: &mut Criterion) {
 
     c.bench_function("generate with channel reader", |b| {
         b.to_async(Runtime::new().unwrap())
-            .iter(|| channel_reader(&bench_file))
+            .iter(|| black_box(channel_reader(&bench_file)))
     });
 }
 

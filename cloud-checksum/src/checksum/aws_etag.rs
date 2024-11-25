@@ -2,7 +2,7 @@
 //! of the parts of a file.
 //!
 
-use crate::checksum::Ctx;
+use crate::checksum::standard::StandardCtx;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use std::fmt::{Display, Formatter};
@@ -18,12 +18,12 @@ pub struct AWSETagCtx {
     remainder: Option<Arc<[u8]>>,
     part_checksums: Vec<Vec<u8>>,
     n_checksums: u64,
-    checksummer: Ctx,
+    checksummer: StandardCtx,
 }
 
 impl AWSETagCtx {
     /// Create a new checksummer.
-    pub fn new(checksummer: Ctx, part_size: u64) -> Self {
+    pub fn new(checksummer: StandardCtx, part_size: u64) -> Self {
         Self {
             part_size,
             current_bytes: 0,
@@ -141,7 +141,7 @@ impl FromStr for AWSETagCtx {
 
     fn from_str(s: &str) -> Result<Self> {
         let (s, size) = Self::parse_part_size(s)?;
-        let ctx = Ctx::from_str(&s)?;
+        let ctx = StandardCtx::from_str(&s)?;
 
         Ok(AWSETagCtx::new(ctx, size))
     }
