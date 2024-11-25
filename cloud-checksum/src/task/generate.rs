@@ -177,11 +177,10 @@ impl GenerateTask {
                         Ok(None)
                     }
                     ChecksumTask((ctx, digest)) => {
-                        // Todo part-size outputs.
-                        let checksum = ctx.digest_to_string(digest);
+                        let checksum = ctx.digest_to_string(&digest);
                         Ok(Some((
                             ctx.to_string(),
-                            OutputChecksum::new(checksum, None, None),
+                            OutputChecksum::new(checksum, ctx.part_size(), ctx.part_checksums()),
                         )))
                     }
                 }
@@ -207,6 +206,7 @@ impl GenerateTask {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
+    use crate::checksum::aws_etag::test::expected_md5_1gib;
     use crate::checksum::test::{
         expected_crc32_be, expected_crc32c_be, expected_md5_sum, expected_sha1_sum,
         expected_sha256_sum,
@@ -214,8 +214,6 @@ pub(crate) mod test {
     use crate::reader::channel::test::channel_reader;
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
     use anyhow::Result;
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use hex::decode;
     use tempfile::{tempdir, TempDir};
     use tokio::fs::File;
 
@@ -228,7 +226,7 @@ pub(crate) mod test {
             name,
             true,
             false,
-            vec!["sha1", "sha256", "md5", "aws-etag", "crc32", "crc32c"],
+            vec!["sha1", "sha256", "md5", "aws-etag-1gib", "crc32", "crc32c"],
             expected_md5_sum(),
         )
         .await
@@ -243,7 +241,7 @@ pub(crate) mod test {
             name,
             false,
             true,
-            vec!["sha1", "sha256", "aws-etag", "crc32", "crc32c"],
+            vec!["sha1", "sha256", "aws-etag-1gib", "crc32", "crc32c"],
             expected_md5_sum(),
         )
         .await
@@ -258,7 +256,7 @@ pub(crate) mod test {
             name,
             false,
             false,
-            vec!["sha1", "sha256", "aws-etag", "crc32", "crc32c"],
+            vec!["sha1", "sha256", "aws-etag-1gib", "crc32", "crc32c"],
             "123",
         )
         .await
@@ -304,8 +302,12 @@ pub(crate) mod test {
             OutputChecksum::new(expected_sha256_sum().to_string(), None, None)
         );
         assert_eq!(
-            file.checksums["aws-etag"],
-            OutputChecksum::new(STANDARD.encode(decode(expected_md5_sum())?), None, None)
+            file.checksums["md5-1073741824b"],
+            OutputChecksum::new(
+                expected_md5_1gib().to_string(),
+                Some(1073741824),
+                Some(vec!["d93e71879054f205ede90d35c8081ca5".to_string()])
+            )
         );
         assert_eq!(
             file.checksums["crc32"],

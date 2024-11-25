@@ -4,7 +4,7 @@
 pub mod aws_etag;
 pub mod file;
 
-use crate::checksum::aws_etag::AWSEtagCtx;
+use crate::checksum::aws_etag::AWSETagCtx;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use crate::{Checksum, Endianness};
@@ -21,12 +21,12 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum Checksummer {
     Regular(Ctx),
-    AWSEtag(AWSEtagCtx),
+    AWSEtag(AWSETagCtx),
 }
 
 impl Checksummer {
     /// Update a checksum with some data.
-    pub fn update(&mut self, data: Arc<[u8]>) {
+    pub fn update(&mut self, data: Arc<[u8]>) -> Result<()> {
         match self {
             Checksummer::Regular(ctx) => ctx.update(data),
             Checksummer::AWSEtag(ctx) => ctx.update(data),
@@ -34,7 +34,7 @@ impl Checksummer {
     }
 
     /// Finalize the checksum.
-    pub fn finalize(&mut self) -> Vec<u8> {
+    pub fn finalize(&mut self) -> Result<Vec<u8>> {
         match self {
             Checksummer::Regular(ctx) => ctx.finalize(),
             Checksummer::AWSEtag(ctx) => ctx.finalize(),
@@ -49,17 +49,33 @@ impl Checksummer {
         pin_mut!(stream);
 
         while let Some(chunk) = stream.next().await {
-            self.update(chunk?);
+            self.update(chunk?)?;
         }
 
-        Ok(self.finalize())
+        self.finalize()
     }
 
     /// Get the digest output.
-    pub fn digest_to_string(&self, digest: Vec<u8>) -> String {
+    pub fn digest_to_string(&self, digest: &[u8]) -> String {
         match self {
             Checksummer::Regular(ctx) => ctx.digest_to_string(digest),
             Checksummer::AWSEtag(ctx) => ctx.digest_to_string(digest),
+        }
+    }
+
+    /// Get the part size if this is an AWS checksum ctx.
+    pub fn part_size(&self) -> Option<u64> {
+        match self {
+            Checksummer::Regular(_) => None,
+            Checksummer::AWSEtag(ctx) => Some(ctx.part_size()),
+        }
+    }
+
+    /// Get the encoded part checksums if this is an AWS checksum ctx.
+    pub fn part_checksums(&self) -> Option<Vec<String>> {
+        match self {
+            Checksummer::Regular(_) => None,
+            Checksummer::AWSEtag(ctx) => Some(ctx.part_checksums()),
         }
     }
 }
@@ -77,7 +93,7 @@ impl FromStr for Checksummer {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let aws_etag = AWSEtagCtx::from_str(s);
+        let aws_etag = AWSETagCtx::from_str(s);
         if aws_etag.is_err() {
             Ok(Self::Regular(Ctx::from_str(s)?))
         } else {
@@ -174,11 +190,6 @@ impl Display for Ctx {
 }
 
 impl Ctx {
-    /// Convert the output digest to a canonical string representation of this checksum.
-    pub fn digest_to_string(&self, digest: Vec<u8>) -> String {
-        hex::encode(digest)
-    }
-
     /// Parse into a `ChecksumCtx` for values that use endianness. Uses an -le suffix for
     /// little-endian and -be for big-endian.
     pub fn parse_endianness(s: &str) -> Result<Option<Self>> {
@@ -215,7 +226,7 @@ impl Ctx {
     }
 
     /// Update a checksum with some data.
-    pub fn update(&mut self, data: Arc<[u8]>) {
+    pub fn update(&mut self, data: Arc<[u8]>) -> Result<()> {
         match self {
             Ctx::MD5(Some(ctx)) => ctx.update(data),
             Ctx::SHA1(Some(ctx)) => ctx.update(data),
@@ -224,13 +235,15 @@ impl Ctx {
             Ctx::CRC32C(ctx, _) => *ctx = crc32c_append(*ctx, &data),
             Ctx::QuickXor => todo!(),
             _ => panic!("cannot call update with empty context"),
-        }
+        };
+
+        Ok(())
     }
 
     /// Finalize the checksum.
-    pub fn finalize(&mut self) -> Vec<u8> {
+    pub fn finalize(&mut self) -> Result<Vec<u8>> {
         let msg = "cannot call finalize with empty context";
-        match self {
+        let digest = match self {
             Ctx::MD5(ctx) => ctx.take().expect(msg).finalize().to_vec(),
             Ctx::SHA1(ctx) => ctx.take().expect(msg).finalize().to_vec(),
             Ctx::SHA256(ctx) => ctx.take().expect(msg).finalize().to_vec(),
@@ -245,7 +258,9 @@ impl Ctx {
                 Endianness::BigEndian => ctx.to_be_bytes().to_vec(),
             },
             Ctx::QuickXor => todo!(),
-        }
+        };
+
+        Ok(digest)
     }
 
     /// Reset the checksum state.
@@ -259,6 +274,11 @@ impl Ctx {
             Ctx::QuickXor => todo!(),
         }
     }
+
+    /// Get the digest output.
+    pub fn digest_to_string(&self, digest: &[u8]) -> String {
+        hex::encode(digest)
+    }
 }
 
 #[cfg(test)]
@@ -268,7 +288,6 @@ pub(crate) mod test {
     use crate::reader::SharedReader;
     use crate::test::TestFileBuilder;
     use anyhow::Result;
-    use hex::encode;
     use tokio::fs::File;
     use tokio::join;
 
@@ -307,16 +326,6 @@ pub(crate) mod test {
         test_checksum("crc32c-le", expected_crc32c_le()).await
     }
 
-    #[tokio::test]
-    async fn test_aws_etag_md5() -> Result<()> {
-        test_checksum("md5-aws-1", expected_md5_sum()).await
-    }
-
-    #[tokio::test]
-    async fn test_aws_etag() -> Result<()> {
-        test_checksum("aws-etag", expected_md5_sum()).await
-    }
-
     pub(crate) fn expected_md5_sum() -> &'static str {
         "d93e71879054f205ede90d35c8081ca5"
     }
@@ -345,7 +354,7 @@ pub(crate) mod test {
         "6a102049"
     }
 
-    async fn test_checksum(checksum: &str, expected: &str) -> Result<()> {
+    pub(crate) async fn test_checksum(checksum: &str, expected: &str) -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
         let mut reader = channel_reader(File::open(test_file).await?).await;
 
@@ -356,7 +365,7 @@ pub(crate) mod test {
 
         let (digest, _) = join!(checksum.generate(stream), task);
 
-        assert_eq!(expected, encode(digest?));
+        assert_eq!(expected, checksum.digest_to_string(&digest?));
 
         Ok(())
     }

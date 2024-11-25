@@ -80,9 +80,6 @@ pub enum Checksum {
     SHA1,
     /// Calculate the SHA256 checksum.
     SHA256,
-    /// Calculate the AWS ETag.
-    #[value(name = "aws-etag")]
-    AWSETag,
     /// Calculate a CRC32.
     CRC32,
     /// Calculate a CRC32C.
