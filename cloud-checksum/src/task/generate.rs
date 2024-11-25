@@ -9,7 +9,7 @@ use crate::reader::SharedReader;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use futures_util::future::join_all;
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
+use tokio::fs::File;
 use tokio::task::JoinHandle;
 
 /// Define the kind of task that is running.
@@ -135,6 +135,7 @@ impl GenerateTask {
         mut self,
         mut checksums: HashSet<Ctx>,
         reader: &mut impl SharedReader,
+        file_size: Option<u64>,
     ) -> Result<Self> {
         let existing = self.existing_output.as_ref();
 
@@ -143,7 +144,7 @@ impl GenerateTask {
                 existing
                     .map(|file| {
                         for name in file.checksums.keys() {
-                            checksums.insert(Ctx::from_str(name)?);
+                            checksums.insert(Ctx::try_from((name.as_str(), file_size))?);
                         }
                         Ok::<_, Error>(())
                     })
@@ -197,6 +198,11 @@ impl GenerateTask {
 
         Ok(output)
     }
+}
+
+/// Get the file size if available.
+pub async fn file_size(file: &File) -> Option<u64> {
+    file.metadata().await.map(|metadata| metadata.len()).ok()
 }
 
 #[cfg(test)]
@@ -266,7 +272,9 @@ pub(crate) mod test {
         md5: &str,
     ) -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
-        let mut reader = channel_reader(File::open(test_file).await?).await;
+        let file = File::open(test_file).await?;
+        let file_size = file_size(&file).await;
+        let mut reader = channel_reader(file).await;
 
         let tasks = tasks
             .into_iter()
@@ -278,7 +286,7 @@ pub(crate) mod test {
             .with_verify(verify)
             .build()
             .await?
-            .add_generate_tasks(HashSet::from_iter(tasks), &mut reader)?
+            .add_generate_tasks(HashSet::from_iter(tasks), &mut reader, file_size)?
             .add_reader_task(reader)?
             .run()
             .await?;

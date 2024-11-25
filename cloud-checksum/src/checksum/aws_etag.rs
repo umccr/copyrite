@@ -18,19 +18,19 @@ pub struct AWSETagCtx {
     remainder: Option<Arc<[u8]>>,
     part_checksums: Vec<Vec<u8>>,
     n_checksums: u64,
-    checksummer: StandardCtx,
+    ctx: StandardCtx,
 }
 
 impl AWSETagCtx {
     /// Create a new checksummer.
-    pub fn new(checksummer: StandardCtx, part_size: u64) -> Self {
+    pub fn new(ctx: StandardCtx, part_size: u64) -> Self {
         Self {
             part_size,
             current_bytes: 0,
             remainder: None,
             part_checksums: vec![],
             n_checksums: 0,
-            checksummer,
+            ctx,
         }
     }
 
@@ -46,18 +46,18 @@ impl AWSETagCtx {
             self.current_bytes = u64::try_from(remainder.len())?;
             self.remainder = Some(Arc::from(remainder));
 
-            self.checksummer.update(Arc::from(data))?;
+            self.ctx.update(Arc::from(data))?;
 
-            self.part_checksums.push(self.checksummer.finalize()?);
+            self.part_checksums.push(self.ctx.finalize()?);
 
             // Reset the context for next chunk.
-            self.checksummer = self.checksummer.reset();
+            self.ctx = self.ctx.reset();
         } else {
             // Otherwise update as usual, tracking the byte position.
             self.update_with_remainder()?;
 
             self.current_bytes += len;
-            self.checksummer.update(data)?;
+            self.ctx.update(data)?;
         }
 
         Ok(())
@@ -67,7 +67,7 @@ impl AWSETagCtx {
     fn update_with_remainder(&mut self) -> Result<()> {
         let remainder = self.remainder.take();
         if let Some(remainder) = remainder {
-            self.checksummer.update(remainder)?;
+            self.ctx.update(remainder)?;
             self.remainder = None;
         }
         Ok(())
@@ -78,23 +78,23 @@ impl AWSETagCtx {
         // Add the last part checksum.
         if self.remainder.is_some() || self.current_bytes != 0 {
             self.update_with_remainder()?;
-            self.part_checksums.push(self.checksummer.finalize()?);
+            self.part_checksums.push(self.ctx.finalize()?);
 
             // Reset the context for merged chunks.
-            self.checksummer = self.checksummer.reset();
+            self.ctx = self.ctx.reset();
         }
 
         // Then merge the part checksums and compute a single checksum.
         self.n_checksums = u64::try_from(self.part_checksums.len())?;
         let concat: Vec<u8> = self.part_checksums.iter().flatten().copied().collect();
 
-        self.checksummer.update(Arc::from(concat.as_slice()))?;
-        self.checksummer.finalize()
+        self.ctx.update(Arc::from(concat.as_slice()))?;
+        self.ctx.finalize()
     }
 
     /// Parse into a `ChecksumCtx` for values that use endianness. Parses an -aws-<n> suffix,
     /// where n represents the part size to calculate.
-    pub fn parse_part_size(s: &str) -> Result<(String, u64)> {
+    pub fn parse_part_size(s: &str, file_size: Option<u64>) -> Result<(String, u64)> {
         // Support an alias of aws-etag for md5.
         let s = s.replace("aws-etag", "md5-aws");
 
@@ -104,8 +104,21 @@ impl AWSETagCtx {
             .ok_or_else(|| ParseError("expected part size".to_string()))?;
         let part_size = part_size.strip_prefix("etag-").unwrap_or(part_size);
 
-        let part_size =
-            parse_size::parse_size(part_size).map_err(|err| ParseError(err.to_string()))?;
+        let part_size = if let Ok(part_number) = part_size.parse::<u64>() {
+            if let Some(file_size) = file_size {
+                if file_size < 1 {
+                    return Err(ParseError("cannot use zero part number".to_string()));
+                }
+                file_size.div_ceil(part_number)
+            } else {
+                return Err(ParseError(
+                    "cannot use part number syntax without file size".to_string(),
+                ));
+            }
+        } else {
+            parse_size::parse_size(part_size).map_err(|err| ParseError(err.to_string()))?
+        };
+
         let algorithm = iter
             .next()
             .ok_or_else(|| ParseError("expected checksum algorithm".to_string()))?;
@@ -115,11 +128,7 @@ impl AWSETagCtx {
 
     /// Get the digest output.
     pub fn digest_to_string(&self, digest: &[u8]) -> String {
-        format!(
-            "{}-{}",
-            self.checksummer.digest_to_string(digest),
-            self.n_checksums
-        )
+        format!("{}-{}", self.ctx.digest_to_string(digest), self.n_checksums)
     }
 
     /// Get the part size.
@@ -131,7 +140,7 @@ impl AWSETagCtx {
     pub fn part_checksums(&self) -> Vec<String> {
         self.part_checksums
             .iter()
-            .map(|digest| self.checksummer.digest_to_string(digest))
+            .map(|digest| self.ctx.digest_to_string(digest))
             .collect()
     }
 }
@@ -140,7 +149,15 @@ impl FromStr for AWSETagCtx {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let (s, size) = Self::parse_part_size(s)?;
+        Self::try_from((s, None))
+    }
+}
+
+impl TryFrom<(&str, Option<u64>)> for AWSETagCtx {
+    type Error = Error;
+
+    fn try_from((s, file_size): (&str, Option<u64>)) -> Result<Self> {
+        let (s, size) = Self::parse_part_size(s, file_size)?;
         let ctx = StandardCtx::from_str(&s)?;
 
         Ok(AWSETagCtx::new(ctx, size))
@@ -149,7 +166,7 @@ impl FromStr for AWSETagCtx {
 
 impl Display for AWSETagCtx {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}-{}b", self.checksummer, self.part_size)
+        write!(f, "{}-{}b", self.ctx, self.part_size)
     }
 }
 
@@ -164,6 +181,10 @@ pub(crate) mod test {
 
     pub(crate) fn expected_md5_100mib() -> &'static str {
         "e5727bb1cb678220f6782ff6cb927569-11"
+    }
+
+    pub(crate) fn expected_md5_10() -> &'static str {
+        "9a9666a5c313c53fbc3a3ea1d43cc981-10"
     }
 
     pub(crate) fn expected_sha256_100mib() -> &'static str {
@@ -189,5 +210,11 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_aws_etag_sha256() -> Result<()> {
         test_checksum("sha256-aws-100mib", expected_sha256_100mib()).await
+    }
+
+    #[tokio::test]
+    async fn test_aws_etag_part_number() -> Result<()> {
+        test_checksum("md5-aws-10", expected_md5_10()).await?;
+        test_checksum("aws-etag-10", expected_md5_10()).await
     }
 }

@@ -90,7 +90,15 @@ impl FromStr for Ctx {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let aws_etag = AWSETagCtx::from_str(s);
+        Self::try_from((s, None))
+    }
+}
+
+impl TryFrom<(&str, Option<u64>)> for Ctx {
+    type Error = Error;
+
+    fn try_from((s, file_size): (&str, Option<u64>)) -> Result<Self> {
+        let aws_etag = AWSETagCtx::try_from((s, file_size));
         if aws_etag.is_err() {
             Ok(Self::Regular(StandardCtx::from_str(s)?))
         } else {
@@ -104,6 +112,7 @@ pub(crate) mod test {
     use super::*;
     use crate::reader::channel::test::channel_reader;
     use crate::reader::SharedReader;
+    use crate::task::generate::file_size;
     use crate::test::TestFileBuilder;
     use anyhow::Result;
     use tokio::fs::File;
@@ -111,9 +120,11 @@ pub(crate) mod test {
 
     pub(crate) async fn test_checksum(checksum: &str, expected: &str) -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
-        let mut reader = channel_reader(File::open(test_file).await?).await;
+        let file = File::open(test_file).await?;
+        let file_size = file_size(&file).await;
+        let mut reader = channel_reader(file).await;
 
-        let mut checksum = Ctx::from_str(checksum)?;
+        let mut checksum = Ctx::try_from((checksum, file_size))?;
 
         let stream = reader.as_stream();
         let task = tokio::spawn(async move { reader.read_task().await });

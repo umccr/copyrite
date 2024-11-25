@@ -19,6 +19,9 @@ pub struct OutputFile {
     pub(crate) name: String,
     pub(crate) version: String,
     pub(crate) size: u64,
+    // The name of the checksum is always the most canonical form.
+    // E.g. no -be prefix for big-endian, and bytes as the unit for
+    // AWS checksums.
     #[serde(flatten)]
     pub(crate) checksums: HashMap<String, OutputChecksum>,
 }

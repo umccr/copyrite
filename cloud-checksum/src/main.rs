@@ -1,7 +1,7 @@
 use clap::Parser;
 use cloud_checksum::error::Result;
 use cloud_checksum::reader::channel::ChannelReader;
-use cloud_checksum::task::generate::GenerateTaskBuilder;
+use cloud_checksum::task::generate::{file_size, GenerateTaskBuilder};
 use cloud_checksum::{Commands, Subcommands};
 use std::collections::HashSet;
 use tokio::fs::File;
@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
                     .with_verify(args.verify)
                     .build()
                     .await?
-                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader)?
+                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader, None)?
                     .add_reader_task(reader)?
                     .run()
                     .await?
@@ -29,10 +29,9 @@ async fn main() -> Result<()> {
 
                 println!("{}", output);
             } else {
-                let mut reader = ChannelReader::new(
-                    File::open(&input).await?,
-                    args.optimization.channel_capacity,
-                );
+                let file = File::open(&input).await?;
+                let file_size = file_size(&file).await;
+                let mut reader = ChannelReader::new(file, args.optimization.channel_capacity);
 
                 GenerateTaskBuilder::default()
                     .with_overwrite(args.force_overwrite)
@@ -40,7 +39,7 @@ async fn main() -> Result<()> {
                     .with_input_file_name(input)
                     .build()
                     .await?
-                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader)?
+                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader, file_size)?
                     .add_reader_task(reader)?
                     .run()
                     .await?
