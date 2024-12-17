@@ -1,6 +1,7 @@
 //! Error handling logic.
 //!
 
+use std::num::TryFromIntError;
 use std::{io, result};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -20,8 +21,8 @@ pub enum Error {
     IOError(#[from] io::Error),
     #[error("parsing: {0}")]
     ParseError(String),
-    #[error("overflow converting numbers")]
-    OverflowError,
+    #[error("overflow converting numbers: {0}")]
+    OverflowError(#[from] TryFromIntError),
     #[error("serde: {0}")]
     SerdeError(String),
     #[error("output file: {0}")]

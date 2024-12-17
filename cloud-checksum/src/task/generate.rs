@@ -2,21 +2,21 @@
 //!
 
 use crate::checksum::file::{OutputChecksum, OutputFile};
-use crate::checksum::ChecksumCtx;
+use crate::checksum::Ctx;
 use crate::error::Error::GenerateBuilderError;
 use crate::error::{Error, Result};
 use crate::reader::SharedReader;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use futures_util::future::join_all;
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
+use tokio::fs::File;
 use tokio::task::JoinHandle;
 
 /// Define the kind of task that is running.
 #[derive(Debug)]
 pub enum Task {
     ReadTask(u64),
-    ChecksumTask((ChecksumCtx, Vec<u8>)),
+    ChecksumTask((Ctx, Vec<u8>)),
 }
 
 /// Build a generate task.
@@ -106,11 +106,7 @@ impl GenerateTask {
     }
 
     /// Spawns a task which generates checksums.
-    pub fn add_generate_task(
-        mut self,
-        mut ctx: ChecksumCtx,
-        reader: &mut impl SharedReader,
-    ) -> Self {
+    pub fn add_generate_task(mut self, mut ctx: Ctx, reader: &mut impl SharedReader) -> Self {
         let stream = reader.as_stream();
         self.tasks.push(tokio::spawn(async move {
             let stream = ctx.generate(stream);
@@ -125,7 +121,7 @@ impl GenerateTask {
 
     fn add_generate_tasks_direct(
         mut self,
-        checksums: HashSet<ChecksumCtx>,
+        checksums: HashSet<Ctx>,
         reader: &mut impl SharedReader,
     ) -> Self {
         for checksum in checksums {
@@ -137,8 +133,9 @@ impl GenerateTask {
     /// Spawns tasks for a series of checksums.
     pub fn add_generate_tasks(
         mut self,
-        mut checksums: HashSet<ChecksumCtx>,
+        mut checksums: HashSet<Ctx>,
         reader: &mut impl SharedReader,
+        file_size: Option<u64>,
     ) -> Result<Self> {
         let existing = self.existing_output.as_ref();
 
@@ -147,7 +144,7 @@ impl GenerateTask {
                 existing
                     .map(|file| {
                         for name in file.checksums.keys() {
-                            checksums.insert(ChecksumCtx::from_str(name)?);
+                            checksums.insert(Ctx::try_from((name.as_str(), file_size))?);
                         }
                         Ok::<_, Error>(())
                     })
@@ -177,11 +174,10 @@ impl GenerateTask {
                         Ok(None)
                     }
                     ChecksumTask((ctx, digest)) => {
-                        // Todo part-size outputs.
-                        let checksum = ctx.digest_to_string(digest);
+                        let checksum = ctx.digest_to_string(&digest);
                         Ok(Some((
                             ctx.to_string(),
-                            OutputChecksum::new(checksum, None, None),
+                            OutputChecksum::new(checksum, ctx.part_size(), ctx.part_checksums()),
                         )))
                     }
                 }
@@ -204,18 +200,22 @@ impl GenerateTask {
     }
 }
 
+/// Get the file size if available.
+pub async fn file_size(file: &File) -> Option<u64> {
+    file.metadata().await.map(|metadata| metadata.len()).ok()
+}
+
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::checksum::test::{
+    use crate::checksum::aws_etag::test::expected_md5_1gib;
+    use crate::checksum::standard::test::{
         expected_crc32_be, expected_crc32c_be, expected_md5_sum, expected_sha1_sum,
         expected_sha256_sum,
     };
     use crate::reader::channel::test::channel_reader;
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
     use anyhow::Result;
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use hex::decode;
     use tempfile::{tempdir, TempDir};
     use tokio::fs::File;
 
@@ -228,7 +228,7 @@ pub(crate) mod test {
             name,
             true,
             false,
-            vec!["sha1", "sha256", "md5", "aws-etag", "crc32", "crc32c"],
+            vec!["sha1", "sha256", "md5", "aws-etag-1gib", "crc32", "crc32c"],
             expected_md5_sum(),
         )
         .await
@@ -243,7 +243,7 @@ pub(crate) mod test {
             name,
             false,
             true,
-            vec!["sha1", "sha256", "aws-etag", "crc32", "crc32c"],
+            vec!["sha1", "sha256", "aws-etag-1gib", "crc32", "crc32c"],
             expected_md5_sum(),
         )
         .await
@@ -258,7 +258,7 @@ pub(crate) mod test {
             name,
             false,
             false,
-            vec!["sha1", "sha256", "aws-etag", "crc32", "crc32c"],
+            vec!["sha1", "sha256", "aws-etag-1gib", "crc32", "crc32c"],
             "123",
         )
         .await
@@ -272,7 +272,9 @@ pub(crate) mod test {
         md5: &str,
     ) -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
-        let mut reader = channel_reader(File::open(test_file).await?).await;
+        let file = File::open(test_file).await?;
+        let file_size = file_size(&file).await;
+        let mut reader = channel_reader(file).await;
 
         let tasks = tasks
             .into_iter()
@@ -284,7 +286,7 @@ pub(crate) mod test {
             .with_verify(verify)
             .build()
             .await?
-            .add_generate_tasks(HashSet::from_iter(tasks), &mut reader)?
+            .add_generate_tasks(HashSet::from_iter(tasks), &mut reader, file_size)?
             .add_reader_task(reader)?
             .run()
             .await?;
@@ -304,8 +306,12 @@ pub(crate) mod test {
             OutputChecksum::new(expected_sha256_sum().to_string(), None, None)
         );
         assert_eq!(
-            file.checksums["aws-etag"],
-            OutputChecksum::new(STANDARD.encode(decode(expected_md5_sum())?), None, None)
+            file.checksums["md5-1073741824b"],
+            OutputChecksum::new(
+                expected_md5_1gib().to_string(),
+                Some(1073741824),
+                Some(vec!["d93e71879054f205ede90d35c8081ca5".to_string()])
+            )
         );
         assert_eq!(
             file.checksums["crc32"],

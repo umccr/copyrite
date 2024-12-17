@@ -9,7 +9,7 @@ pub mod task;
 #[doc(hidden)]
 pub mod test;
 
-use crate::checksum::ChecksumCtx;
+use crate::checksum::Ctx;
 use crate::error::Error;
 use crate::error::Error::ParseError;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -21,9 +21,15 @@ use std::str::FromStr;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about)]
 pub struct Commands {
-    /// Checksums to use. Can be specified multiple times or comma-separated.
+    /// Checksums to use. Can be specified multiple times or comma-separated. Use an
+    /// `aws-<part_size>` suffix to create AWS ETag-style checksums, e.g. `md5-aws-8mib`.
+    /// `<part_size>` should contain a size unit, e.g. `mib` or `b`. When the unit is omitted,
+    /// this is interpreted as a `<part-number>` where the input file is split evenly into the
+    /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits the
+    /// file into 10 parts. `<part-number>` is not supported when the file size is not known, such
+    /// as when taking input from stdin.
     #[arg(global = true, value_delimiter = ',', short, long)]
-    pub checksum: Vec<ChecksumCtx>,
+    pub checksum: Vec<Ctx>,
 
     /// The amount of time to calculate checksums for. Once this timeout is reached the partial
     /// checksum will be saved to the partial checksum file.
@@ -80,9 +86,6 @@ pub enum Checksum {
     SHA1,
     /// Calculate the SHA256 checksum.
     SHA256,
-    /// Calculate the AWS ETag.
-    #[value(name = "aws-etag")]
-    AWSETag,
     /// Calculate a CRC32.
     CRC32,
     /// Calculate a CRC32C.

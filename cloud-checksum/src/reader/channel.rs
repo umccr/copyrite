@@ -1,7 +1,6 @@
 //! A shared reader implementation which makes use on channels.
 //!
 
-use crate::error::Error::OverflowError;
 use crate::error::Result;
 use crate::reader::SharedReader;
 use async_stream::stream;
@@ -76,7 +75,7 @@ where
         }
 
         // Drop senders to signal closed channel.
-        u64::try_from(size).map_err(|_| OverflowError)
+        Ok(u64::try_from(size)?)
     }
 }
 

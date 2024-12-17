@@ -1,5 +1,5 @@
 use cloud_checksum::reader::channel::ChannelReader;
-use cloud_checksum::task::generate::GenerateTask;
+use cloud_checksum::task::generate::{file_size, GenerateTask};
 use cloud_checksum::test::TestFileBuilder;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::collections::HashSet;
@@ -8,6 +8,8 @@ use tokio::fs::File;
 use tokio::runtime::Runtime;
 
 async fn channel_reader(path: &Path) {
+    let file = File::open(path).await.unwrap();
+    let file_size = file_size(&file).await;
     let mut reader = ChannelReader::new(File::open(path).await.unwrap(), 100);
 
     let result = GenerateTask::default()
@@ -20,6 +22,7 @@ async fn channel_reader(path: &Path) {
                 "crc32c".parse().unwrap(),
             ]),
             &mut reader,
+            file_size,
         )
         .unwrap()
         .add_reader_task(reader)
