@@ -26,7 +26,7 @@ pub enum Error {
     #[error("serde: {0}")]
     SerdeError(String),
     #[error("output file: {0}")]
-    OutputFileError(String),
+    SumsFileError(String),
     #[error("generate builder: {0}")]
     GenerateBuilderError(String),
 }

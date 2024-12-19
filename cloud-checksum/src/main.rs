@@ -6,6 +6,7 @@ use cloud_checksum::{Commands, Subcommands};
 use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::stdin;
+use cloud_checksum::task::check::CheckTaskBuilder;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,7 +48,15 @@ async fn main() -> Result<()> {
                     .await?
             }
         }
-        Subcommands::Check { .. } => todo!(),
+        Subcommands::Check { input } => {
+            let is_same = CheckTaskBuilder::default().with_input_files(input).build().await?.run().await?;
+
+            if is_same {
+                println!("All files match");
+            } else {
+                println!("Files do not match");
+            }
+        },
     };
 
     Ok(())

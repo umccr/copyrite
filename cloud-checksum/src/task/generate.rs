@@ -1,7 +1,7 @@
 //! Generate checksums for files.
 //!
 
-use crate::checksum::file::{OutputChecksum, OutputFile};
+use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
 use crate::error::Error::GenerateBuilderError;
 use crate::error::{Error, Result};
@@ -49,7 +49,7 @@ impl GenerateTaskBuilder {
     /// Build a generate task.
     pub async fn build(self) -> Result<GenerateTask> {
         let existing_output = if !self.input_file_name.is_empty() {
-            OutputFile::read_from(self.input_file_name.to_string())
+            SumsFile::read_from(self.input_file_name.to_string())
                 .await
                 .ok()
         } else {
@@ -93,7 +93,7 @@ pub struct GenerateTask {
     tasks: Vec<JoinHandle<Result<Task>>>,
     input_file_name: String,
     overwrite: OverwriteMode,
-    existing_output: Option<OutputFile>,
+    existing_output: Option<SumsFile>,
 }
 
 impl GenerateTask {
@@ -161,7 +161,7 @@ impl GenerateTask {
     }
 
     /// Runs the generate task, returning an output file.
-    pub async fn run(self) -> Result<OutputFile> {
+    pub async fn run(self) -> Result<SumsFile> {
         let mut file_size = 0;
         let checksums = join_all(self.tasks)
             .await
@@ -177,18 +177,18 @@ impl GenerateTask {
                         let checksum = ctx.digest_to_string(&digest);
                         Ok(Some((
                             ctx.to_string(),
-                            OutputChecksum::new(checksum, ctx.part_size(), ctx.part_checksums()),
+                            Checksum::new(checksum, ctx.part_size(), ctx.part_checksums()),
                         )))
                     }
                 }
             })
-            .collect::<Result<Vec<Option<(String, OutputChecksum)>>>>()?
+            .collect::<Result<Vec<Option<(String, Checksum)>>>>()?
             .into_iter()
             .flatten();
 
         let checksums = HashMap::from_iter(checksums);
 
-        let new_file = OutputFile::new(self.input_file_name, file_size, checksums);
+        let new_file = SumsFile::new(self.input_file_name, file_size, checksums);
         let output = match self.existing_output {
             Some(file) if !matches!(self.overwrite, OverwriteMode::Overwrite) => {
                 file.merge(new_file)?
@@ -295,19 +295,19 @@ pub(crate) mod test {
         assert_eq!(file.size, TEST_FILE_SIZE);
         assert_eq!(
             file.checksums["md5"],
-            OutputChecksum::new(md5.to_string(), None, None)
+            Checksum::new(md5.to_string(), None, None)
         );
         assert_eq!(
             file.checksums["sha1"],
-            OutputChecksum::new(expected_sha1_sum().to_string(), None, None)
+            Checksum::new(expected_sha1_sum().to_string(), None, None)
         );
         assert_eq!(
             file.checksums["sha256"],
-            OutputChecksum::new(expected_sha256_sum().to_string(), None, None)
+            Checksum::new(expected_sha256_sum().to_string(), None, None)
         );
         assert_eq!(
             file.checksums["md5-1073741824b"],
-            OutputChecksum::new(
+            Checksum::new(
                 expected_md5_1gib().to_string(),
                 Some(1073741824),
                 Some(vec!["d93e71879054f205ede90d35c8081ca5".to_string()])
@@ -315,11 +315,11 @@ pub(crate) mod test {
         );
         assert_eq!(
             file.checksums["crc32"],
-            OutputChecksum::new(expected_crc32_be().to_string(), None, None)
+            Checksum::new(expected_crc32_be().to_string(), None, None)
         );
         assert_eq!(
             file.checksums["crc32c"],
-            OutputChecksum::new(expected_crc32c_be().to_string(), None, None)
+            Checksum::new(expected_crc32c_be().to_string(), None, None)
         );
 
         Ok(())
@@ -327,12 +327,12 @@ pub(crate) mod test {
 
     async fn write_existing(tmp: TempDir) -> Result<String, Error> {
         let name = tmp.path().to_string_lossy().to_string() + "name";
-        let existing = OutputFile::new(
+        let existing = SumsFile::new(
             name.to_string(),
             TEST_FILE_SIZE,
             HashMap::from_iter(vec![(
                 "md5".to_string(),
-                OutputChecksum::new("123".to_string(), None, None),
+                Checksum::new("123".to_string(), None, None),
             )]),
         );
         existing.write().await?;

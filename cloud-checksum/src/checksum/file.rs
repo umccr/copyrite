@@ -1,7 +1,7 @@
 //! Defines the file format that outputs checksum results
 //!
 
-use crate::error::Error::OutputFileError;
+use crate::error::Error::SumsFileError;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string_pretty};
@@ -14,7 +14,7 @@ pub const OUTPUT_FILE_VERSION: &str = "0.1.0";
 /// A file containing multiple checksums.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub struct OutputFile {
+pub struct SumsFile {
     #[serde(skip)]
     pub(crate) name: String,
     pub(crate) version: String,
@@ -23,12 +23,12 @@ pub struct OutputFile {
     // E.g. no -be prefix for big-endian, and bytes as the unit for
     // AWS checksums.
     #[serde(flatten)]
-    pub(crate) checksums: HashMap<String, OutputChecksum>,
+    pub(crate) checksums: HashMap<String, Checksum>,
 }
 
-impl OutputFile {
+impl SumsFile {
     /// Create an output file.
-    pub fn new(name: String, size: u64, checksums: HashMap<String, OutputChecksum>) -> Self {
+    pub fn new(name: String, size: u64, checksums: HashMap<String, Checksum>) -> Self {
         Self {
             name,
             version: OUTPUT_FILE_VERSION.to_string(),
@@ -64,7 +64,7 @@ impl OutputFile {
     /// Merge with another output file, overwriting existing checksums.
     pub fn merge(mut self, other: Self) -> Result<Self> {
         if self.name != other.name && self.size != other.size {
-            return Err(OutputFileError(
+            return Err(SumsFileError(
                 "the name and size of output files do not match".to_string(),
             ));
         }
@@ -75,18 +75,36 @@ impl OutputFile {
 
         Ok(self)
     }
+
+    /// Check if the sums file is the same as another according to all available checksums
+    /// in the sums file.
+    pub fn is_same(&self, other: &Self) -> Result<bool> {
+        if self.size != other.size {
+            return Ok(false);
+        }
+
+        for (key, checksum) in &self.checksums {
+            if let Some(other_checksum) = other.checksums.get(key) {
+                if checksum == other_checksum {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
 }
 
 /// The output of a checksum.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub struct OutputChecksum {
+pub struct Checksum {
     pub(crate) checksum: String,
     pub(crate) part_size: Option<u64>,
     pub(crate) part_checksums: Option<Vec<String>>,
 }
 
-impl OutputChecksum {
+impl Checksum {
     /// Create an output checksum.
     pub fn new(
         checksum: String,
@@ -123,7 +141,7 @@ pub(crate) mod test {
     fn deserialize_output_file() -> Result<()> {
         let expected_md5 = expected_md5_sum();
         let value = expected_output_json(expected_md5);
-        let result: OutputFile = from_value(value)?;
+        let result: SumsFile = from_value(value)?;
         let expected = expected_output_file(expected_md5);
 
         assert_eq!(result, expected);
@@ -137,7 +155,7 @@ pub(crate) mod test {
         let mut file_one = expected_output_file(expected_md5);
         file_one.checksums.insert(
             "aws-etag".to_string(),
-            OutputChecksum::new(
+            Checksum::new(
                 expected_md5.to_string(),
                 Some(2),
                 Some(vec![expected_md5.to_string()]),
@@ -147,7 +165,7 @@ pub(crate) mod test {
         let mut file_two = expected_output_file(expected_md5);
         file_two.checksums.insert(
             "md5".to_string(),
-            OutputChecksum::new(
+            Checksum::new(
                 expected_md5.to_string(),
                 Some(1),
                 Some(vec![expected_md5.to_string()]),
@@ -162,7 +180,7 @@ pub(crate) mod test {
             HashMap::from_iter(vec![
                 (
                     "md5".to_string(),
-                    OutputChecksum::new(
+                    Checksum::new(
                         expected_md5.to_string(),
                         Some(1),
                         Some(vec![expected_md5.to_string()]),
@@ -170,7 +188,7 @@ pub(crate) mod test {
                 ),
                 (
                     "aws-etag".to_string(),
-                    OutputChecksum::new(
+                    Checksum::new(
                         expected_md5.to_string(),
                         Some(1),
                         Some(vec![expected_md5.to_string()]),
@@ -182,16 +200,16 @@ pub(crate) mod test {
         Ok(())
     }
 
-    fn expected_output_file(expected_md5: &str) -> OutputFile {
+    fn expected_output_file(expected_md5: &str) -> SumsFile {
         let checksums = vec![(
             "aws-etag".to_string(),
-            OutputChecksum::new(
+            Checksum::new(
                 expected_md5.to_string(),
                 Some(1),
                 Some(vec![expected_md5.to_string()]),
             ),
         )];
-        OutputFile::new("".to_string(), 123, HashMap::from_iter(checksums))
+        SumsFile::new("".to_string(), 123, HashMap::from_iter(checksums))
     }
 
     fn expected_output_json(expected_md5: &str) -> Value {

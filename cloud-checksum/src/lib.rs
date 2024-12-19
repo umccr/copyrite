@@ -14,7 +14,6 @@ use crate::error::Error;
 use crate::error::Error::ParseError;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::Duration;
-use std::path::PathBuf;
 use std::str::FromStr;
 
 /// Args for the checksum-cloud CLI.
@@ -73,7 +72,7 @@ pub enum Subcommands {
     Check {
         /// The input file to check a checksum. Requires at least two files.
         #[arg(value_delimiter = ',', required = true, num_args = 2, short, long)]
-        files: Vec<PathBuf>,
+        input: Vec<String>,
     },
 }
 
