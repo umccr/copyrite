@@ -5,32 +5,34 @@ use crate::error::Error::SumsFileError;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string_pretty};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tokio::fs;
 
 /// The current version of the output file.
 pub const OUTPUT_FILE_VERSION: &str = "0.1.0";
 
 /// A file containing multiple checksums.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub struct SumsFile {
+    // Names are only used internally for writing files, they should not
+    // be encoded in the actual sums file format.
     #[serde(skip)]
-    pub(crate) name: String,
+    pub(crate) names: BTreeSet<String>,
     pub(crate) version: String,
     pub(crate) size: u64,
     // The name of the checksum is always the most canonical form.
     // E.g. no -be prefix for big-endian, and bytes as the unit for
     // AWS checksums.
     #[serde(flatten)]
-    pub(crate) checksums: HashMap<String, Checksum>,
+    pub(crate) checksums: BTreeMap<String, Checksum>,
 }
 
 impl SumsFile {
     /// Create an output file.
-    pub fn new(name: String, size: u64, checksums: HashMap<String, Checksum>) -> Self {
+    pub fn new(names: BTreeSet<String>, size: u64, checksums: BTreeMap<String, Checksum>) -> Self {
         Self {
-            name,
+            names,
             version: OUTPUT_FILE_VERSION.to_string(),
             size,
             checksums,
@@ -48,55 +50,74 @@ impl SumsFile {
 
     /// Write the output file.
     pub async fn write(&self) -> Result<()> {
-        let path = Self::format_file(&self.name);
-        Ok(fs::write(path, self.to_json_string()?).await?)
+        for name in &self.names {
+            let path = Self::format_file(name);
+            fs::write(path, self.to_json_string()?).await?
+        }
+
+        Ok(())
     }
 
     /// Read an existing output file.
     pub async fn read_from(name: String) -> Result<Self> {
         let path = Self::format_file(&name);
         let mut value: Self = from_slice(&fs::read(&path).await?)?;
-        value.name = name;
+        value.names = BTreeSet::from_iter(vec![name]);
 
         Ok(value)
     }
 
-    /// Merge with another output file, overwriting existing checksums.
+    /// Merge with another output file, overwriting existing checksums,
+    /// taking ownership of self. Returns an error if the name and size
+    /// of the file do not match.
     pub fn merge(mut self, other: Self) -> Result<Self> {
-        if self.name != other.name && self.size != other.size {
+        if self.names != other.names && self.size != other.size {
             return Err(SumsFileError(
                 "the name and size of output files do not match".to_string(),
             ));
         }
 
+        self.merge_mut(other);
+        Ok(self)
+    }
+
+    /// Merge with another output file, overwriting existing checksums. Does not
+    /// check if the file name and size is the same.
+    pub fn merge_mut(&mut self, other: Self) {
         for (key, checksum) in other.checksums {
             self.checksums.insert(key, checksum);
         }
-
-        Ok(self)
+        for name in other.names {
+            self.names.insert(name);
+        }
     }
 
     /// Check if the sums file is the same as another according to all available checksums
     /// in the sums file.
-    pub fn is_same(&self, other: &Self) -> Result<bool> {
+    pub fn is_same(&self, other: &Self) -> bool {
         if self.size != other.size {
-            return Ok(false);
+            return false;
         }
 
         for (key, checksum) in &self.checksums {
             if let Some(other_checksum) = other.checksums.get(key) {
                 if checksum == other_checksum {
-                    return Ok(true);
+                    return true;
                 }
             }
         }
 
-        Ok(false)
+        false
+    }
+
+    /// Get a reference to the names of the sums file.
+    pub fn names(&self) -> &BTreeSet<String> {
+        &self.names
     }
 }
 
 /// The output of a checksum.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub struct Checksum {
     pub(crate) checksum: String,
@@ -173,11 +194,11 @@ pub(crate) mod test {
         );
 
         let result = file_one.clone().merge(file_two)?;
-        assert_eq!(result.name, file_one.name);
+        assert_eq!(result.names, file_one.names);
         assert_eq!(result.size, file_one.size);
         assert_eq!(
             result.checksums,
-            HashMap::from_iter(vec![
+            BTreeMap::from_iter(vec![
                 (
                     "md5".to_string(),
                     Checksum::new(
@@ -209,7 +230,7 @@ pub(crate) mod test {
                 Some(vec![expected_md5.to_string()]),
             ),
         )];
-        SumsFile::new("".to_string(), 123, HashMap::from_iter(checksums))
+        SumsFile::new(BTreeSet::new(), 123, BTreeMap::from_iter(checksums))
     }
 
     fn expected_output_json(expected_md5: &str) -> Value {

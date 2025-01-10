@@ -1,12 +1,12 @@
 use clap::Parser;
 use cloud_checksum::error::Result;
 use cloud_checksum::reader::channel::ChannelReader;
+use cloud_checksum::task::check::CheckTaskBuilder;
 use cloud_checksum::task::generate::{file_size, GenerateTaskBuilder};
 use cloud_checksum::{Commands, Subcommands};
 use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::stdin;
-use cloud_checksum::task::check::CheckTaskBuilder;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,14 +49,18 @@ async fn main() -> Result<()> {
             }
         }
         Subcommands::Check { input } => {
-            let is_same = CheckTaskBuilder::default().with_input_files(input).build().await?.run().await?;
+            let files = CheckTaskBuilder::default()
+                .with_input_files(input)
+                .build()
+                .await?
+                .run()
+                .await?;
 
-            if is_same {
-                println!("All files match");
-            } else {
-                println!("Files do not match");
+            for file in files {
+                println!("The following groups of files are the same:");
+                println!("{:#?}", file.names());
             }
-        },
+        }
     };
 
     Ok(())

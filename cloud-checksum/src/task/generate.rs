@@ -3,12 +3,12 @@
 
 use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
-use crate::error::Error::GenerateBuilderError;
+use crate::error::Error::GenerateError;
 use crate::error::{Error, Result};
 use crate::reader::SharedReader;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use futures_util::future::join_all;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use tokio::fs::File;
 use tokio::task::JoinHandle;
 
@@ -57,7 +57,7 @@ impl GenerateTaskBuilder {
         };
 
         if self.overwrite && self.verify {
-            return Err(GenerateBuilderError(
+            return Err(GenerateError(
                 "cannot verify and overwrite checksums".to_string(),
             ));
         }
@@ -186,9 +186,12 @@ impl GenerateTask {
             .into_iter()
             .flatten();
 
-        let checksums = HashMap::from_iter(checksums);
-
-        let new_file = SumsFile::new(self.input_file_name, file_size, checksums);
+        let checksums = BTreeMap::from_iter(checksums);
+        let new_file = SumsFile::new(
+            BTreeSet::from_iter(vec![self.input_file_name]),
+            file_size,
+            checksums,
+        );
         let output = match self.existing_output {
             Some(file) if !matches!(self.overwrite, OverwriteMode::Overwrite) => {
                 file.merge(new_file)?
@@ -216,13 +219,14 @@ pub(crate) mod test {
     use crate::reader::channel::test::channel_reader;
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
     use anyhow::Result;
+    use std::collections::BTreeSet;
     use tempfile::{tempdir, TempDir};
     use tokio::fs::File;
 
     #[tokio::test]
     async fn test_generate_overwrite() -> Result<()> {
         let tmp = tempdir()?;
-        let name = write_existing(tmp).await?;
+        let name = write_test_files(tmp).await?;
 
         test_generate(
             name,
@@ -237,7 +241,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_generate_verify() -> Result<()> {
         let tmp = tempdir()?;
-        let name = write_existing(tmp).await?;
+        let name = write_test_files(tmp).await?;
 
         test_generate(
             name,
@@ -252,7 +256,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_generate_no_verify() -> Result<()> {
         let tmp = tempdir()?;
-        let name = write_existing(tmp).await?;
+        let name = write_test_files(tmp).await?;
 
         test_generate(
             name,
@@ -291,7 +295,7 @@ pub(crate) mod test {
             .run()
             .await?;
 
-        assert_eq!(file.name, name);
+        assert_eq!(file.names, BTreeSet::from_iter(vec![name]));
         assert_eq!(file.size, TEST_FILE_SIZE);
         assert_eq!(
             file.checksums["md5"],
@@ -325,12 +329,12 @@ pub(crate) mod test {
         Ok(())
     }
 
-    async fn write_existing(tmp: TempDir) -> Result<String, Error> {
+    async fn write_test_files(tmp: TempDir) -> Result<String, Error> {
         let name = tmp.path().to_string_lossy().to_string() + "name";
         let existing = SumsFile::new(
-            name.to_string(),
+            BTreeSet::from_iter(vec![name.to_string()]),
             TEST_FILE_SIZE,
-            HashMap::from_iter(vec![(
+            BTreeMap::from_iter(vec![(
                 "md5".to_string(),
                 Checksum::new("123".to_string(), None, None),
             )]),
