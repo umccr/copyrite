@@ -35,19 +35,24 @@ pub struct Commands {
     #[arg(global = true, short, long, env)]
     pub timeout: Option<Duration>,
 
-    /// Overwrite the output file. By default, only checksums that are missing are computed and
-    /// added to an existing output file. Any existing checksums are preserved (even if not
-    /// specified in --checksums). This option allows overwriting any existing output file. This
+    /// Overwrite the sums file. By default, only checksums that are missing are computed and
+    /// added to an existing sums file. Any existing checksums are preserved (even if not
+    /// specified in --checksums). This option allows overwriting any existing sums file. This
     /// will recompute all checksums specified.
     #[arg(global = true, short, long, env, conflicts_with = "verify")]
     pub force_overwrite: bool,
 
-    /// Verify the contents of existing output files when generating checksums. By default,
+    /// Verify the contents of existing sums files when generating checksums. By default,
     /// existing checksum files are assumed to contain checksums that have correct values. This
-    /// option allows computing existing output file checksums and updating the file to ensure
+    /// option allows computing existing sums file checksums and updating the file to ensure
     /// that it is correct.
     #[arg(global = true, short, long, env, conflicts_with = "force_overwrite")]
     pub verify: bool,
+
+    /// Update existing sums files when running the `check` subcommand. This will add checksums to
+    /// any sums files that are confirmed to be identical through other sums files.
+    #[arg(global = true, short, long, env)]
+    pub update_from_check: bool,
 
     /// The subcommands for cloud-checksum.
     #[command(subcommand)]
@@ -68,7 +73,8 @@ pub enum Subcommands {
         #[arg(index = 1, required = true)]
         input: String,
     },
-    /// Confirm a set of files is identical.
+    /// Confirm a set of files is identical. This returns sets of files that are identical.
+    /// Which means that more than two files can be checked at the same time.
     Check {
         /// The input file to check a checksum. Requires at least two files.
         #[arg(value_delimiter = ',', required = true, num_args = 2, short, long)]

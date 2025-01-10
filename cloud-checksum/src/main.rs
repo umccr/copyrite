@@ -59,6 +59,10 @@ async fn main() -> Result<()> {
             for file in files {
                 println!("The following groups of files are the same:");
                 println!("{:#?}", file.names());
+
+                if args.update_from_check {
+                    file.write().await?;
+                }
             }
         }
     };
