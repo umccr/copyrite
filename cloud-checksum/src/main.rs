@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
 
     match args.commands {
         Subcommands::Generate { input, .. } => {
-            if input == "-" {
+            if input[0] == "-" {
                 let mut reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
 
                 let output = GenerateTaskBuilder::default()
@@ -30,22 +30,38 @@ async fn main() -> Result<()> {
 
                 println!("{}", output);
             } else {
-                let file = File::open(&input).await?;
-                let file_size = file_size(&file).await;
-                let mut reader = ChannelReader::new(file, args.optimization.channel_capacity);
+                let additional_ctxs = if args.generate_missing {
+                    CheckTaskBuilder::default()
+                        .with_input_files(input.clone())
+                        .build()
+                        .await?
+                        .checksum_set()
+                        .await?
+                } else {
+                    HashSet::new()
+                };
 
-                GenerateTaskBuilder::default()
-                    .with_overwrite(args.force_overwrite)
-                    .with_verify(args.verify)
-                    .with_input_file_name(input)
-                    .build()
-                    .await?
-                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader, file_size)?
-                    .add_reader_task(reader)?
-                    .run()
-                    .await?
-                    .write()
-                    .await?
+                for input in input {
+                    let file = File::open(&input).await?;
+                    let file_size = file_size(&file).await;
+                    let mut reader = ChannelReader::new(file, args.optimization.channel_capacity);
+
+                    let mut ctx = HashSet::from_iter(args.checksum.clone());
+                    ctx.extend(additional_ctxs.clone());
+
+                    GenerateTaskBuilder::default()
+                        .with_overwrite(args.force_overwrite)
+                        .with_verify(args.verify)
+                        .with_input_file_name(input)
+                        .build()
+                        .await?
+                        .add_generate_tasks(ctx, &mut reader, file_size)?
+                        .add_reader_task(reader)?
+                        .run()
+                        .await?
+                        .write()
+                        .await?;
+                }
             }
         }
         Subcommands::Check { input } => {

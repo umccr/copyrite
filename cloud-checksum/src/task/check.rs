@@ -2,9 +2,12 @@
 //!
 
 use crate::checksum::file::SumsFile;
+use crate::checksum::Ctx;
 use crate::error::Result;
 use futures_util::future::join_all;
+use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::str::FromStr;
 
 /// Build a check task.
 #[derive(Debug, Default)]
@@ -88,6 +91,17 @@ impl CheckTask {
         Ok(self)
     }
 
+    /// Determine the set of checksums for all files.
+    pub async fn checksum_set(&self) -> Result<HashSet<Ctx>> {
+        self.files.iter().try_fold(HashSet::new(), |mut set, file| {
+            for checksum in file.checksums.keys() {
+                set.insert(Ctx::from_str(checksum)?);
+            }
+
+            Ok(set)
+        })
+    }
+
     /// Runs the check task, returning the list of matching files.
     pub async fn run(self) -> Result<Vec<SumsFile>> {
         Ok(self.merge_same().await?.files)
@@ -104,6 +118,31 @@ pub(crate) mod test {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
     use tempfile::{tempdir, TempDir};
+
+    #[tokio::test]
+    async fn test_checksum_set() -> Result<()> {
+        let tmp = tempdir()?;
+        let files = write_test_files_one_group(tmp).await?;
+
+        let check = CheckTaskBuilder::default()
+            .with_input_files(files.clone())
+            .build()
+            .await?;
+
+        let result = check.checksum_set().await?;
+
+        assert_eq!(
+            result,
+            HashSet::from_iter(vec![
+                Ctx::from_str("md5")?,
+                Ctx::from_str("sha1")?,
+                Ctx::from_str("sha256")?,
+                Ctx::from_str("crc32")?,
+            ])
+        );
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_check() -> Result<()> {

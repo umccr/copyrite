@@ -27,7 +27,13 @@ pub struct Commands {
     /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits the
     /// file into 10 parts. `<part-number>` is not supported when the file size is not known, such
     /// as when taking input from stdin.
-    #[arg(global = true, value_delimiter = ',', short, long)]
+    #[arg(
+        global = true,
+        value_delimiter = ',',
+        short,
+        long,
+        default_value = "md5"
+    )]
     pub checksum: Vec<Ctx>,
 
     /// The amount of time to calculate checksums for. Once this timeout is reached the partial
@@ -54,6 +60,13 @@ pub struct Commands {
     #[arg(global = true, short, long, env)]
     pub update_from_check: bool,
 
+    /// When using the `generate` subcommand, generate any missing checksums that would be required
+    /// to confirm whether two files are identical using the `check` subcommand. Any additional
+    /// checksums specified using `--checksum` will also be generated. Note that `check`, subcommand
+    /// will never generate checksums.
+    #[arg(global = true, short, long, env)]
+    pub generate_missing: bool,
+
     /// The subcommands for cloud-checksum.
     #[command(subcommand)]
     pub commands: Subcommands,
@@ -70,14 +83,15 @@ pub enum Subcommands {
     Generate {
         /// The input file to calculate the checksum for. By default, accepts a file name.
         /// use - to accept input from stdin. If using stdin, the output will be written to stdout.
-        #[arg(index = 1, required = true)]
-        input: String,
+        /// Multiple files can be specified.
+        #[arg(value_delimiter = ',', required = true)]
+        input: Vec<String>,
     },
     /// Confirm a set of files is identical. This returns sets of files that are identical.
     /// Which means that more than two files can be checked at the same time.
     Check {
         /// The input file to check a checksum. Requires at least two files.
-        #[arg(value_delimiter = ',', required = true, num_args = 2, short, long)]
+        #[arg(value_delimiter = ',', required = true, num_args = 2)]
         input: Vec<String>,
     },
 }
