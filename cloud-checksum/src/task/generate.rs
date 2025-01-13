@@ -8,7 +8,8 @@ use crate::error::{Error, Result};
 use crate::reader::SharedReader;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use futures_util::future::join_all;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::str::FromStr;
 use tokio::fs::File;
 use tokio::task::JoinHandle;
 
@@ -203,6 +204,86 @@ impl GenerateTask {
     }
 }
 
+/// Holds a file name and checksum context.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SumCtxPair {
+    file: String,
+    ctx: Ctx,
+}
+
+impl SumCtxPair {
+    /// Create a new additional context checksum.
+    pub fn new(file: String, ctx: Ctx) -> Self {
+        SumCtxPair { file, ctx }
+    }
+
+    /// Get the inner values.
+    pub fn into_inner(self) -> (String, Ctx) {
+        (self.file, self.ctx)
+    }
+}
+
+/// A list of context pairs.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SumCtxPairs(Vec<SumCtxPair>);
+
+impl SumCtxPairs {
+    /// Create the additional checksums.
+    pub fn new(ctxs: Vec<SumCtxPair>) -> Self {
+        SumCtxPairs(ctxs)
+    }
+
+    /// Get the inner value.
+    pub fn into_inner(self) -> Vec<SumCtxPair> {
+        self.0
+    }
+
+    /// Get the additional checksums required from a group of comparables sums files.
+    pub fn from_comparable(files: Vec<SumsFile>) -> Result<Option<Self>> {
+        // Get the checksum which contains the most amount of occurrences across groups of sums files.
+        let checksum_name = files
+            .iter()
+            .flat_map(|file| file.checksums.keys().map(|k| k.to_string()))
+            .fold(HashMap::new(), |mut map, val| {
+                // Count occurrences
+                map.entry(val).and_modify(|count| *count += 1).or_insert(1);
+                map
+            })
+            .into_iter()
+            .max_by(|(_, a), (_, b)| a.cmp(b))
+            .map(|(k, _)| k);
+
+        if let Some(checksum_name) = checksum_name {
+            let ctx = Ctx::from_str(checksum_name.as_str())?;
+
+            // Use the checksum for one of the elements in the group.
+            let ctxs = files
+                .into_iter()
+                .flat_map(|file| {
+                    // If the sums group already contains this checksum, skip.
+                    if file.checksums.contains_key(&checksum_name) {
+                        return None;
+                    }
+
+                    file.names
+                        .first()
+                        .map(|name| SumCtxPair::new(name.to_string(), ctx.clone()))
+                })
+                .collect();
+
+            Ok(Some(SumCtxPairs::new(ctxs)))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl From<Vec<SumCtxPair>> for SumCtxPairs {
+    fn from(ctxs: Vec<SumCtxPair>) -> Self {
+        SumCtxPairs(ctxs)
+    }
+}
+
 /// Get the file size if available.
 pub async fn file_size(file: &File) -> Option<u64> {
     file.metadata().await.map(|metadata| metadata.len()).ok()
@@ -216,12 +297,45 @@ pub(crate) mod test {
         expected_crc32_be, expected_crc32c_be, expected_md5_sum, expected_sha1_sum,
         expected_sha256_sum,
     };
+    use crate::checksum::standard::StandardCtx;
     use crate::reader::channel::test::channel_reader;
+    use crate::task::check::test::write_test_files_not_comparable;
+    use crate::task::check::{CheckTaskBuilder, GroupBy};
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
+    use crate::Endianness;
     use anyhow::Result;
     use std::collections::BTreeSet;
     use tempfile::{tempdir, TempDir};
     use tokio::fs::File;
+
+    #[tokio::test]
+    async fn test_sum_ctx_pairs() -> Result<()> {
+        let tmp = tempdir()?;
+        let files = write_test_files_not_comparable(tmp).await?;
+
+        let check = CheckTaskBuilder::default()
+            .with_input_files(files.clone())
+            .with_group_by(GroupBy::Comparability)
+            .build()
+            .await?;
+        let check = check.run().await?;
+
+        let result = SumCtxPairs::from_comparable(check)?.unwrap();
+
+        assert_eq!(
+            result,
+            vec![SumCtxPair::new(
+                files.first().unwrap().to_string(),
+                Ctx::Regular(StandardCtx::CRC32(
+                    Some(Default::default()),
+                    Endianness::BigEndian
+                ))
+            )]
+            .into()
+        );
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_generate_overwrite() -> Result<()> {

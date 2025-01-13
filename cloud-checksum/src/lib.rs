@@ -12,6 +12,7 @@ pub mod test;
 use crate::checksum::Ctx;
 use crate::error::Error;
 use crate::error::Error::ParseError;
+use crate::task::check::GroupBy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::Duration;
 use std::str::FromStr;
@@ -41,32 +42,6 @@ pub struct Commands {
     #[arg(global = true, short, long, env)]
     pub timeout: Option<Duration>,
 
-    /// Overwrite the sums file. By default, only checksums that are missing are computed and
-    /// added to an existing sums file. Any existing checksums are preserved (even if not
-    /// specified in --checksums). This option allows overwriting any existing sums file. This
-    /// will recompute all checksums specified.
-    #[arg(global = true, short, long, env, conflicts_with = "verify")]
-    pub force_overwrite: bool,
-
-    /// Verify the contents of existing sums files when generating checksums. By default,
-    /// existing checksum files are assumed to contain checksums that have correct values. This
-    /// option allows computing existing sums file checksums and updating the file to ensure
-    /// that it is correct.
-    #[arg(global = true, short, long, env, conflicts_with = "force_overwrite")]
-    pub verify: bool,
-
-    /// Update existing sums files when running the `check` subcommand. This will add checksums to
-    /// any sums files that are confirmed to be identical through other sums files.
-    #[arg(global = true, short, long, env)]
-    pub update_from_check: bool,
-
-    /// When using the `generate` subcommand, generate any missing checksums that would be required
-    /// to confirm whether two files are identical using the `check` subcommand. Any additional
-    /// checksums specified using `--checksum` will also be generated. Note that `check`, subcommand
-    /// will never generate checksums.
-    #[arg(global = true, short, long, env)]
-    pub generate_missing: bool,
-
     /// The subcommands for cloud-checksum.
     #[command(subcommand)]
     pub commands: Subcommands,
@@ -86,6 +61,23 @@ pub enum Subcommands {
         /// Multiple files can be specified.
         #[arg(value_delimiter = ',', required = true)]
         input: Vec<String>,
+        /// Generate any missing checksums that would be required to confirm whether two files are
+        /// identical using the `check` subcommand. Any additional checksums specified using
+        /// `--checksum` will also be generated.
+        #[arg(global = true, short, long, env)]
+        generate_missing: bool,
+        /// Overwrite the sums file. By default, only checksums that are missing are computed and
+        /// added to an existing sums file. Any existing checksums are preserved (even if not
+        /// specified in --checksums). This option allows overwriting any existing sums file. This
+        /// will recompute all checksums specified.
+        #[arg(global = true, short, long, env, conflicts_with = "verify")]
+        force_overwrite: bool,
+        /// Verify the contents of existing sums files when generating checksums. By default,
+        /// existing checksum files are assumed to contain checksums that have correct values. This
+        /// option allows computing existing sums file checksums and updating the file to ensure
+        /// that it is correct.
+        #[arg(global = true, short, long, env, conflicts_with = "force_overwrite")]
+        verify: bool,
     },
     /// Confirm a set of files is identical. This returns sets of files that are identical.
     /// Which means that more than two files can be checked at the same time.
@@ -93,6 +85,15 @@ pub enum Subcommands {
         /// The input file to check a checksum. Requires at least two files.
         #[arg(value_delimiter = ',', required = true, num_args = 2)]
         input: Vec<String>,
+        /// Update existing sums files when running the `check` subcommand. This will add checksums to
+        /// any sums files that are confirmed to be identical through other sums files.
+        #[arg(global = true, short, long, env)]
+        update: bool,
+        /// Group outputted checksums by equality or comparability. Equality determines the groups
+        /// of sums files that are equal, and comparability determines the groups of sums files
+        /// that can be compared, but aren't necessarily equal.
+        #[arg(global = true, short, long, env)]
+        group_by: GroupBy,
     },
 }
 

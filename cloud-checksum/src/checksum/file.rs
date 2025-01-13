@@ -110,6 +110,18 @@ impl SumsFile {
         false
     }
 
+    /// Check if the sums file is comparable to another sums file because it contains at least
+    /// one of the same checksum type.
+    pub fn comparable(&self, other: &Self) -> bool {
+        if self.size != other.size {
+            return false;
+        }
+
+        self.checksums
+            .keys()
+            .any(|key| other.checksums.contains_key(key))
+    }
+
     /// Get a reference to the names of the sums file.
     pub fn names(&self) -> &BTreeSet<String> {
         &self.names
@@ -117,7 +129,7 @@ impl SumsFile {
 }
 
 /// The output of a checksum.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub struct Checksum {
     pub(crate) checksum: String,
