@@ -22,8 +22,8 @@ pub struct SumsFile {
     pub(crate) version: String,
     pub(crate) size: u64,
     // The name of the checksum is always the most canonical form.
-    // E.g. no -be prefix for big-endian, and bytes as the unit for
-    // AWS checksums.
+    // E.g. no -be prefix for big-endian, and the number of parts as
+    // the suffix for AWS checksums.
     #[serde(flatten)]
     pub(crate) checksums: BTreeMap<String, Checksum>,
 }

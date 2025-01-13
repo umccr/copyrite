@@ -166,7 +166,7 @@ impl TryFrom<(&str, Option<u64>)> for AWSETagCtx {
 
 impl Display for AWSETagCtx {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}-{}b", self.ctx, self.part_size)
+        write!(f, "{}-{}", self.ctx, self.n_checksums)
     }
 }
 
