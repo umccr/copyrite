@@ -155,6 +155,7 @@ impl Checksum {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
+    use crate::checksum::aws_etag::test::expected_md5_1gib;
     use crate::checksum::standard::test::expected_md5_sum;
     use serde_json::{from_value, json, to_value, Value};
 
@@ -178,6 +179,64 @@ pub(crate) mod test {
         let expected = expected_output_file(expected_md5);
 
         assert_eq!(result, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn is_same() -> Result<()> {
+        let expected_md5 = expected_md5_sum();
+        let file_one = expected_output_file(expected_md5);
+        let mut file_two = file_one.clone();
+        file_two.checksums.insert(
+            "md5".to_string(),
+            Checksum::new(
+                expected_md5_1gib().to_string(),
+                Some(1),
+                Some(vec![expected_md5.to_string()]),
+            ),
+        );
+        assert!(file_one.is_same(&file_two));
+
+        let mut file_two = file_one.clone();
+        file_two.checksums = BTreeMap::from_iter(vec![(
+            "aws-etag".to_string(),
+            Checksum::new(
+                expected_md5_1gib().to_string(),
+                Some(1),
+                Some(vec![expected_md5.to_string()]),
+            ),
+        )]);
+        assert!(!file_one.is_same(&file_two));
+
+        Ok(())
+    }
+
+    #[test]
+    fn comparable() -> Result<()> {
+        let expected_md5 = expected_md5_sum();
+        let file_one = expected_output_file(expected_md5);
+        let mut file_two = file_one.clone();
+        file_two.checksums.insert(
+            "aws-etag".to_string(),
+            Checksum::new(
+                expected_md5_1gib().to_string(),
+                Some(1),
+                Some(vec![expected_md5.to_string()]),
+            ),
+        );
+        assert!(file_one.comparable(&file_two));
+
+        let mut file_two = file_one.clone();
+        file_two.checksums = BTreeMap::from_iter(vec![(
+            "md5".to_string(),
+            Checksum::new(
+                expected_md5_1gib().to_string(),
+                Some(1),
+                Some(vec![expected_md5.to_string()]),
+            ),
+        )]);
+        assert!(!file_one.comparable(&file_two));
 
         Ok(())
     }
