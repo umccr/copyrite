@@ -3,10 +3,14 @@
 
 use crate::checksum::file::SumsFile;
 use crate::error::Result;
+use crate::task::generate::file_size;
 use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
+use serde_json::to_string_pretty;
+use std::collections::BTreeSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use tokio::fs::File;
 
 /// Build a check task.
 #[derive(Debug, Default)]
@@ -37,11 +41,19 @@ impl CheckTaskBuilder {
     /// Build a check task.
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
-        let files = join_all(
-            self.files
-                .into_iter()
-                .map(|file| async { SumsFile::read_from(file).await }),
-        )
+        let files = join_all(self.files.into_iter().map(|file| async {
+            let file_size = file_size(&File::open(&file).await?).await;
+
+            Ok(SumsFile::read_from(file.to_string())
+                .await
+                .unwrap_or_else(|_| {
+                    SumsFile::new(
+                        BTreeSet::from_iter(vec![file]),
+                        file_size,
+                        Default::default(),
+                    )
+                }))
+        }))
         .await
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
@@ -160,6 +172,11 @@ impl CheckOutput {
     pub fn new(groups: Vec<Vec<String>>, group_by: GroupBy) -> Self {
         Self { groups, group_by }
     }
+
+    /// Convert to a JSON string.
+    pub fn to_json_string(&self) -> Result<String> {
+        Ok(to_string_pretty(&self)?)
+    }
 }
 
 #[cfg(test)]
@@ -189,7 +206,7 @@ pub(crate) mod test {
             result,
             vec![SumsFile::new(
                 BTreeSet::from_iter(files),
-                TEST_FILE_SIZE,
+                Some(TEST_FILE_SIZE),
                 BTreeMap::from_iter(vec![
                     (
                         "md5".to_string(),
@@ -231,7 +248,7 @@ pub(crate) mod test {
             result,
             vec![SumsFile::new(
                 BTreeSet::from_iter(files),
-                TEST_FILE_SIZE,
+                Some(TEST_FILE_SIZE),
                 BTreeMap::from_iter(vec![
                     ("md5".to_string(), Default::default(),),
                     ("sha1".to_string(), Default::default(),),
@@ -262,7 +279,7 @@ pub(crate) mod test {
             vec![
                 SumsFile::new(
                     BTreeSet::from_iter(files.clone().into_iter().take(2)),
-                    TEST_FILE_SIZE,
+                    Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
                         (
                             "md5".to_string(),
@@ -280,7 +297,7 @@ pub(crate) mod test {
                 ),
                 SumsFile::new(
                     BTreeSet::from_iter(files.clone().into_iter().skip(2)),
-                    TEST_FILE_SIZE,
+                    Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
                         (
                             "sha256".to_string(),
@@ -320,7 +337,7 @@ pub(crate) mod test {
             vec![
                 SumsFile::new(
                     BTreeSet::from_iter(files.clone().into_iter().take(2)),
-                    TEST_FILE_SIZE,
+                    Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
                         ("md5".to_string(), Default::default(),),
                         ("sha1".to_string(), Default::default(),),
@@ -329,7 +346,7 @@ pub(crate) mod test {
                 ),
                 SumsFile::new(
                     BTreeSet::from_iter(files.clone().into_iter().skip(2)),
-                    TEST_FILE_SIZE,
+                    Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
                         ("crc32".to_string(), Default::default(),),
                         ("crc".to_string(), Default::default(),)
@@ -349,7 +366,7 @@ pub(crate) mod test {
         let c_name = path.join("c").to_string_lossy().to_string();
         let c = SumsFile::new(
             BTreeSet::from_iter(vec![c_name.to_string()]),
-            TEST_FILE_SIZE,
+            Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 (
                     "sha256".to_string(),
@@ -378,7 +395,7 @@ pub(crate) mod test {
         let c_name = path.join("c").to_string_lossy().to_string();
         let c = SumsFile::new(
             BTreeSet::from_iter(vec![c_name.to_string()]),
-            TEST_FILE_SIZE,
+            Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 (
                     "crc".to_string(),
@@ -407,7 +424,7 @@ pub(crate) mod test {
         let c_name = path.join("c").to_string_lossy().to_string();
         let c = SumsFile::new(
             BTreeSet::from_iter(vec![c_name.to_string()]),
-            TEST_FILE_SIZE,
+            Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 (
                     "sha256".to_string(),
@@ -424,7 +441,7 @@ pub(crate) mod test {
         let d_name = path.join("d").to_string_lossy().to_string();
         let d = SumsFile::new(
             BTreeSet::from_iter(vec![d_name.to_string()]),
-            TEST_FILE_SIZE,
+            Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 (
                     "crc32".to_string(),
@@ -447,7 +464,7 @@ pub(crate) mod test {
         let a_name = path.join("a").to_string_lossy().to_string();
         let a = SumsFile::new(
             BTreeSet::from_iter(vec![a_name.to_string()]),
-            TEST_FILE_SIZE,
+            Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 (
                     "md5".to_string(),
@@ -464,7 +481,7 @@ pub(crate) mod test {
         let b_name = path.join("b").to_string_lossy().to_string();
         let b = SumsFile::new(
             BTreeSet::from_iter(vec![b_name.to_string()]),
-            TEST_FILE_SIZE,
+            Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 (
                     "sha1".to_string(),

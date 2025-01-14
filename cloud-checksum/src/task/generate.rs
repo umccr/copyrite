@@ -190,7 +190,7 @@ impl GenerateTask {
         let checksums = BTreeMap::from_iter(checksums);
         let new_file = SumsFile::new(
             BTreeSet::from_iter(vec![self.input_file_name]),
-            file_size,
+            Some(file_size),
             checksums,
         );
         let output = match self.existing_output {
@@ -410,7 +410,7 @@ pub(crate) mod test {
             .await?;
 
         assert_eq!(file.names, BTreeSet::from_iter(vec![name]));
-        assert_eq!(file.size, TEST_FILE_SIZE);
+        assert_eq!(file.size, Some(TEST_FILE_SIZE));
         assert_eq!(
             file.checksums["md5"],
             Checksum::new(md5.to_string(), None, None)
@@ -447,7 +447,7 @@ pub(crate) mod test {
         let name = tmp.path().to_string_lossy().to_string() + "name";
         let existing = SumsFile::new(
             BTreeSet::from_iter(vec![name.to_string()]),
-            TEST_FILE_SIZE,
+            Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![(
                 "md5".to_string(),
                 Checksum::new("123".to_string(), None, None),

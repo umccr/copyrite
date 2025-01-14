@@ -35,6 +35,27 @@ pub struct Commands {
     pub optimization: Optimization,
 }
 
+impl Commands {
+    /// Parse args and set default values.
+    pub fn parse_args() -> Result<Self> {
+        let mut args = Self::parse();
+        if let Subcommands::Generate {
+            is_checksum_defaulted,
+            checksum,
+            ..
+        } = &mut args.commands
+        {
+            // This checks to see if something was passed on the command line for the checksum or
+            // if the default value has been used.
+            if checksum.is_empty() {
+                *is_checksum_defaulted = true;
+                checksum.push(Ctx::from_str("md5")?);
+            }
+        }
+        Ok(args)
+    }
+}
+
 /// The subcommands for cloud-checksum.
 #[derive(Subcommand, Debug)]
 pub enum Subcommands {
@@ -51,12 +72,15 @@ pub enum Subcommands {
         /// this is interpreted as a `<part-number>` where the input file is split evenly into the
         /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits the
         /// file into 10 parts. `<part-number>` is not supported when the file size is not known, such
-        /// as when taking input from stdin.
-        #[arg(value_delimiter = ',', short, long, default_value = "md5")]
+        /// as when taking input from stdin. Defaults to `md5` if unspecified.
+        #[arg(value_delimiter = ',', short, long)]
         checksum: Vec<Ctx>,
+        #[clap(skip)]
+        is_checksum_defaulted: bool,
         /// Generate any missing checksums that would be required to confirm whether two files are
         /// identical using the `check` subcommand. Any additional checksums specified using
-        /// `--checksum` will also be generated.
+        /// `--checksum` will also be generated. If there are no checksums preset, the default
+        /// checksum is generated.
         #[arg(short, long, env)]
         generate_missing: bool,
         /// Overwrite the sums file. By default, only checksums that are missing are computed and

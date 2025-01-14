@@ -1,4 +1,3 @@
-use clap::Parser;
 use cloud_checksum::checksum::file::SumsFile;
 use cloud_checksum::checksum::Ctx;
 use cloud_checksum::error::Result;
@@ -6,14 +5,13 @@ use cloud_checksum::reader::channel::ChannelReader;
 use cloud_checksum::task::check::{CheckOutput, CheckTaskBuilder, GroupBy};
 use cloud_checksum::task::generate::{file_size, GenerateTaskBuilder, SumCtxPairs};
 use cloud_checksum::{Commands, Subcommands};
-use serde_json::to_string_pretty;
 use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::stdin;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Commands::parse();
+    let args = Commands::parse_args()?;
 
     match args.commands {
         Subcommands::Generate {
@@ -22,6 +20,7 @@ async fn main() -> Result<()> {
             generate_missing,
             force_overwrite,
             verify,
+            is_checksum_defaulted,
         } => {
             if input[0] == "-" {
                 let mut reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
@@ -61,6 +60,12 @@ async fn main() -> Result<()> {
                             )
                             .await?
                         }
+
+                        // If there are no additional non-defaulted checksums to generate, return
+                        // early.
+                        if is_checksum_defaulted {
+                            return Ok(());
+                        }
                     }
                 };
 
@@ -93,7 +98,7 @@ async fn main() -> Result<()> {
                 groups.push(file.into_names().into_iter().collect());
             }
 
-            println!("{}", to_string_pretty(&CheckOutput::new(groups, group_by))?);
+            println!("{}", CheckOutput::new(groups, group_by).to_json_string()?);
         }
     };
 

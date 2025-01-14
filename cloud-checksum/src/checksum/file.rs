@@ -20,7 +20,7 @@ pub struct SumsFile {
     #[serde(skip)]
     pub(crate) names: BTreeSet<String>,
     pub(crate) version: String,
-    pub(crate) size: u64,
+    pub(crate) size: Option<u64>,
     // The name of the checksum is always the most canonical form.
     // E.g. no -be prefix for big-endian, and the number of parts as
     // the suffix for AWS checksums.
@@ -30,7 +30,11 @@ pub struct SumsFile {
 
 impl SumsFile {
     /// Create an output file.
-    pub fn new(names: BTreeSet<String>, size: u64, checksums: BTreeMap<String, Checksum>) -> Self {
+    pub fn new(
+        names: BTreeSet<String>,
+        size: Option<u64>,
+        checksums: BTreeMap<String, Checksum>,
+    ) -> Self {
         Self {
             names,
             version: OUTPUT_FILE_VERSION.to_string(),
@@ -306,7 +310,7 @@ pub(crate) mod test {
                 Some(vec![expected_md5.to_string()]),
             ),
         )];
-        SumsFile::new(BTreeSet::new(), 123, BTreeMap::from_iter(checksums))
+        SumsFile::new(BTreeSet::new(), Some(123), BTreeMap::from_iter(checksums))
     }
 
     fn expected_output_json(expected_md5: &str) -> Value {
