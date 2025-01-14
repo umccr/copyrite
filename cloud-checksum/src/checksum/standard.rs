@@ -41,7 +41,14 @@ impl PartialEq for StandardCtx {
 
 impl Hash for StandardCtx {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        discriminant(self).hash(state)
+        match self {
+            StandardCtx::CRC32(_, endianness) | StandardCtx::CRC32C(_, endianness) => {
+                endianness.hash(state);
+            }
+            _ => (),
+        }
+
+        discriminant(self).hash(state);
     }
 }
 

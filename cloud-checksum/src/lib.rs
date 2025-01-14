@@ -140,7 +140,7 @@ impl FromStr for Checksum {
 }
 
 /// The endianness to use for CRC-based checksums.
-#[derive(Debug, Clone, ValueEnum, PartialEq, Eq, PartialOrd, Ord, Copy)]
+#[derive(Debug, Clone, ValueEnum, PartialEq, Eq, PartialOrd, Ord, Copy, Hash)]
 pub enum Endianness {
     /// Use little-endian representation.
     LittleEndian,
