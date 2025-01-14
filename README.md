@@ -11,5 +11,5 @@ cargo run -p checksum-cloud -- --help
 
 Generate checksums for an input file:
 ```
-cargo run -p checksum-cloud -- --input <INPUT_FILE> --checksums md5,sha1,sha256
+cargo run -p checksum-cloud -- --checksum md5,sha1,sha256 <INPUT_FILE>
 ```

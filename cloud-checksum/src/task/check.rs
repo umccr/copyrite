@@ -5,6 +5,7 @@ use crate::checksum::file::SumsFile;
 use crate::error::Result;
 use clap::ValueEnum;
 use futures_util::future::join_all;
+use serde::{Deserialize, Serialize};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Build a check task.
@@ -50,7 +51,7 @@ impl CheckTaskBuilder {
 }
 
 /// The kind of check group by function to use.
-#[derive(Debug, Default, Clone, Copy, ValueEnum)]
+#[derive(Debug, Default, Clone, Copy, ValueEnum, Serialize, Deserialize)]
 pub enum GroupBy {
     /// Shows groups of sums files that are equal.
     #[default]
@@ -144,6 +145,20 @@ impl CheckTask {
             GroupBy::Equality => Ok(self.merge_same().await?.files),
             GroupBy::Comparability => Ok(self.merge_comparable().await?.files),
         }
+    }
+}
+
+/// Output type when checking files.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CheckOutput {
+    group_by: GroupBy,
+    groups: Vec<Vec<String>>,
+}
+
+impl CheckOutput {
+    /// Create a new check output.
+    pub fn new(groups: Vec<Vec<String>>, group_by: GroupBy) -> Self {
+        Self { groups, group_by }
     }
 }
 

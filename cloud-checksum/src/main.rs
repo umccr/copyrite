@@ -3,9 +3,10 @@ use cloud_checksum::checksum::file::SumsFile;
 use cloud_checksum::checksum::Ctx;
 use cloud_checksum::error::Result;
 use cloud_checksum::reader::channel::ChannelReader;
-use cloud_checksum::task::check::{CheckTaskBuilder, GroupBy};
+use cloud_checksum::task::check::{CheckOutput, CheckTaskBuilder, GroupBy};
 use cloud_checksum::task::generate::{file_size, GenerateTaskBuilder, SumCtxPairs};
 use cloud_checksum::{Commands, Subcommands};
+use serde_json::to_string_pretty;
 use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::stdin;
@@ -17,6 +18,7 @@ async fn main() -> Result<()> {
     match args.commands {
         Subcommands::Generate {
             input,
+            checksum,
             generate_missing,
             force_overwrite,
             verify,
@@ -29,7 +31,7 @@ async fn main() -> Result<()> {
                     .with_verify(verify)
                     .build()
                     .await?
-                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader, None)?
+                    .add_generate_tasks(HashSet::from_iter(checksum), &mut reader, None)?
                     .add_reader_task(reader)?
                     .run()
                     .await?
@@ -63,7 +65,7 @@ async fn main() -> Result<()> {
                 };
 
                 for input in input {
-                    let ctx = HashSet::from_iter(args.checksum.clone());
+                    let ctx = HashSet::from_iter(checksum.clone());
                     generate(
                         args.optimization.channel_capacity,
                         force_overwrite,
@@ -82,14 +84,16 @@ async fn main() -> Result<()> {
         } => {
             let files = check(input, group_by).await?;
 
+            let mut groups = Vec::with_capacity(files.len());
             for file in files {
-                println!("The following groups of files are the same:");
-                println!("{:#?}", file.names());
-
                 if update {
                     file.write().await?;
                 }
+
+                groups.push(file.into_names().into_iter().collect());
             }
+
+            println!("{}", to_string_pretty(&CheckOutput::new(groups, group_by))?);
         }
     };
 

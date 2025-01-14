@@ -126,6 +126,11 @@ impl SumsFile {
     pub fn names(&self) -> &BTreeSet<String> {
         &self.names
     }
+
+    /// Get to the names of the sums file.
+    pub fn into_names(self) -> BTreeSet<String> {
+        self.names
+    }
 }
 
 /// The output of a checksum.

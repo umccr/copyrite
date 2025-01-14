@@ -21,22 +21,6 @@ use std::str::FromStr;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about)]
 pub struct Commands {
-    /// Checksums to use. Can be specified multiple times or comma-separated. Use an
-    /// `aws-<part_size>` suffix to create AWS ETag-style checksums, e.g. `md5-aws-8mib`.
-    /// `<part_size>` should contain a size unit, e.g. `mib` or `b`. When the unit is omitted,
-    /// this is interpreted as a `<part-number>` where the input file is split evenly into the
-    /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits the
-    /// file into 10 parts. `<part-number>` is not supported when the file size is not known, such
-    /// as when taking input from stdin.
-    #[arg(
-        global = true,
-        value_delimiter = ',',
-        short,
-        long,
-        default_value = "md5"
-    )]
-    pub checksum: Vec<Ctx>,
-
     /// The amount of time to calculate checksums for. Once this timeout is reached the partial
     /// checksum will be saved to the partial checksum file.
     #[arg(global = true, short, long, env)]
@@ -61,22 +45,31 @@ pub enum Subcommands {
         /// Multiple files can be specified.
         #[arg(value_delimiter = ',', required = true)]
         input: Vec<String>,
+        /// Checksums to use. Can be specified multiple times or comma-separated. Use an
+        /// `aws-<part_size>` suffix to create AWS ETag-style checksums, e.g. `md5-aws-8mib`.
+        /// `<part_size>` should contain a size unit, e.g. `mib` or `b`. When the unit is omitted,
+        /// this is interpreted as a `<part-number>` where the input file is split evenly into the
+        /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits the
+        /// file into 10 parts. `<part-number>` is not supported when the file size is not known, such
+        /// as when taking input from stdin.
+        #[arg(value_delimiter = ',', short, long, default_value = "md5")]
+        checksum: Vec<Ctx>,
         /// Generate any missing checksums that would be required to confirm whether two files are
         /// identical using the `check` subcommand. Any additional checksums specified using
         /// `--checksum` will also be generated.
-        #[arg(global = true, short, long, env)]
+        #[arg(short, long, env)]
         generate_missing: bool,
         /// Overwrite the sums file. By default, only checksums that are missing are computed and
         /// added to an existing sums file. Any existing checksums are preserved (even if not
         /// specified in --checksums). This option allows overwriting any existing sums file. This
         /// will recompute all checksums specified.
-        #[arg(global = true, short, long, env, conflicts_with = "verify")]
+        #[arg(short, long, env, conflicts_with = "verify")]
         force_overwrite: bool,
         /// Verify the contents of existing sums files when generating checksums. By default,
         /// existing checksum files are assumed to contain checksums that have correct values. This
         /// option allows computing existing sums file checksums and updating the file to ensure
         /// that it is correct.
-        #[arg(global = true, short, long, env, conflicts_with = "force_overwrite")]
+        #[arg(short, long, env, conflicts_with = "force_overwrite")]
         verify: bool,
     },
     /// Confirm a set of files is identical. This returns sets of files that are identical.
@@ -87,12 +80,12 @@ pub enum Subcommands {
         input: Vec<String>,
         /// Update existing sums files when running the `check` subcommand. This will add checksums to
         /// any sums files that are confirmed to be identical through other sums files.
-        #[arg(global = true, short, long, env)]
+        #[arg(short, long, env)]
         update: bool,
         /// Group outputted checksums by equality or comparability. Equality determines the groups
         /// of sums files that are equal, and comparability determines the groups of sums files
         /// that can be compared, but aren't necessarily equal.
-        #[arg(global = true, short, long, env)]
+        #[arg(short, long, env, default_value = "equality")]
         group_by: GroupBy,
     },
 }
