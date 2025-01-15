@@ -1,10 +1,13 @@
 //! Defines the file format that outputs checksum results
 //!
 
+use crate::checksum::Ctx;
 use crate::error::Error::SumsFileError;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string_pretty};
+use serde_with::serde_as;
+use serde_with::DisplayFromStr;
 use std::collections::{BTreeMap, BTreeSet};
 use tokio::fs;
 
@@ -12,6 +15,7 @@ use tokio::fs;
 pub const OUTPUT_FILE_VERSION: &str = "0.1.0";
 
 /// A file containing multiple checksums.
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub struct SumsFile {
@@ -24,8 +28,9 @@ pub struct SumsFile {
     // The name of the checksum is always the most canonical form.
     // E.g. no -be prefix for big-endian, and the number of parts as
     // the suffix for AWS checksums.
+    #[serde_as(as = "BTreeMap<DisplayFromStr, _>")]
     #[serde(flatten)]
-    pub(crate) checksums: BTreeMap<String, Checksum>,
+    pub(crate) checksums: BTreeMap<Ctx, Checksum>,
 }
 
 impl SumsFile {
@@ -33,7 +38,7 @@ impl SumsFile {
     pub fn new(
         names: BTreeSet<String>,
         size: Option<u64>,
-        checksums: BTreeMap<String, Checksum>,
+        checksums: BTreeMap<Ctx, Checksum>,
     ) -> Self {
         Self {
             names,
@@ -198,7 +203,7 @@ pub(crate) mod test {
         let file_one = expected_output_file(expected_md5);
         let mut file_two = file_one.clone();
         file_two.checksums.insert(
-            "md5".to_string(),
+            "md5".parse()?,
             Checksum::new(
                 expected_md5_1gib().to_string(),
                 Some(1),
@@ -209,7 +214,7 @@ pub(crate) mod test {
 
         let mut file_two = file_one.clone();
         file_two.checksums = BTreeMap::from_iter(vec![(
-            "aws-etag".to_string(),
+            "aws-etag".parse()?,
             Checksum::new(
                 expected_md5_1gib().to_string(),
                 Some(1),
@@ -227,7 +232,7 @@ pub(crate) mod test {
         let file_one = expected_output_file(expected_md5);
         let mut file_two = file_one.clone();
         file_two.checksums.insert(
-            "aws-etag".to_string(),
+            "aws-etag".parse()?,
             Checksum::new(
                 expected_md5_1gib().to_string(),
                 Some(1),
@@ -238,7 +243,7 @@ pub(crate) mod test {
 
         let mut file_two = file_one.clone();
         file_two.checksums = BTreeMap::from_iter(vec![(
-            "md5".to_string(),
+            "md5".parse()?,
             Checksum::new(
                 expected_md5_1gib().to_string(),
                 Some(1),
@@ -255,7 +260,7 @@ pub(crate) mod test {
         let expected_md5 = expected_md5_sum();
         let mut file_one = expected_output_file(expected_md5);
         file_one.checksums.insert(
-            "aws-etag".to_string(),
+            "aws-etag".parse()?,
             Checksum::new(
                 expected_md5.to_string(),
                 Some(2),
@@ -265,7 +270,7 @@ pub(crate) mod test {
 
         let mut file_two = expected_output_file(expected_md5);
         file_two.checksums.insert(
-            "md5".to_string(),
+            "md5".parse()?,
             Checksum::new(
                 expected_md5.to_string(),
                 Some(1),
@@ -280,7 +285,7 @@ pub(crate) mod test {
             result.checksums,
             BTreeMap::from_iter(vec![
                 (
-                    "md5".to_string(),
+                    "md5".parse()?,
                     Checksum::new(
                         expected_md5.to_string(),
                         Some(1),
@@ -288,7 +293,7 @@ pub(crate) mod test {
                     ),
                 ),
                 (
-                    "aws-etag".to_string(),
+                    "aws-etag".parse()?,
                     Checksum::new(
                         expected_md5.to_string(),
                         Some(1),
@@ -303,7 +308,7 @@ pub(crate) mod test {
 
     fn expected_output_file(expected_md5: &str) -> SumsFile {
         let checksums = vec![(
-            "aws-etag".to_string(),
+            "aws-etag".parse().unwrap(),
             Checksum::new(
                 expected_md5.to_string(),
                 Some(1),
@@ -317,7 +322,7 @@ pub(crate) mod test {
         json!({
             "version": OUTPUT_FILE_VERSION,
             "size": 123,
-            "aws-etag": {
+            "md5-aws-1": {
                 "checksum": expected_md5,
                 "part-size": 1,
                 "part-checksums": [expected_md5]

@@ -5,43 +5,81 @@
 use crate::checksum::standard::StandardCtx;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
+use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::sync::Arc;
 
 /// Calculate checksums using an AWS ETag style.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone)]
 pub struct AWSETagCtx {
-    part_size: u64,
+    part_mode: PartMode,
     current_bytes: u64,
     remainder: Option<Arc<[u8]>>,
     part_checksums: Vec<Vec<u8>>,
     n_checksums: u64,
     ctx: StandardCtx,
+    file_size: Option<u64>,
+}
+
+impl Ord for AWSETagCtx {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (&self.part_mode, &self.ctx).cmp(&(&other.part_mode, &other.ctx))
+    }
+}
+
+impl PartialOrd for AWSETagCtx {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for AWSETagCtx {}
+
+impl PartialEq for AWSETagCtx {
+    fn eq(&self, other: &Self) -> bool {
+        self.part_mode == other.part_mode && self.ctx == other.ctx
+    }
+}
+
+impl Hash for AWSETagCtx {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.part_mode.hash(state);
+        self.current_bytes.hash(state);
+    }
+}
+
+/// The mode to operate aws etags in. Part numbers calculate parts using the total file size.
+/// Part sizes can operate without the file size.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub enum PartMode {
+    PartNumber(u64),
+    PartSize(u64),
 }
 
 impl AWSETagCtx {
     /// Create a new checksummer.
-    pub fn new(ctx: StandardCtx, part_size: u64) -> Self {
+    pub fn new(ctx: StandardCtx, part_mode: PartMode, file_size: Option<u64>) -> Self {
         Self {
-            part_size,
+            part_mode,
             current_bytes: 0,
             remainder: None,
             part_checksums: vec![],
             n_checksums: 0,
             ctx,
+            file_size,
         }
     }
 
     /// Update using data.
     pub fn update(&mut self, data: Arc<[u8]>) -> Result<()> {
         let len = u64::try_from(data.len())?;
-        if self.current_bytes + len > self.part_size {
+        if self.current_bytes + len > self.part_size()? {
             // If the current byte position is greater than the part size, then split into a new
             // part checksum.
             let (data, remainder) =
-                data.split_at(usize::try_from(self.part_size - self.current_bytes)?);
+                data.split_at(usize::try_from(self.part_size()? - self.current_bytes)?);
 
             self.current_bytes = u64::try_from(remainder.len())?;
             self.remainder = Some(Arc::from(remainder));
@@ -94,36 +132,39 @@ impl AWSETagCtx {
 
     /// Parse into a `ChecksumCtx` for values that use endianness. Parses an -aws-<n> suffix,
     /// where n represents the part size to calculate.
-    pub fn parse_part_size(s: &str, file_size: Option<u64>) -> Result<(String, u64)> {
+    pub fn parse_part_size(s: &str) -> Result<(String, PartMode)> {
         // Support an alias of aws-etag for md5.
-        let s = s.replace("aws-etag", "md5-aws");
+        let mut s = s.replace("aws-etag", "md5-aws");
+
+        // If no part size has been specified default to 1.
+        if s == "md5-aws" {
+            s = "md5-aws-1".to_string();
+        }
 
         let mut iter = s.rsplitn(2, "-aws-");
+
         let part_size = iter
             .next()
             .ok_or_else(|| ParseError("expected part size".to_string()))?;
         let part_size = part_size.strip_prefix("etag-").unwrap_or(part_size);
 
-        let part_size = if let Ok(part_number) = part_size.parse::<u64>() {
-            if let Some(file_size) = file_size {
-                if file_size < 1 {
-                    return Err(ParseError("cannot use zero part number".to_string()));
-                }
-                file_size.div_ceil(part_number)
-            } else {
-                return Err(ParseError(
-                    "cannot use part number syntax without file size".to_string(),
-                ));
+        let part_mode = if let Ok(part_number) = part_size.parse::<u64>() {
+            if part_number == 0 {
+                return Err(ParseError("cannot use zero part number".to_string()));
             }
+
+            PartMode::PartNumber(part_number)
         } else {
-            parse_size::parse_size(part_size).map_err(|err| ParseError(err.to_string()))?
+            PartMode::PartSize(
+                parse_size::parse_size(part_size).map_err(|err| ParseError(err.to_string()))?,
+            )
         };
 
         let algorithm = iter
             .next()
             .ok_or_else(|| ParseError("expected checksum algorithm".to_string()))?;
 
-        Ok((algorithm.to_string(), part_size))
+        Ok((algorithm.to_string(), part_mode))
     }
 
     /// Get the digest output.
@@ -131,9 +172,22 @@ impl AWSETagCtx {
         format!("{}-{}", self.ctx.digest_to_string(digest), self.n_checksums)
     }
 
-    /// Get the part size.
-    pub fn part_size(&self) -> u64 {
-        self.part_size
+    /// Get the part size, returning an error if using part numbers without a file size.
+    pub fn part_size(&self) -> Result<u64> {
+        match (&self.part_mode, &self.file_size) {
+            (PartMode::PartSize(part_size), _) => Ok(*part_size),
+            (PartMode::PartNumber(part_number), Some(file_size)) => {
+                Ok(file_size.div_ceil(*part_number))
+            }
+            _ => Err(ParseError(
+                "cannot use part number syntax without file size".to_string(),
+            )),
+        }
+    }
+
+    /// Set the file size.
+    pub fn set_file_size(&mut self, file_size: Option<u64>) {
+        self.file_size = file_size;
     }
 
     /// Get the encoded part checksums.
@@ -149,24 +203,21 @@ impl FromStr for AWSETagCtx {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        Self::try_from((s, None))
-    }
-}
-
-impl TryFrom<(&str, Option<u64>)> for AWSETagCtx {
-    type Error = Error;
-
-    fn try_from((s, file_size): (&str, Option<u64>)) -> Result<Self> {
-        let (s, size) = Self::parse_part_size(s, file_size)?;
+        let (s, part_mode) = Self::parse_part_size(s)?;
         let ctx = StandardCtx::from_str(&s)?;
 
-        Ok(AWSETagCtx::new(ctx, size))
+        Ok(AWSETagCtx::new(ctx, part_mode, None))
     }
 }
 
 impl Display for AWSETagCtx {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}-{}", self.ctx, self.n_checksums)
+        let n_checksums = match self.part_mode {
+            PartMode::PartNumber(part_number) => part_number,
+            PartMode::PartSize(_) => self.n_checksums,
+        };
+
+        write!(f, "{}-aws-{}", self.ctx, n_checksums)
     }
 }
 

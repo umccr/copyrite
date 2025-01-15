@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::{Checksum, Endianness};
 use crc32c::crc32c_append;
 use md5::Digest;
+use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
@@ -31,24 +32,30 @@ pub enum StandardCtx {
     QuickXor,
 }
 
+impl Ord for StandardCtx {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.to_u8(), self.endianness()).cmp(&(other.to_u8(), self.endianness()))
+    }
+}
+
+impl PartialOrd for StandardCtx {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl Eq for StandardCtx {}
 
 impl PartialEq for StandardCtx {
     fn eq(&self, other: &Self) -> bool {
-        discriminant(self) == discriminant(other)
+        discriminant(self) == discriminant(other) && self.endianness() == other.endianness()
     }
 }
 
 impl Hash for StandardCtx {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            StandardCtx::CRC32(_, endianness) | StandardCtx::CRC32C(_, endianness) => {
-                endianness.hash(state);
-            }
-            _ => (),
-        }
-
         discriminant(self).hash(state);
+        self.endianness().hash(state);
     }
 }
 
@@ -198,6 +205,28 @@ impl StandardCtx {
     /// Get the digest output.
     pub fn digest_to_string(&self, digest: &[u8]) -> String {
         hex::encode(digest)
+    }
+
+    /// Extract the endianness if this is a CRC variant.
+    pub fn endianness(&self) -> Option<Endianness> {
+        match self {
+            StandardCtx::CRC32(_, endianness) | StandardCtx::CRC32C(_, endianness) => {
+                Some(*endianness)
+            }
+            _ => None,
+        }
+    }
+
+    /// Get the numeric value of the enum.
+    pub fn to_u8(&self) -> u8 {
+        match self {
+            StandardCtx::MD5(_) => 0,
+            StandardCtx::SHA1(_) => 1,
+            StandardCtx::SHA256(_) => 2,
+            StandardCtx::CRC32(_, _) => 3,
+            StandardCtx::CRC32C(_, _) => 4,
+            StandardCtx::QuickXor => 5,
+        }
     }
 }
 

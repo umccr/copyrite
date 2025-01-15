@@ -82,7 +82,7 @@ pub enum Subcommands {
         /// `--checksum` will also be generated. If there are no checksums preset, the default
         /// checksum is generated.
         #[arg(short, long, env)]
-        generate_missing: bool,
+        missing: bool,
         /// Overwrite the sums file. By default, only checksums that are missing are computed and
         /// added to an existing sums file. Any existing checksums are preserved (even if not
         /// specified in --checksums). This option allows overwriting any existing sums file. This

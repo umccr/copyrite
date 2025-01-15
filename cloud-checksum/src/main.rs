@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
         Subcommands::Generate {
             input,
             checksum,
-            generate_missing,
+            missing: generate_missing,
             force_overwrite,
             verify,
             is_checksum_defaulted,
@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
                     .with_verify(verify)
                     .build()
                     .await?
-                    .add_generate_tasks(HashSet::from_iter(checksum), &mut reader, None)?
+                    .add_generate_tasks(HashSet::from_iter(checksum), &mut reader)?
                     .add_reader_task(reader)?
                     .run()
                     .await?
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
                                 force_overwrite,
                                 verify,
                                 input,
-                                HashSet::from_iter(vec![ctx]),
+                                vec![ctx],
                             )
                             .await?
                         }
@@ -70,13 +70,12 @@ async fn main() -> Result<()> {
                 };
 
                 for input in input {
-                    let ctx = HashSet::from_iter(checksum.clone());
                     generate(
                         args.optimization.channel_capacity,
                         force_overwrite,
                         verify,
                         input,
-                        ctx,
+                        checksum.clone(),
                     )
                     .await?;
                 }
@@ -120,11 +119,12 @@ async fn generate(
     force_overwrite: bool,
     verify: bool,
     input: String,
-    ctx: HashSet<Ctx>,
+    mut ctxs: Vec<Ctx>,
 ) -> Result<()> {
-    let file = File::open(&input).await?;
-    let file_size = file_size(&file).await;
-    let mut reader = ChannelReader::new(file, capacity);
+    let file_size = file_size(&input).await;
+    ctxs.iter_mut().for_each(|ctx| ctx.set_file_size(file_size));
+
+    let mut reader = ChannelReader::new(File::open(&input).await?, capacity);
 
     GenerateTaskBuilder::default()
         .with_overwrite(force_overwrite)
@@ -132,7 +132,7 @@ async fn generate(
         .with_input_file_name(input)
         .build()
         .await?
-        .add_generate_tasks(ctx, &mut reader, file_size)?
+        .add_generate_tasks(HashSet::from_iter(ctxs), &mut reader)?
         .add_reader_task(reader)?
         .run()
         .await?

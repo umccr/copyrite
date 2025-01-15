@@ -8,8 +8,8 @@ use crate::error::{Error, Result};
 use crate::reader::SharedReader;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use futures_util::future::join_all;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::str::FromStr;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::Path;
 use tokio::fs::File;
 use tokio::task::JoinHandle;
 
@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 #[derive(Debug)]
 pub enum Task {
     ReadTask(u64),
-    ChecksumTask((Ctx, Vec<u8>)),
+    ChecksumTask(Box<(Ctx, Vec<u8>)>),
 }
 
 /// Build a generate task.
@@ -114,7 +114,7 @@ impl GenerateTask {
 
             let digest = stream.await?;
 
-            Ok(ChecksumTask((ctx, digest)))
+            Ok(ChecksumTask(Box::new((ctx, digest))))
         }));
 
         self
@@ -136,7 +136,6 @@ impl GenerateTask {
         mut self,
         mut checksums: HashSet<Ctx>,
         reader: &mut impl SharedReader,
-        file_size: Option<u64>,
     ) -> Result<Self> {
         let existing = self.existing_output.as_ref();
 
@@ -145,7 +144,7 @@ impl GenerateTask {
                 existing
                     .map(|file| {
                         for name in file.checksums.keys() {
-                            checksums.insert(Ctx::try_from((name.as_str(), file_size))?);
+                            checksums.insert(name.clone());
                         }
                         Ok::<_, Error>(())
                     })
@@ -174,16 +173,20 @@ impl GenerateTask {
                         file_size = size;
                         Ok(None)
                     }
-                    ChecksumTask((ctx, digest)) => {
+                    ChecksumTask(ctx) => {
+                        let (ctx, digest) = *ctx;
+
+                        let part_size = ctx.part_size();
+                        let part_checksums = ctx.part_checksums();
                         let checksum = ctx.digest_to_string(&digest);
                         Ok(Some((
-                            ctx.to_string(),
-                            Checksum::new(checksum, ctx.part_size(), ctx.part_checksums()),
+                            ctx,
+                            Checksum::new(checksum, part_size, part_checksums),
                         )))
                     }
                 }
             })
-            .collect::<Result<Vec<Option<(String, Checksum)>>>>()?
+            .collect::<Result<Vec<Option<(Ctx, Checksum)>>>>()?
             .into_iter()
             .flatten();
 
@@ -193,6 +196,7 @@ impl GenerateTask {
             Some(file_size),
             checksums,
         );
+
         let output = match self.existing_output {
             Some(file) if !matches!(self.overwrite, OverwriteMode::Overwrite) => {
                 file.merge(new_file)?
@@ -241,10 +245,10 @@ impl SumCtxPairs {
     /// Get the additional checksums required from a group of comparables sums files.
     pub fn from_comparable(files: Vec<SumsFile>) -> Result<Option<Self>> {
         // Get the checksum which contains the most amount of occurrences across groups of sums files.
-        let checksum_name = files
+        let file_ctx = files
             .iter()
-            .flat_map(|file| file.checksums.keys().map(|k| k.to_string()))
-            .fold(HashMap::new(), |mut map, val| {
+            .flat_map(|file| file.checksums.keys().cloned())
+            .fold(BTreeMap::new(), |mut map, val| {
                 // Count occurrences
                 map.entry(val).and_modify(|count| *count += 1).or_insert(1);
                 map
@@ -253,21 +257,20 @@ impl SumCtxPairs {
             .max_by(|(_, a), (_, b)| a.cmp(b))
             .map(|(k, _)| k);
 
-        if let Some(checksum_name) = checksum_name {
-            let ctx = Ctx::from_str(checksum_name.as_str())?;
-
+        if let Some(mut file_ctx) = file_ctx {
             // Use the checksum for one of the elements in the group.
             let ctxs = files
                 .into_iter()
                 .flat_map(|file| {
                     // If the sums group already contains this checksum, skip.
-                    if file.checksums.contains_key(&checksum_name) {
+                    if file.checksums.contains_key(&file_ctx) {
                         return None;
                     }
+                    file_ctx.set_file_size(file.size);
 
                     file.names
                         .first()
-                        .map(|name| SumCtxPair::new(name.to_string(), ctx.clone()))
+                        .map(|name| SumCtxPair::new(name.to_string(), file_ctx.clone()))
                 })
                 .collect();
 
@@ -285,8 +288,11 @@ impl From<Vec<SumCtxPair>> for SumCtxPairs {
 }
 
 /// Get the file size if available.
-pub async fn file_size(file: &File) -> Option<u64> {
-    file.metadata().await.map(|metadata| metadata.len()).ok()
+pub async fn file_size<P: AsRef<Path>>(path: P) -> Option<u64> {
+    match File::open(path).await {
+        Ok(file) => file.metadata().await.map(|metadata| metadata.len()).ok(),
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -326,10 +332,7 @@ pub(crate) mod test {
             result,
             vec![SumCtxPair::new(
                 files.first().unwrap().to_string(),
-                Ctx::Regular(StandardCtx::CRC32(
-                    Some(Default::default()),
-                    Endianness::BigEndian
-                ))
+                Ctx::Regular(StandardCtx::CRC32C(0, Endianness::BigEndian))
             )]
             .into()
         );
@@ -391,7 +394,6 @@ pub(crate) mod test {
     ) -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
         let file = File::open(test_file).await?;
-        let file_size = file_size(&file).await;
         let mut reader = channel_reader(file).await;
 
         let tasks = tasks
@@ -404,7 +406,7 @@ pub(crate) mod test {
             .with_verify(verify)
             .build()
             .await?
-            .add_generate_tasks(HashSet::from_iter(tasks), &mut reader, file_size)?
+            .add_generate_tasks(HashSet::from_iter(tasks), &mut reader)?
             .add_reader_task(reader)?
             .run()
             .await?;
@@ -412,19 +414,19 @@ pub(crate) mod test {
         assert_eq!(file.names, BTreeSet::from_iter(vec![name]));
         assert_eq!(file.size, Some(TEST_FILE_SIZE));
         assert_eq!(
-            file.checksums["md5"],
+            file.checksums[&"md5".parse()?],
             Checksum::new(md5.to_string(), None, None)
         );
         assert_eq!(
-            file.checksums["sha1"],
+            file.checksums[&"sha1".parse()?],
             Checksum::new(expected_sha1_sum().to_string(), None, None)
         );
         assert_eq!(
-            file.checksums["sha256"],
+            file.checksums[&"sha256".parse()?],
             Checksum::new(expected_sha256_sum().to_string(), None, None)
         );
         assert_eq!(
-            file.checksums["md5-1073741824b"],
+            file.checksums[&"md5-aws-1073741824b".parse()?],
             Checksum::new(
                 expected_md5_1gib().to_string(),
                 Some(1073741824),
@@ -432,11 +434,11 @@ pub(crate) mod test {
             )
         );
         assert_eq!(
-            file.checksums["crc32"],
+            file.checksums[&"crc32".parse()?],
             Checksum::new(expected_crc32_be().to_string(), None, None)
         );
         assert_eq!(
-            file.checksums["crc32c"],
+            file.checksums[&"crc32c".parse()?],
             Checksum::new(expected_crc32c_be().to_string(), None, None)
         );
 
@@ -449,7 +451,7 @@ pub(crate) mod test {
             BTreeSet::from_iter(vec![name.to_string()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![(
-                "md5".to_string(),
+                "md5".parse()?,
                 Checksum::new("123".to_string(), None, None),
             )]),
         );
