@@ -5,7 +5,7 @@ use crate::checksum::Ctx;
 use crate::error::Error::SumsFileError;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{from_slice, to_string_pretty};
+use serde_json::{from_slice, to_string};
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,7 +54,7 @@ impl SumsFile {
 
     /// Convert to a JSON string.
     pub fn to_json_string(&self) -> Result<String> {
-        Ok(to_string_pretty(&self)?)
+        Ok(to_string(&self)?)
     }
 
     /// Write the output file.

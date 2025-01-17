@@ -7,7 +7,7 @@ use crate::task::generate::file_size;
 use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
-use serde_json::to_string_pretty;
+use serde_json::to_string;
 use std::collections::BTreeSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -174,7 +174,7 @@ impl CheckOutput {
 
     /// Convert to a JSON string.
     pub fn to_json_string(&self) -> Result<String> {
-        Ok(to_string_pretty(&self)?)
+        Ok(to_string(&self)?)
     }
 }
 
