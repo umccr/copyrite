@@ -1,7 +1,9 @@
-use clap::Parser;
+use cloud_checksum::checksum::file::SumsFile;
+use cloud_checksum::checksum::Ctx;
 use cloud_checksum::error::Result;
 use cloud_checksum::reader::channel::ChannelReader;
-use cloud_checksum::task::generate::{file_size, GenerateTaskBuilder};
+use cloud_checksum::task::check::{CheckOutput, CheckTaskBuilder, GroupBy};
+use cloud_checksum::task::generate::{file_size, GenerateTaskBuilder, SumCtxPairs};
 use cloud_checksum::{Commands, Subcommands};
 use std::collections::HashSet;
 use tokio::fs::File;
@@ -9,19 +11,26 @@ use tokio::io::stdin;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Commands::parse();
+    let args = Commands::parse_args()?;
 
     match args.commands {
-        Subcommands::Generate { input, .. } => {
-            if input == "-" {
+        Subcommands::Generate {
+            input,
+            checksum,
+            missing: generate_missing,
+            force_overwrite,
+            verify,
+            is_checksum_defaulted,
+        } => {
+            if input[0] == "-" {
                 let mut reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
 
                 let output = GenerateTaskBuilder::default()
-                    .with_overwrite(args.force_overwrite)
-                    .with_verify(args.verify)
+                    .with_overwrite(force_overwrite)
+                    .with_verify(verify)
                     .build()
                     .await?
-                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader, None)?
+                    .add_generate_tasks(HashSet::from_iter(checksum), &mut reader)?
                     .add_reader_task(reader)?
                     .run()
                     .await?
@@ -29,26 +38,104 @@ async fn main() -> Result<()> {
 
                 println!("{}", output);
             } else {
-                let file = File::open(&input).await?;
-                let file_size = file_size(&file).await;
-                let mut reader = ChannelReader::new(file, args.optimization.channel_capacity);
+                if generate_missing {
+                    let ctxs = CheckTaskBuilder::default()
+                        .with_input_files(input.clone())
+                        .with_group_by(GroupBy::Comparability)
+                        .build()
+                        .await?
+                        .run()
+                        .await?;
 
-                GenerateTaskBuilder::default()
-                    .with_overwrite(args.force_overwrite)
-                    .with_verify(args.verify)
-                    .with_input_file_name(input)
-                    .build()
-                    .await?
-                    .add_generate_tasks(HashSet::from_iter(args.checksum), &mut reader, file_size)?
-                    .add_reader_task(reader)?
-                    .run()
-                    .await?
-                    .write()
-                    .await?
+                    let ctxs = SumCtxPairs::from_comparable(ctxs)?;
+                    if let Some(ctxs) = ctxs {
+                        for ctx in ctxs.into_inner() {
+                            let (input, ctx) = ctx.into_inner();
+                            generate(
+                                args.optimization.channel_capacity,
+                                force_overwrite,
+                                verify,
+                                input,
+                                vec![ctx],
+                            )
+                            .await?
+                        }
+
+                        // If there are no additional non-defaulted checksums to generate, return
+                        // early.
+                        if is_checksum_defaulted {
+                            return Ok(());
+                        }
+                    }
+                };
+
+                for input in input {
+                    generate(
+                        args.optimization.channel_capacity,
+                        force_overwrite,
+                        verify,
+                        input,
+                        checksum.clone(),
+                    )
+                    .await?;
+                }
             }
         }
-        Subcommands::Check { .. } => todo!(),
+        Subcommands::Check {
+            input,
+            update,
+            group_by,
+        } => {
+            let files = check(input, group_by).await?;
+
+            let mut groups = Vec::with_capacity(files.len());
+            for file in files {
+                if update {
+                    file.write().await?;
+                }
+
+                groups.push(file.into_names().into_iter().collect());
+            }
+
+            println!("{}", CheckOutput::new(groups, group_by).to_json_string()?);
+        }
     };
 
     Ok(())
+}
+
+async fn check(input: Vec<String>, group_by: GroupBy) -> Result<Vec<SumsFile>> {
+    CheckTaskBuilder::default()
+        .with_input_files(input)
+        .with_group_by(group_by)
+        .build()
+        .await?
+        .run()
+        .await
+}
+
+async fn generate(
+    capacity: usize,
+    force_overwrite: bool,
+    verify: bool,
+    input: String,
+    mut ctxs: Vec<Ctx>,
+) -> Result<()> {
+    let file_size = file_size(&input).await;
+    ctxs.iter_mut().for_each(|ctx| ctx.set_file_size(file_size));
+
+    let mut reader = ChannelReader::new(File::open(&input).await?, capacity);
+
+    GenerateTaskBuilder::default()
+        .with_overwrite(force_overwrite)
+        .with_verify(verify)
+        .with_input_file_name(input)
+        .build()
+        .await?
+        .add_generate_tasks(HashSet::from_iter(ctxs), &mut reader)?
+        .add_reader_task(reader)?
+        .run()
+        .await?
+        .write()
+        .await
 }

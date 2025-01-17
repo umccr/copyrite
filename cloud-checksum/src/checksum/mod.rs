@@ -15,7 +15,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 /// The checksum calculator.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum Ctx {
     Regular(StandardCtx),
     AWSEtag(AWSETagCtx),
@@ -60,15 +60,22 @@ impl Ctx {
         }
     }
 
-    /// Get the part size if this is an AWS checksum ctx.
+    /// Get the part size if this is an AWS checksum context.
     pub fn part_size(&self) -> Option<u64> {
         match self {
             Ctx::Regular(_) => None,
-            Ctx::AWSEtag(ctx) => Some(ctx.part_size()),
+            Ctx::AWSEtag(ctx) => ctx.part_size().ok(),
         }
     }
 
-    /// Get the encoded part checksums if this is an AWS checksum ctx.
+    /// Set the file size if this is an AWS context.
+    pub fn set_file_size(&mut self, file_size: Option<u64>) {
+        if let Ctx::AWSEtag(ctx) = self {
+            ctx.set_file_size(file_size);
+        }
+    }
+
+    /// Get the encoded part checksums if this is an AWS checksum context.
     pub fn part_checksums(&self) -> Option<Vec<String>> {
         match self {
             Ctx::Regular(_) => None,
@@ -90,15 +97,7 @@ impl FromStr for Ctx {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        Self::try_from((s, None))
-    }
-}
-
-impl TryFrom<(&str, Option<u64>)> for Ctx {
-    type Error = Error;
-
-    fn try_from((s, file_size): (&str, Option<u64>)) -> Result<Self> {
-        let aws_etag = AWSETagCtx::try_from((s, file_size));
+        let aws_etag = AWSETagCtx::from_str(s);
         if aws_etag.is_err() {
             Ok(Self::Regular(StandardCtx::from_str(s)?))
         } else {
@@ -120,11 +119,11 @@ pub(crate) mod test {
 
     pub(crate) async fn test_checksum(checksum: &str, expected: &str) -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
-        let file = File::open(test_file).await?;
-        let file_size = file_size(&file).await;
-        let mut reader = channel_reader(file).await;
+        let file_size = file_size(&test_file).await;
+        let mut reader = channel_reader(File::open(test_file).await?).await;
 
-        let mut checksum = Ctx::try_from((checksum, file_size))?;
+        let mut checksum = Ctx::from_str(checksum)?;
+        checksum.set_file_size(file_size);
 
         let stream = reader.as_stream();
         let task = tokio::spawn(async move { reader.read_task().await });

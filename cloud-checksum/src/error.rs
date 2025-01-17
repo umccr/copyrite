@@ -26,9 +26,11 @@ pub enum Error {
     #[error("serde: {0}")]
     SerdeError(String),
     #[error("output file: {0}")]
-    OutputFileError(String),
-    #[error("generate builder: {0}")]
-    GenerateBuilderError(String),
+    SumsFileError(String),
+    #[error("generate command error: {0}")]
+    GenerateError(String),
+    #[error("check command error: {0}")]
+    CheckError(String),
 }
 
 impl From<JoinError> for Error {

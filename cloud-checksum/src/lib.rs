@@ -12,43 +12,19 @@ pub mod test;
 use crate::checksum::Ctx;
 use crate::error::Error;
 use crate::error::Error::ParseError;
+use crate::task::check::GroupBy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::Duration;
-use std::path::PathBuf;
 use std::str::FromStr;
 
 /// Args for the checksum-cloud CLI.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about)]
 pub struct Commands {
-    /// Checksums to use. Can be specified multiple times or comma-separated. Use an
-    /// `aws-<part_size>` suffix to create AWS ETag-style checksums, e.g. `md5-aws-8mib`.
-    /// `<part_size>` should contain a size unit, e.g. `mib` or `b`. When the unit is omitted,
-    /// this is interpreted as a `<part-number>` where the input file is split evenly into the
-    /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits the
-    /// file into 10 parts. `<part-number>` is not supported when the file size is not known, such
-    /// as when taking input from stdin.
-    #[arg(global = true, value_delimiter = ',', short, long)]
-    pub checksum: Vec<Ctx>,
-
     /// The amount of time to calculate checksums for. Once this timeout is reached the partial
     /// checksum will be saved to the partial checksum file.
     #[arg(global = true, short, long, env)]
     pub timeout: Option<Duration>,
-
-    /// Overwrite the output file. By default, only checksums that are missing are computed and
-    /// added to an existing output file. Any existing checksums are preserved (even if not
-    /// specified in --checksums). This option allows overwriting any existing output file. This
-    /// will recompute all checksums specified.
-    #[arg(global = true, short, long, env, conflicts_with = "verify")]
-    pub force_overwrite: bool,
-
-    /// Verify the contents of existing output files when generating checksums. By default,
-    /// existing checksum files are assumed to contain checksums that have correct values. This
-    /// option allows computing existing output file checksums and updating the file to ensure
-    /// that it is correct.
-    #[arg(global = true, short, long, env, conflicts_with = "force_overwrite")]
-    pub verify: bool,
 
     /// The subcommands for cloud-checksum.
     #[command(subcommand)]
@@ -59,6 +35,27 @@ pub struct Commands {
     pub optimization: Optimization,
 }
 
+impl Commands {
+    /// Parse args and set default values.
+    pub fn parse_args() -> Result<Self> {
+        let mut args = Self::parse();
+        if let Subcommands::Generate {
+            is_checksum_defaulted,
+            checksum,
+            ..
+        } = &mut args.commands
+        {
+            // This checks to see if something was passed on the command line for the checksum or
+            // if the default value has been used.
+            if checksum.is_empty() {
+                *is_checksum_defaulted = true;
+                checksum.push(Ctx::from_str("md5")?);
+            }
+        }
+        Ok(args)
+    }
+}
+
 /// The subcommands for cloud-checksum.
 #[derive(Subcommand, Debug)]
 pub enum Subcommands {
@@ -66,14 +63,54 @@ pub enum Subcommands {
     Generate {
         /// The input file to calculate the checksum for. By default, accepts a file name.
         /// use - to accept input from stdin. If using stdin, the output will be written to stdout.
-        #[arg(index = 1, required = true)]
-        input: String,
+        /// Multiple files can be specified.
+        #[arg(value_delimiter = ',', required = true)]
+        input: Vec<String>,
+        /// Checksums to use. Can be specified multiple times or comma-separated. Use an
+        /// `aws-<part_size>` suffix to create AWS ETag-style checksums, e.g. `md5-aws-8mib`.
+        /// `<part_size>` should contain a size unit, e.g. `mib` or `b`. When the unit is omitted,
+        /// this is interpreted as a `<part-number>` where the input file is split evenly into the
+        /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits the
+        /// file into 10 parts. `<part-number>` is not supported when the file size is not known, such
+        /// as when taking input from stdin. Defaults to `md5` if unspecified.
+        #[arg(value_delimiter = ',', short, long)]
+        checksum: Vec<Ctx>,
+        #[clap(skip)]
+        is_checksum_defaulted: bool,
+        /// Generate any missing checksums that would be required to confirm whether two files are
+        /// identical using the `check` subcommand. Any additional checksums specified using
+        /// `--checksum` will also be generated. If there are no checksums preset, the default
+        /// checksum is generated.
+        #[arg(short, long, env)]
+        missing: bool,
+        /// Overwrite the sums file. By default, only checksums that are missing are computed and
+        /// added to an existing sums file. Any existing checksums are preserved (even if not
+        /// specified in --checksums). This option allows overwriting any existing sums file. This
+        /// will recompute all checksums specified.
+        #[arg(short, long, env, conflicts_with = "verify")]
+        force_overwrite: bool,
+        /// Verify the contents of existing sums files when generating checksums. By default,
+        /// existing checksum files are assumed to contain checksums that have correct values. This
+        /// option allows computing existing sums file checksums and updating the file to ensure
+        /// that it is correct.
+        #[arg(short, long, env, conflicts_with = "force_overwrite")]
+        verify: bool,
     },
-    /// Confirm a set of files is identical.
+    /// Confirm a set of files is identical. This returns sets of files that are identical.
+    /// Which means that more than two files can be checked at the same time.
     Check {
         /// The input file to check a checksum. Requires at least two files.
-        #[arg(value_delimiter = ',', required = true, num_args = 2, short, long)]
-        files: Vec<PathBuf>,
+        #[arg(value_delimiter = ',', required = true, num_args = 2)]
+        input: Vec<String>,
+        /// Update existing sums files when running the `check` subcommand. This will add checksums to
+        /// any sums files that are confirmed to be identical through other sums files.
+        #[arg(short, long, env)]
+        update: bool,
+        /// Group outputted checksums by equality or comparability. Equality determines the groups
+        /// of sums files that are equal, and comparability determines the groups of sums files
+        /// that can be compared, but aren't necessarily equal.
+        #[arg(short, long, env, default_value = "equality")]
+        group_by: GroupBy,
     },
 }
 
@@ -103,7 +140,7 @@ impl FromStr for Checksum {
 }
 
 /// The endianness to use for CRC-based checksums.
-#[derive(Debug, Clone, ValueEnum, PartialEq, Eq, PartialOrd, Ord, Copy)]
+#[derive(Debug, Clone, ValueEnum, PartialEq, Eq, PartialOrd, Ord, Copy, Hash)]
 pub enum Endianness {
     /// Use little-endian representation.
     LittleEndian,
