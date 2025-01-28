@@ -2,6 +2,7 @@ use error::Result;
 use std::fmt::{Display, Formatter};
 
 pub mod checksum;
+pub mod cloud;
 pub mod error;
 pub mod reader;
 pub mod task;
