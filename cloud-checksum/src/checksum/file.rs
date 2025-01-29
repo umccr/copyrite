@@ -3,7 +3,7 @@
 
 use crate::checksum::Ctx;
 use crate::error::Error::SumsFileError;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string};
 use serde_with::serde_as;
@@ -14,9 +14,12 @@ use tokio::fs;
 /// The current version of the output file.
 pub const OUTPUT_FILE_VERSION: &str = "0.1.0";
 
+/// The file ending of a sums file.
+pub const SUMS_FILE_ENDING: &str = ".sums";
+
 /// A file containing multiple checksums.
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct SumsFile {
     // Names are only used internally for writing files, they should not
@@ -48,8 +51,18 @@ impl SumsFile {
         }
     }
 
-    fn format_file(name: &str) -> String {
-        format!("{}.sums", name)
+    /// Format a sums file with the ending.
+    pub fn format_sums_file(name: &str) -> String {
+        if name.ends_with(SUMS_FILE_ENDING) {
+            name.to_string()
+        } else {
+            format!("{}{}", name, SUMS_FILE_ENDING)
+        }
+    }
+    
+    /// Format the target file that the sums file is for.
+    pub fn format_target_file(name: &str) -> String {
+        name.strip_suffix(SUMS_FILE_ENDING).unwrap_or_else(|| &name).to_string()
     }
 
     /// Convert to a JSON string.
@@ -60,7 +73,7 @@ impl SumsFile {
     /// Write the output file.
     pub async fn write(&self) -> Result<()> {
         for name in &self.names {
-            let path = Self::format_file(name);
+            let path = Self::format_sums_file(name);
             fs::write(path, self.to_json_string()?).await?
         }
 
@@ -69,10 +82,17 @@ impl SumsFile {
 
     /// Read an existing output file.
     pub async fn read_from(name: String) -> Result<Self> {
-        let path = Self::format_file(&name);
-        let mut value: Self = from_slice(&fs::read(&path).await?)?;
+        let path = Self::format_sums_file(&name);
+        let mut value: Self = fs::read(&path).await?.as_slice().try_into()?;
         value.names = BTreeSet::from_iter(vec![name]);
 
+        Ok(value)
+    }
+    
+    /// Read from a slice and add the name.
+    pub async fn read_from_slice(slice: &[u8], name: String) -> Result<Self> {
+        let mut value: Self = slice.try_into()?;
+        value.names = BTreeSet::from_iter(vec![name]);
         Ok(value)
     }
 
@@ -139,6 +159,32 @@ impl SumsFile {
     /// Get to the names of the sums file.
     pub fn into_names(self) -> BTreeSet<String> {
         self.names
+    }
+    
+    /// Add a name to the sums file.
+    pub fn add_name(mut self, name: String) -> Self {
+        self.names.insert(name);
+        self
+    }
+    
+    /// Set the size.
+    pub fn with_size(mut self, size: Option<u64>) -> Self{
+        self.size = size;
+        self
+    }
+    
+    /// Add a checksum to the sums file.
+    pub fn add_checksum(mut self, ctx: Ctx, checksum: Checksum) -> Self {
+        self.checksums.insert(ctx, checksum);
+        self
+    }
+}
+
+impl TryFrom<&[u8]> for SumsFile {
+    type Error = Error;
+    
+    fn try_from(value: &[u8]) -> Result<Self> {
+        Ok(from_slice(value)?)
     }
 }
 
