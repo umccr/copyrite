@@ -1,10 +1,10 @@
 //! Error handling logic.
 //!
 
-use std::num::TryFromIntError;
-use std::{io, result};
 use aws_sdk_s3::error::SdkError;
 use aws_smithy_types::byte_stream;
+use std::num::TryFromIntError;
+use std::{io, result};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
