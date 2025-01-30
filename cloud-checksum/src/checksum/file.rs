@@ -164,9 +164,8 @@ impl SumsFile {
     }
 
     /// Add a name to the sums file.
-    pub fn add_name(mut self, name: String) -> Self {
+    pub fn add_name(&mut self, name: String) {
         self.names.insert(name);
-        self
     }
 
     /// Set the size.
@@ -176,9 +175,8 @@ impl SumsFile {
     }
 
     /// Add a checksum to the sums file.
-    pub fn add_checksum(mut self, ctx: Ctx, checksum: Checksum) -> Self {
+    pub fn add_checksum(&mut self, ctx: Ctx, checksum: Checksum) {
         self.checksums.insert(ctx, checksum);
-        self
     }
 }
 
