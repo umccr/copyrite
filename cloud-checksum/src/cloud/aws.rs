@@ -5,12 +5,14 @@ use crate::checksum::aws_etag::{AWSETagCtx, PartMode};
 use crate::checksum::file::SumsFile;
 use crate::checksum::standard::StandardCtx;
 use crate::checksum::{file, Ctx};
-use crate::error::Error::{AwsError, ParseError};
+use crate::error::Error::ParseError;
 use crate::error::Result;
 use crate::Endianness;
 use aws_config::{load_defaults, BehaviorVersion};
 use aws_sdk_s3::operation::get_object::GetObjectError;
-use aws_sdk_s3::Client;
+use aws_sdk_s3::operation::get_object_attributes::GetObjectAttributesOutput;
+use aws_sdk_s3::types::ChecksumType;
+use aws_sdk_s3::{types, Client};
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
@@ -137,6 +139,58 @@ impl S3 {
         }
     }
 
+    async fn add_checksum<F>(
+        sums_file: &mut SumsFile,
+        attributes: &GetObjectAttributesOutput,
+        ctx: StandardCtx,
+        checksum_value: Option<&str>,
+        get_from_part: F,
+    ) -> Result<()>
+    where
+        F: Fn(&types::ObjectPart) -> Option<&str>,
+    {
+        let file_size = attributes.object_size().map(u64::try_from).transpose()?;
+
+        if let Some((checksum_type, sum)) = attributes
+            .checksum()
+            .and_then(|c| c.checksum_type().zip(checksum_value))
+        {
+            let part_size = attributes
+                .object_parts()
+                .and_then(|parts| parts.total_parts_count)
+                .map(u64::try_from)
+                .transpose()?;
+
+            let ctx = match (part_size, checksum_type) {
+                (Some(part_size), ChecksumType::Composite) => Ctx::AWSEtag(AWSETagCtx::new(
+                    ctx,
+                    PartMode::PartNumber(part_size),
+                    file_size,
+                )),
+                _ => Ctx::Regular(ctx),
+            };
+
+            let parts = attributes.object_parts().and_then(|parts| {
+                let parts = parts
+                    .parts()
+                    .iter()
+                    .filter_map(|part| get_from_part(part).map(|c| c.to_string()))
+                    .collect::<Vec<_>>();
+
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts)
+                }
+            });
+
+            let checksum = file::Checksum::new(sum.to_string(), part_size, parts);
+            sums_file.add_checksum(ctx, checksum);
+        }
+
+        Ok(())
+    }
+
     /// Load a sums file from object metadata.
     pub async fn sums_from_metadata(&self) -> Result<SumsFile> {
         // The target file metadata.
@@ -157,176 +211,51 @@ impl S3 {
             .await?;
 
         let file_size = file.content_length().map(u64::try_from).transpose()?;
-        let mut sums_file = SumsFile::default().add_name(key).with_size(file_size);
+        let mut sums_file = SumsFile::default().with_size(file_size);
+        sums_file.add_name(key);
 
-        // Rules
-        // If standard aws e_tag is present, then there are no part checksums presents, only the
-        // concatenated e_tag.
-        // If any of the additional checksum fields are present, including CRC64NVME, then there
-        // are multiple checksum parts, including the concatenated parts.
-
-        if let Some(sum) = attributes.e_tag() {
-            let part_size = attributes
-                .object_parts()
-                .and_then(|parts| parts.total_parts_count)
-                .map(u64::try_from)
-                .transpose()?;
-            let ctx = if let Some(part_size) = part_size {
-                Ctx::AWSEtag(AWSETagCtx::new(
-                    StandardCtx::MD5(Default::default()),
-                    PartMode::PartNumber(part_size),
-                    file_size,
-                ))
-            } else {
-                Ctx::Regular(StandardCtx::MD5(Default::default()))
-            };
-
-            let checksum = file::Checksum::new(sum.to_string(), part_size, None);
-
-            sums_file = sums_file.add_checksum(ctx, checksum);
-        }
-        if let Some(sum) = attributes.checksum().and_then(|c| c.checksum_crc32()) {
-            let part_size = attributes
-                .object_parts()
-                .and_then(|parts| parts.total_parts_count)
-                .map(u64::try_from)
-                .transpose()?;
-            let ctx = if let Some(part_size) = part_size {
-                Ctx::AWSEtag(AWSETagCtx::new(
-                    StandardCtx::CRC32(Default::default(), Endianness::LittleEndian),
-                    PartMode::PartNumber(part_size),
-                    file_size,
-                ))
-            } else {
-                Ctx::Regular(StandardCtx::CRC32(
-                    Default::default(),
-                    Endianness::LittleEndian,
-                ))
-            };
-
-            let parts = attributes
-                .object_parts()
-                .map(|parts| {
-                    parts
-                        .parts()
-                        .iter()
-                        .map(|part| {
-                            part.checksum_crc32()
-                                .map(|c| c.to_string())
-                                .ok_or_else(|| AwsError("mismatched part".to_string()))
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?;
-            let checksum = file::Checksum::new(sum.to_string(), part_size, parts);
-
-            sums_file = sums_file.add_checksum(ctx, checksum);
-        }
-        if let Some(sum) = attributes.checksum().and_then(|c| c.checksum_crc32_c()) {
-            let part_size = attributes
-                .object_parts()
-                .and_then(|parts| parts.total_parts_count)
-                .map(u64::try_from)
-                .transpose()?;
-            let ctx = if let Some(part_size) = part_size {
-                Ctx::AWSEtag(AWSETagCtx::new(
-                    StandardCtx::CRC32C(Default::default(), Endianness::LittleEndian),
-                    PartMode::PartNumber(part_size),
-                    file_size,
-                ))
-            } else {
-                Ctx::Regular(StandardCtx::CRC32C(
-                    Default::default(),
-                    Endianness::LittleEndian,
-                ))
-            };
-
-            let parts = attributes
-                .object_parts()
-                .map(|parts| {
-                    parts
-                        .parts()
-                        .iter()
-                        .map(|part| {
-                            part.checksum_crc32_c()
-                                .map(|c| c.to_string())
-                                .ok_or_else(|| AwsError("mismatched part".to_string()))
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?;
-            let checksum = file::Checksum::new(sum.to_string(), part_size, parts);
-
-            sums_file = sums_file.add_checksum(ctx, checksum);
-        }
-        if let Some(sum) = attributes.checksum().and_then(|c| c.checksum_sha1()) {
-            let part_size = attributes
-                .object_parts()
-                .and_then(|parts| parts.total_parts_count)
-                .map(u64::try_from)
-                .transpose()?;
-            let ctx = if let Some(part_size) = part_size {
-                Ctx::AWSEtag(AWSETagCtx::new(
-                    StandardCtx::SHA1(Default::default()),
-                    PartMode::PartNumber(part_size),
-                    file_size,
-                ))
-            } else {
-                Ctx::Regular(StandardCtx::SHA1(Default::default()))
-            };
-
-            let parts = attributes
-                .object_parts()
-                .map(|parts| {
-                    parts
-                        .parts()
-                        .iter()
-                        .map(|part| {
-                            part.checksum_sha1()
-                                .map(|c| c.to_string())
-                                .ok_or_else(|| AwsError("mismatched part".to_string()))
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?;
-            let checksum = file::Checksum::new(sum.to_string(), part_size, parts);
-
-            sums_file = sums_file.add_checksum(ctx, checksum);
-        }
-        if let Some(sum) = attributes.checksum().and_then(|c| c.checksum_sha256()) {
-            let part_size = attributes
-                .object_parts()
-                .and_then(|parts| parts.total_parts_count)
-                .map(u64::try_from)
-                .transpose()?;
-            let ctx = if let Some(part_size) = part_size {
-                Ctx::AWSEtag(AWSETagCtx::new(
-                    StandardCtx::SHA256(Default::default()),
-                    PartMode::PartNumber(part_size),
-                    file_size,
-                ))
-            } else {
-                Ctx::Regular(StandardCtx::SHA256(Default::default()))
-            };
-
-            let parts = attributes
-                .object_parts()
-                .map(|parts| {
-                    parts
-                        .parts()
-                        .iter()
-                        .map(|part| {
-                            part.checksum_sha256()
-                                .map(|c| c.to_string())
-                                .ok_or_else(|| AwsError("mismatched part".to_string()))
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?;
-            let checksum = file::Checksum::new(sum.to_string(), part_size, parts);
-
-            sums_file = sums_file.add_checksum(ctx, checksum);
-        }
+        // There are no parts available for the e_tag.
+        Self::add_checksum(
+            &mut sums_file,
+            &attributes,
+            StandardCtx::MD5(Default::default()),
+            attributes.e_tag(),
+            |_| None,
+        )
+        .await?;
+        // All the other checksums have parts available.
+        Self::add_checksum(
+            &mut sums_file,
+            &attributes,
+            StandardCtx::CRC32(Default::default(), Endianness::LittleEndian),
+            attributes.checksum().and_then(|c| c.checksum_crc32()),
+            |part| part.checksum_crc32(),
+        )
+        .await?;
+        Self::add_checksum(
+            &mut sums_file,
+            &attributes,
+            StandardCtx::CRC32C(Default::default(), Endianness::LittleEndian),
+            attributes.checksum().and_then(|c| c.checksum_crc32_c()),
+            |part| part.checksum_crc32_c(),
+        )
+        .await?;
+        Self::add_checksum(
+            &mut sums_file,
+            &attributes,
+            StandardCtx::SHA1(Default::default()),
+            attributes.checksum().and_then(|c| c.checksum_sha1()),
+            |part| part.checksum_sha1(),
+        )
+        .await?;
+        Self::add_checksum(
+            &mut sums_file,
+            &attributes,
+            StandardCtx::SHA256(Default::default()),
+            attributes.checksum().and_then(|c| c.checksum_sha256()),
+            |part| part.checksum_sha256(),
+        )
+        .await?;
 
         Ok(sums_file)
     }
