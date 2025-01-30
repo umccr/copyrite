@@ -59,10 +59,12 @@ impl SumsFile {
             format!("{}{}", name, SUMS_FILE_ENDING)
         }
     }
-    
+
     /// Format the target file that the sums file is for.
     pub fn format_target_file(name: &str) -> String {
-        name.strip_suffix(SUMS_FILE_ENDING).unwrap_or_else(|| &name).to_string()
+        name.strip_suffix(SUMS_FILE_ENDING)
+            .unwrap_or(name)
+            .to_string()
     }
 
     /// Convert to a JSON string.
@@ -88,7 +90,7 @@ impl SumsFile {
 
         Ok(value)
     }
-    
+
     /// Read from a slice and add the name.
     pub async fn read_from_slice(slice: &[u8], name: String) -> Result<Self> {
         let mut value: Self = slice.try_into()?;
@@ -160,19 +162,19 @@ impl SumsFile {
     pub fn into_names(self) -> BTreeSet<String> {
         self.names
     }
-    
+
     /// Add a name to the sums file.
     pub fn add_name(mut self, name: String) -> Self {
         self.names.insert(name);
         self
     }
-    
+
     /// Set the size.
-    pub fn with_size(mut self, size: Option<u64>) -> Self{
+    pub fn with_size(mut self, size: Option<u64>) -> Self {
         self.size = size;
         self
     }
-    
+
     /// Add a checksum to the sums file.
     pub fn add_checksum(mut self, ctx: Ctx, checksum: Checksum) -> Self {
         self.checksums.insert(ctx, checksum);
@@ -182,7 +184,7 @@ impl SumsFile {
 
 impl TryFrom<&[u8]> for SumsFile {
     type Error = Error;
-    
+
     fn try_from(value: &[u8]) -> Result<Self> {
         Ok(from_slice(value)?)
     }
