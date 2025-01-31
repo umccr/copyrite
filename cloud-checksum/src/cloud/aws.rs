@@ -2,16 +2,16 @@
 //!
 
 use crate::checksum::aws_etag::{AWSETagCtx, PartMode};
-use crate::checksum::file::SumsFile;
+use crate::checksum::file::{PartChecksum, PartChecksums, SumsFile};
 use crate::checksum::standard::StandardCtx;
 use crate::checksum::{file, Ctx};
 use crate::error::Error::ParseError;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::Endianness;
 use aws_config::{load_defaults, BehaviorVersion};
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::get_object_attributes::GetObjectAttributesOutput;
-use aws_sdk_s3::types::ChecksumType;
+use aws_sdk_s3::types::{ChecksumMode, ChecksumType, ObjectAttributes};
 use aws_sdk_s3::{types, Client};
 
 /// Build an S3 sums object.
@@ -28,6 +28,10 @@ impl S3Builder {
     pub async fn with_default_client(mut self) -> Self {
         let config = load_defaults(BehaviorVersion::latest()).await;
         self.client = Some(Client::new(&config));
+
+        let sts = aws_sdk_sts::Client::new(&config);
+        println!("{:#?}", sts.get_caller_identity().send().await);
+
         self
     }
 
@@ -151,40 +155,46 @@ impl S3 {
     {
         let file_size = attributes.object_size().map(u64::try_from).transpose()?;
 
-        if let Some((checksum_type, sum)) = attributes
-            .checksum()
-            .and_then(|c| c.checksum_type().zip(checksum_value))
-        {
+        if let Some(sum) = checksum_value {
             let part_size = attributes
                 .object_parts()
                 .and_then(|parts| parts.total_parts_count)
                 .map(u64::try_from)
                 .transpose()?;
 
+            let checksum_type = attributes.checksum().and_then(|c| c.checksum_type());
             let ctx = match (part_size, checksum_type) {
-                (Some(part_size), ChecksumType::Composite) => Ctx::AWSEtag(AWSETagCtx::new(
-                    ctx,
-                    PartMode::PartNumber(part_size),
-                    file_size,
-                )),
+                (Some(part_size), Some(ChecksumType::Composite) | None) => Ctx::AWSEtag(
+                    AWSETagCtx::new(ctx, PartMode::PartNumber(part_size), file_size),
+                ),
                 _ => Ctx::Regular(ctx),
             };
 
-            let parts = attributes.object_parts().and_then(|parts| {
-                let parts = parts
-                    .parts()
-                    .iter()
-                    .filter_map(|part| get_from_part(part).map(|c| c.to_string()))
-                    .collect::<Vec<_>>();
+            let parts = attributes
+                .object_parts()
+                .map(|parts| {
+                    let parts = parts
+                        .parts()
+                        .iter()
+                        .map(|part| {
+                            Ok(PartChecksum::new(
+                                part.size().map(u64::try_from).transpose()?,
+                                get_from_part(part).map(|c| c.to_string()),
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
 
-                if parts.is_empty() {
-                    None
-                } else {
-                    Some(parts)
-                }
-            });
+                    if parts.is_empty() {
+                        Ok::<_, Error>(None)
+                    } else {
+                        Ok(Some(parts))
+                    }
+                })
+                .transpose()?
+                .flatten()
+                .map(PartChecksums::new);
 
-            let checksum = file::Checksum::new(sum.to_string(), part_size, parts);
+            let checksum = file::Checksum::new(sum.to_string(), parts);
             sums_file.add_checksum(ctx, checksum);
         }
 
@@ -195,26 +205,40 @@ impl S3 {
     pub async fn sums_from_metadata(&self) -> Result<SumsFile> {
         // The target file metadata.
         let key = SumsFile::format_target_file(&self.key);
+        println!("{}", key);
+        println!("{}", self.bucket);
         let file = self
             .client
             .head_object()
             .bucket(&self.bucket)
             .key(&key)
+            .checksum_mode(ChecksumMode::Enabled)
             .send()
             .await?;
+
+        println!("{:#?}", file);
         let attributes = self
             .client
             .get_object_attributes()
             .bucket(&self.bucket)
             .key(&key)
+            .object_attributes(ObjectAttributes::Etag)
+            .object_attributes(ObjectAttributes::Checksum)
+            .object_attributes(ObjectAttributes::ObjectSize)
+            .object_attributes(ObjectAttributes::ObjectParts)
             .send()
             .await?;
+        println!("{:#?}", attributes);
 
         let file_size = file.content_length().map(u64::try_from).transpose()?;
         let mut sums_file = SumsFile::default().with_size(file_size);
         sums_file.add_name(key);
 
-        // There are no parts available for the e_tag.
+        // The content-length on a head request allows retrieving the size of a part if `partNumber`
+        // is specified: https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html#API_HeadObject_RequestSyntax
+
+        // There are no parts available for the e_tag, but there is a `TotalPartsCount`. The
+        // checksum value itself contains the `-<part_number>` suffix.
         Self::add_checksum(
             &mut sums_file,
             &attributes,
@@ -223,7 +247,8 @@ impl S3 {
             |_| None,
         )
         .await?;
-        // All the other checksums have parts available.
+        // All the other checksums have parts available and a `TotalPartsCount`. The checksum value
+        // itself does not contain the `-<part_number>` suffix
         Self::add_checksum(
             &mut sums_file,
             &attributes,
@@ -297,6 +322,19 @@ pub(crate) mod test {
 
         let s3 = expected_s3("s3://").await;
         assert!(s3.is_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    pub async fn test_sums_from_metadata() -> Result<()> {
+        let s3 = S3Builder::default()
+            .parse_from_url("s3://filemanager-inventory-test/test.txt".to_string())
+            .with_default_client()
+            .await
+            .build()?;
+        let a = s3.sums_from_metadata().await?;
+        println!("{:#?}", a);
 
         Ok(())
     }

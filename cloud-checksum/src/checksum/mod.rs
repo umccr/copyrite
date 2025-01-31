@@ -100,8 +100,8 @@ impl Ctx {
         }
     }
 
-    /// Get the encoded part checksums if this is an AWS checksum context.
-    pub fn part_checksums(&self) -> Option<Vec<String>> {
+    /// Get the encoded part checksums and their part sizes if this is an AWS checksum context.
+    pub fn part_checksums(&self) -> Option<Vec<(u64, String)>> {
         match self {
             Ctx::Regular(_) => None,
             Ctx::AWSEtag(ctx) => Some(ctx.part_checksums()),
