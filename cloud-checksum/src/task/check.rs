@@ -207,19 +207,10 @@ pub(crate) mod test {
                 BTreeSet::from_iter(files),
                 Some(TEST_FILE_SIZE),
                 BTreeMap::from_iter(vec![
-                    ("md5".parse()?, Checksum::new("123".to_string(), None, None),),
-                    (
-                        "sha1".parse()?,
-                        Checksum::new("456".to_string(), None, None),
-                    ),
-                    (
-                        "sha256".parse()?,
-                        Checksum::new("789".to_string(), None, None),
-                    ),
-                    (
-                        "crc32".parse()?,
-                        Checksum::new("012".to_string(), None, None),
-                    )
+                    ("md5".parse()?, Checksum::new("123".to_string(), None),),
+                    ("sha1".parse()?, Checksum::new("456".to_string(), None),),
+                    ("sha256".parse()?, Checksum::new("789".to_string(), None),),
+                    ("crc32".parse()?, Checksum::new("012".to_string(), None),)
                 ])
             )]
         );
@@ -277,33 +268,18 @@ pub(crate) mod test {
                     BTreeSet::from_iter(files.clone().into_iter().take(2)),
                     Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
-                        ("md5".parse()?, Checksum::new("123".to_string(), None, None),),
-                        (
-                            "sha1".parse()?,
-                            Checksum::new("456".to_string(), None, None),
-                        ),
-                        (
-                            "sha256".parse()?,
-                            Checksum::new("789".to_string(), None, None),
-                        )
+                        ("md5".parse()?, Checksum::new("123".to_string(), None),),
+                        ("sha1".parse()?, Checksum::new("456".to_string(), None),),
+                        ("sha256".parse()?, Checksum::new("789".to_string(), None),)
                     ])
                 ),
                 SumsFile::new(
                     BTreeSet::from_iter(files.clone().into_iter().skip(2)),
                     Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
-                        (
-                            "sha256".parse()?,
-                            Checksum::new("abc".to_string(), None, None),
-                        ),
-                        (
-                            "crc32".parse()?,
-                            Checksum::new("efg".to_string(), None, None),
-                        ),
-                        (
-                            "crc32c".parse()?,
-                            Checksum::new("hij".to_string(), None, None),
-                        )
+                        ("sha256".parse()?, Checksum::new("abc".to_string(), None),),
+                        ("crc32".parse()?, Checksum::new("efg".to_string(), None),),
+                        ("crc32c".parse()?, Checksum::new("hij".to_string(), None),)
                     ])
                 )
             ]
@@ -361,14 +337,8 @@ pub(crate) mod test {
             BTreeSet::from_iter(vec![c_name.to_string()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
-                (
-                    "sha256".parse()?,
-                    Checksum::new("789".to_string(), None, None),
-                ),
-                (
-                    "crc32".parse()?,
-                    Checksum::new("012".to_string(), None, None),
-                ),
+                ("sha256".parse()?, Checksum::new("789".to_string(), None)),
+                ("crc32".parse()?, Checksum::new("012".to_string(), None)),
             ]),
         );
         c.write().await?;
@@ -390,14 +360,8 @@ pub(crate) mod test {
             BTreeSet::from_iter(vec![c_name.to_string()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
-                (
-                    "crc32c".parse()?,
-                    Checksum::new("789".to_string(), None, None),
-                ),
-                (
-                    "crc32".parse()?,
-                    Checksum::new("012".to_string(), None, None),
-                ),
+                ("crc32c".parse()?, Checksum::new("789".to_string(), None)),
+                ("crc32".parse()?, Checksum::new("012".to_string(), None)),
             ]),
         );
         c.write().await?;
@@ -419,14 +383,8 @@ pub(crate) mod test {
             BTreeSet::from_iter(vec![c_name.to_string()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
-                (
-                    "sha256".parse()?,
-                    Checksum::new("abc".to_string(), None, None),
-                ),
-                (
-                    "crc32".parse()?,
-                    Checksum::new("efg".to_string(), None, None),
-                ),
+                ("sha256".parse()?, Checksum::new("abc".to_string(), None)),
+                ("crc32".parse()?, Checksum::new("efg".to_string(), None)),
             ]),
         );
         c.write().await?;
@@ -436,14 +394,8 @@ pub(crate) mod test {
             BTreeSet::from_iter(vec![d_name.to_string()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
-                (
-                    "crc32".parse()?,
-                    Checksum::new("efg".to_string(), None, None),
-                ),
-                (
-                    "crc32c".parse()?,
-                    Checksum::new("hij".to_string(), None, None),
-                ),
+                ("crc32".parse()?, Checksum::new("efg".to_string(), None)),
+                ("crc32c".parse()?, Checksum::new("hij".to_string(), None)),
             ]),
         );
         d.write().await?;
@@ -459,11 +411,8 @@ pub(crate) mod test {
             BTreeSet::from_iter(vec![a_name.to_string()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
-                ("md5".parse()?, Checksum::new("123".to_string(), None, None)),
-                (
-                    "sha1".parse()?,
-                    Checksum::new("456".to_string(), None, None),
-                ),
+                ("md5".parse()?, Checksum::new("123".to_string(), None)),
+                ("sha1".parse()?, Checksum::new("456".to_string(), None)),
             ]),
         );
         a.write().await?;
@@ -473,14 +422,8 @@ pub(crate) mod test {
             BTreeSet::from_iter(vec![b_name.to_string()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
-                (
-                    "sha1".parse()?,
-                    Checksum::new("456".to_string(), None, None),
-                ),
-                (
-                    "sha256".parse()?,
-                    Checksum::new("789".to_string(), None, None),
-                ),
+                ("sha1".parse()?, Checksum::new("456".to_string(), None)),
+                ("sha256".parse()?, Checksum::new("789".to_string(), None)),
             ]),
         );
         b.write().await?;

@@ -1,7 +1,7 @@
 //! Generate checksums for files.
 //!
 
-use crate::checksum::file::{Checksum, SumsFile};
+use crate::checksum::file::{Checksum, PartChecksum, PartChecksums, SumsFile};
 use crate::checksum::Ctx;
 use crate::error::Error::GenerateError;
 use crate::error::{Error, Result};
@@ -176,13 +176,18 @@ impl GenerateTask {
                     ChecksumTask(ctx) => {
                         let (ctx, digest) = *ctx;
 
-                        let part_size = ctx.part_size();
-                        let part_checksums = ctx.part_checksums();
+                        let part_checksums = ctx.part_checksums().map(|sums| {
+                            PartChecksums::new(
+                                sums.into_iter()
+                                    .map(|(part_size, sum)| {
+                                        PartChecksum::new(Some(part_size), Some(sum))
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                        });
+
                         let checksum = ctx.digest_to_string(&digest);
-                        Ok(Some((
-                            ctx,
-                            Checksum::new(checksum, part_size, part_checksums),
-                        )))
+                        Ok(Some((ctx, Checksum::new(checksum, part_checksums))))
                     }
                 }
             })
@@ -415,31 +420,36 @@ pub(crate) mod test {
         assert_eq!(file.size, Some(TEST_FILE_SIZE));
         assert_eq!(
             file.checksums[&"md5".parse()?],
-            Checksum::new(md5.to_string(), None, None)
+            Checksum::new(md5.to_string(), None)
         );
         assert_eq!(
             file.checksums[&"sha1".parse()?],
-            Checksum::new(expected_sha1_sum().to_string(), None, None)
+            Checksum::new(expected_sha1_sum().to_string(), None)
         );
         assert_eq!(
             file.checksums[&"sha256".parse()?],
-            Checksum::new(expected_sha256_sum().to_string(), None, None)
+            Checksum::new(expected_sha256_sum().to_string(), None)
         );
         assert_eq!(
             file.checksums[&"md5-aws-1073741824b".parse()?],
             Checksum::new(
                 expected_md5_1gib().to_string(),
-                Some(1073741824),
-                Some(vec!["d93e71879054f205ede90d35c8081ca5".to_string()])
+                Some(
+                    vec![(
+                        Some(1073741824),
+                        Some("d93e71879054f205ede90d35c8081ca5".to_string())
+                    )]
+                    .into()
+                )
             )
         );
         assert_eq!(
             file.checksums[&"crc32".parse()?],
-            Checksum::new(expected_crc32_be().to_string(), None, None)
+            Checksum::new(expected_crc32_be().to_string(), None)
         );
         assert_eq!(
             file.checksums[&"crc32c".parse()?],
-            Checksum::new(expected_crc32c_be().to_string(), None, None)
+            Checksum::new(expected_crc32c_be().to_string(), None)
         );
 
         Ok(())
@@ -452,7 +462,7 @@ pub(crate) mod test {
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![(
                 "md5".parse()?,
-                Checksum::new("123".to_string(), None, None),
+                Checksum::new("123".to_string(), None),
             )]),
         );
         existing.write().await?;

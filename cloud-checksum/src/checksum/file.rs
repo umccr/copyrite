@@ -193,22 +193,62 @@ impl TryFrom<&[u8]> for SumsFile {
 #[serde(rename_all = "kebab-case")]
 pub struct Checksum {
     pub(crate) checksum: String,
-    pub(crate) part_size: Option<u64>,
-    pub(crate) part_checksums: Option<Vec<String>>,
+    pub(crate) part_checksums: Option<PartChecksums>,
 }
 
 impl Checksum {
     /// Create an output checksum.
-    pub fn new(
-        checksum: String,
-        part_size: Option<u64>,
-        part_checksums: Option<Vec<String>>,
-    ) -> Self {
+    pub fn new(checksum: String, part_checksums: Option<PartChecksums>) -> Self {
         Self {
             checksum,
-            part_size,
             part_checksums,
         }
+    }
+}
+
+/// A part checksum with the part size.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub struct PartChecksum {
+    pub(crate) part_size: Option<u64>,
+    pub(crate) part_checksum: Option<String>,
+}
+
+impl PartChecksum {
+    /// Create a part checksum.
+    pub fn new(part_size: Option<u64>, part_checksum: Option<String>) -> Self {
+        Self {
+            part_size,
+            part_checksum,
+        }
+    }
+}
+
+/// A list of part checksums.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub struct PartChecksums(Vec<PartChecksum>);
+
+impl PartChecksums {
+    /// Create a new part checksums.
+    pub fn new(part_checksums: Vec<PartChecksum>) -> Self {
+        Self(part_checksums)
+    }
+
+    /// Get the inner vector of values.
+    pub fn into_inner(self) -> Vec<PartChecksum> {
+        self.0
+    }
+}
+
+impl From<Vec<(Option<u64>, Option<String>)>> for PartChecksums {
+    fn from(part_sums: Vec<(Option<u64>, Option<String>)>) -> Self {
+        Self::new(
+            part_sums
+                .into_iter()
+                .map(|(part_size, part_sum)| PartChecksum::new(part_size, part_sum))
+                .collect(),
+        )
     }
 }
 
@@ -252,8 +292,7 @@ pub(crate) mod test {
             "md5".parse()?,
             Checksum::new(
                 expected_md5_1gib().to_string(),
-                Some(1),
-                Some(vec![expected_md5.to_string()]),
+                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
             ),
         );
         assert!(file_one.is_same(&file_two));
@@ -263,8 +302,7 @@ pub(crate) mod test {
             "aws-etag".parse()?,
             Checksum::new(
                 expected_md5_1gib().to_string(),
-                Some(1),
-                Some(vec![expected_md5.to_string()]),
+                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
             ),
         )]);
         assert!(!file_one.is_same(&file_two));
@@ -281,8 +319,7 @@ pub(crate) mod test {
             "aws-etag".parse()?,
             Checksum::new(
                 expected_md5_1gib().to_string(),
-                Some(1),
-                Some(vec![expected_md5.to_string()]),
+                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
             ),
         );
         assert!(file_one.comparable(&file_two));
@@ -292,8 +329,7 @@ pub(crate) mod test {
             "md5".parse()?,
             Checksum::new(
                 expected_md5_1gib().to_string(),
-                Some(1),
-                Some(vec![expected_md5.to_string()]),
+                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
             ),
         )]);
         assert!(!file_one.comparable(&file_two));
@@ -309,8 +345,7 @@ pub(crate) mod test {
             "aws-etag".parse()?,
             Checksum::new(
                 expected_md5.to_string(),
-                Some(2),
-                Some(vec![expected_md5.to_string()]),
+                Some(vec![(Some(2), Some(expected_md5.to_string()))].into()),
             ),
         );
 
@@ -319,8 +354,7 @@ pub(crate) mod test {
             "md5".parse()?,
             Checksum::new(
                 expected_md5.to_string(),
-                Some(1),
-                Some(vec![expected_md5.to_string()]),
+                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
             ),
         );
 
@@ -334,16 +368,14 @@ pub(crate) mod test {
                     "md5".parse()?,
                     Checksum::new(
                         expected_md5.to_string(),
-                        Some(1),
-                        Some(vec![expected_md5.to_string()]),
+                        Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
                     ),
                 ),
                 (
                     "aws-etag".parse()?,
                     Checksum::new(
                         expected_md5.to_string(),
-                        Some(1),
-                        Some(vec![expected_md5.to_string()]),
+                        Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
                     )
                 ),
             ])
@@ -357,8 +389,7 @@ pub(crate) mod test {
             "aws-etag".parse().unwrap(),
             Checksum::new(
                 expected_md5.to_string(),
-                Some(1),
-                Some(vec![expected_md5.to_string()]),
+                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
             ),
         )];
         SumsFile::new(BTreeSet::new(), Some(123), BTreeMap::from_iter(checksums))
@@ -370,8 +401,10 @@ pub(crate) mod test {
             "size": 123,
             "md5-aws-1": {
                 "checksum": expected_md5,
-                "part-size": 1,
-                "part-checksums": [expected_md5]
+                "part-checksums": [{
+                    "part-size": 1,
+                    "part-checksum": expected_md5
+                }]
             }
         })
     }

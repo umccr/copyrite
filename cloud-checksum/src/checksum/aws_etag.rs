@@ -17,7 +17,7 @@ pub struct AWSETagCtx {
     part_mode: PartMode,
     current_bytes: u64,
     remainder: Option<Arc<[u8]>>,
-    part_checksums: Vec<Vec<u8>>,
+    part_checksums: Vec<(u64, Vec<u8>)>,
     n_checksums: u64,
     ctx: StandardCtx,
     file_size: Option<u64>,
@@ -81,12 +81,13 @@ impl AWSETagCtx {
             let (data, remainder) =
                 data.split_at(usize::try_from(self.part_size()? - self.current_bytes)?);
 
+            self.ctx.update(Arc::from(data))?;
+            self.part_checksums
+                .push((self.part_size()?, self.ctx.finalize()?));
+
+            // Reset the current bytes and any remainder bytes.
             self.current_bytes = u64::try_from(remainder.len())?;
             self.remainder = Some(Arc::from(remainder));
-
-            self.ctx.update(Arc::from(data))?;
-
-            self.part_checksums.push(self.ctx.finalize()?);
 
             // Reset the context for next chunk.
             self.ctx = self.ctx.reset();
@@ -116,7 +117,8 @@ impl AWSETagCtx {
         // Add the last part checksum.
         if self.remainder.is_some() || self.current_bytes != 0 {
             self.update_with_remainder()?;
-            self.part_checksums.push(self.ctx.finalize()?);
+            self.part_checksums
+                .push((self.current_bytes, self.ctx.finalize()?));
 
             // Reset the context for merged chunks.
             self.ctx = self.ctx.reset();
@@ -124,7 +126,12 @@ impl AWSETagCtx {
 
         // Then merge the part checksums and compute a single checksum.
         self.n_checksums = u64::try_from(self.part_checksums.len())?;
-        let concat: Vec<u8> = self.part_checksums.iter().flatten().copied().collect();
+        let concat: Vec<u8> = self
+            .part_checksums
+            .iter()
+            .flat_map(|(_, sum)| sum)
+            .copied()
+            .collect();
 
         self.ctx.update(Arc::from(concat.as_slice()))?;
         self.ctx.finalize()
@@ -190,11 +197,11 @@ impl AWSETagCtx {
         self.file_size = file_size;
     }
 
-    /// Get the encoded part checksums.
-    pub fn part_checksums(&self) -> Vec<String> {
+    /// Get the encoded part checksums and their part sizes.
+    pub fn part_checksums(&self) -> Vec<(u64, String)> {
         self.part_checksums
             .iter()
-            .map(|digest| self.ctx.digest_to_string(digest))
+            .map(|(part_size, digest)| (*part_size, self.ctx.digest_to_string(digest)))
             .collect()
     }
 }
