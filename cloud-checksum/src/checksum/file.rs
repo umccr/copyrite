@@ -12,14 +12,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use tokio::fs;
 
 /// The current version of the output file.
-pub const OUTPUT_FILE_VERSION: &str = "0.1.0";
+pub const OUTPUT_FILE_VERSION: &str = "1";
 
 /// The file ending of a sums file.
 pub const SUMS_FILE_ENDING: &str = ".sums";
 
 /// A file containing multiple checksums.
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub struct SumsFile {
     // Names are only used internally for writing files, they should not
@@ -34,6 +34,12 @@ pub struct SumsFile {
     #[serde_as(as = "BTreeMap<DisplayFromStr, _>")]
     #[serde(flatten)]
     pub(crate) checksums: BTreeMap<Ctx, Checksum>,
+}
+
+impl Default for SumsFile {
+    fn default() -> Self {
+        Self::new(BTreeSet::new(), None, BTreeMap::new())
+    }
 }
 
 impl SumsFile {
