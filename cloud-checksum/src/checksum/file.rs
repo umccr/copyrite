@@ -170,8 +170,13 @@ impl SumsFile {
 
     /// Set the size.
     pub fn with_size(mut self, size: Option<u64>) -> Self {
-        self.size = size;
+        self.set_size(size);
         self
+    }
+
+    /// Set the size from a mutable reference.
+    pub fn set_size(&mut self, size: Option<u64>) {
+        self.size = size;
     }
 
     /// Add a checksum to the sums file.
