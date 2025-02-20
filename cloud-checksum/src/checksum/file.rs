@@ -129,6 +129,20 @@ impl SumsFile {
         }
     }
 
+    /// Split the sums file into multiple sums files, one for each checksum.
+    pub fn split(self) -> Vec<SumsFile> {
+        self.checksums
+            .iter()
+            .map(|(ctx, checksum)| {
+                let mut sums_file = Self::default().with_size(self.size);
+                sums_file.names = self.names.clone();
+                sums_file.add_checksum(ctx.clone(), checksum.clone());
+
+                sums_file
+            })
+            .collect()
+    }
+
     /// Check if the sums file is the same as another according to all available checksums
     /// in the sums file.
     pub fn is_same(&self, other: &Self) -> bool {

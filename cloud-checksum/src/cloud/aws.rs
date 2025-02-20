@@ -14,6 +14,8 @@ use aws_sdk_s3::operation::get_object_attributes::GetObjectAttributesOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::{ChecksumMode, ChecksumType, ObjectAttributes, ObjectPart};
 use aws_sdk_s3::Client;
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use std::collections::HashMap;
 
 /// Build an S3 sums object.
@@ -165,8 +167,6 @@ impl S3 {
             .send()
             .await?;
 
-        println!("{:#?}", attributes);
-
         Ok(self.get_object_attributes.insert(attributes))
     }
 
@@ -187,9 +187,31 @@ impl S3 {
             .send()
             .await?;
 
-        println!("{:#?}", head_object);
-
         Ok(self.head_object.entry(part_number).or_insert(head_object))
+    }
+
+    /// Decode the base64 string and convert it to a hex string.
+    /// All additional checksums (not including the `ETag`) are base64 encoded when returned from
+    /// the SDK.
+    fn base64_decode_as_hex(data: &str) -> Result<String> {
+        let data = BASE64_STANDARD
+            .decode(data.as_bytes())
+            .map_err(|_| ParseError(format!("failed to decode base64 checksum: {}", data)))?;
+        Ok(hex::encode(data))
+    }
+
+    /// Is this an additional checksum, i.e. not an `ETag`.
+    fn is_additional_checksum(ctx: &StandardCtx) -> bool {
+        !matches!(ctx, StandardCtx::MD5(_))
+    }
+
+    /// Convert the checksum value to a hex string if it is an additional checksum.
+    fn convert_to_hex(ctx: &StandardCtx, sum: Option<&str>) -> Result<Option<String>> {
+        if Self::is_additional_checksum(ctx) {
+            Ok(sum.map(Self::base64_decode_as_hex).transpose()?)
+        } else {
+            Ok(sum.map(|sum| sum.to_string()))
+        }
     }
 
     /// Get the AWS checksum value from `GetObjectAttributes`.
@@ -206,12 +228,12 @@ impl S3 {
             _ => None,
         };
 
-        Ok(sum.map(|sum| sum.to_string()))
+        Self::convert_to_hex(ctx, sum)
     }
 
     /// Get the AWS checksum part from `ObjectPart`.
-    pub fn aws_parts_from_ctx<'a>(ctx: &StandardCtx, part: &'a ObjectPart) -> Option<&'a str> {
-        match ctx {
+    pub fn aws_parts_from_ctx(ctx: &StandardCtx, part: &ObjectPart) -> Result<Option<String>> {
+        let sum = match ctx {
             // Every checksum other than `ETag` has part checksums available if uploaded using multipart uploads.
             StandardCtx::SHA1(_) => part.checksum_sha1(),
             StandardCtx::SHA256(_) => part.checksum_sha256(),
@@ -219,7 +241,9 @@ impl S3 {
             StandardCtx::CRC32C(_, _) => part.checksum_crc32_c(),
             // There are no part checksums for `ETag`s.
             _ => None,
-        }
+        };
+
+        Self::convert_to_hex(ctx, sum)
     }
 
     /// Get the AWS checksum parts from `GetObjectAttributes` parts output.
@@ -238,7 +262,7 @@ impl S3 {
                     .map(|part| {
                         Ok(PartChecksum::new(
                             part.size().map(u64::try_from).transpose()?,
-                            Self::aws_parts_from_ctx(ctx, part).map(|c| c.to_string()),
+                            Self::aws_parts_from_ctx(ctx, part)?.map(|c| c.to_string()),
                         ))
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -286,7 +310,7 @@ impl S3 {
     /// Add checksums to an existing sums file using AWS metadata.
     async fn add_checksum(&mut self, sums_file: &mut SumsFile, ctx: StandardCtx) -> Result<()> {
         // If there is no sum for this context, return early.
-        let Some(_) = self.aws_sums_from_ctx(&ctx).await? else {
+        let Some(mut sum) = self.aws_sums_from_ctx(&ctx).await? else {
             return Ok(());
         };
 
@@ -321,13 +345,22 @@ impl S3 {
         // Create the AWS context with the available information. This can be a composite checksum
         // with a part size, or a regular context otherwise.
         let ctx = match (total_parts, checksum_type) {
-            (Some(total_parts), Some(ChecksumType::Composite) | None) => Ctx::AWSEtag(
-                AWSETagCtx::new(ctx, PartMode::PartNumber(total_parts), file_size),
-            ),
+            (Some(total_parts), Some(ChecksumType::Composite) | None) => {
+                // Need to add this back in as it doesn't come with additional checksums.
+                if Self::is_additional_checksum(&ctx) {
+                    sum = format!("{}-{}", sum, total_parts);
+                }
+
+                Ctx::AWSEtag(AWSETagCtx::new(
+                    ctx,
+                    PartMode::PartNumber(total_parts),
+                    file_size,
+                ))
+            }
             _ => Ctx::Regular(ctx),
         };
 
-        let checksum = Checksum::new(ctx.to_string(), parts);
+        let checksum = Checksum::new(sum, parts);
         sums_file.add_checksum(ctx, checksum);
 
         Ok(())
@@ -388,6 +421,7 @@ pub(crate) mod test {
     use super::*;
     use crate::checksum::standard::test::{expected_md5_sum, expected_sha256_sum};
     use crate::error::Result;
+    use crate::task::generate::test::generate_for;
     use crate::test::TEST_FILE_SIZE;
     use aws_sdk_s3::types;
     use aws_sdk_s3::types::GetObjectAttributesParts;
@@ -428,217 +462,105 @@ pub(crate) mod test {
     }
 
     #[tokio::test]
-    pub async fn test_multi_part_with_sha256_different_part_sizes() -> Result<()> {
+    pub async fn test_multi_part_with_sha256_different_part_sizes() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_multi_part_with_sha256_different_part_sizes())
             .parse_from_url("s3://bucket/key".to_string())
             .build()?;
 
-        let sums = s3.sums_from_metadata().await?;
-        let mut expected = SumsFile::default().with_size(Some(TEST_FILE_SIZE));
-        expected.add_name("key".to_string());
+        let sums = s3.sums_from_metadata().await?.split();
+        let expected = generate_for("key", vec!["md5-aws-4", "sha256-aws-4"], true, false)
+            .await?
+            .split();
 
-        let ctx = AWSETagCtx::new(
-            StandardCtx::MD5(Default::default()),
-            PartMode::PartNumber(4),
-            Some(TEST_FILE_SIZE),
-        );
-        let part_sums = vec![
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(429496730), None),
-            PartChecksum::new(Some(214748364), None),
-        ];
-        expected.add_checksum(
-            Ctx::AWSEtag(ctx),
-            Checksum::new("md5-aws-4".to_string(), Some(PartChecksums::new(part_sums))),
-        );
-
-        let ctx = AWSETagCtx::new(
-            StandardCtx::SHA256(Default::default()),
-            PartMode::PartNumber(4),
-            Some(TEST_FILE_SIZE),
-        );
-        let part_sums = vec![
-            PartChecksum::new(Some(214748365), Some(EXPECTED_SHA256_PART_1.to_string())),
-            PartChecksum::new(Some(214748365), Some(EXPECTED_SHA256_PART_2.to_string())),
-            PartChecksum::new(
-                Some(214748365),
-                Some(EXPECTED_SHA256_PART_3_4_CONCAT.to_string()),
-            ),
-            PartChecksum::new(Some(214748364), Some(EXPECTED_SHA256_PART_5.to_string())),
-        ];
-        expected.add_checksum(
-            Ctx::AWSEtag(ctx),
-            Checksum::new(
-                "sha256-aws-4".to_string(),
-                Some(PartChecksums::new(part_sums)),
-            ),
-        );
-
-        assert_eq!(sums, expected);
+        assert_all_same(sums, expected);
 
         Ok(())
     }
 
     #[tokio::test]
-    pub async fn test_multi_part_etag_only_different_part_sizes() -> Result<()> {
+    pub async fn test_multi_part_etag_only_different_part_sizes() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_multi_part_etag_only_different_part_sizes())
             .parse_from_url("s3://bucket/key".to_string())
             .build()?;
 
-        let sums = s3.sums_from_metadata().await?;
-        let mut expected = SumsFile::default().with_size(Some(TEST_FILE_SIZE));
-        expected.add_name("key".to_string());
+        let sums = s3.sums_from_metadata().await?.split();
+        let expected = generate_for("key", vec!["md5-aws-4"], true, false)
+            .await?
+            .split();
 
-        let ctx = AWSETagCtx::new(
-            StandardCtx::MD5(Default::default()),
-            PartMode::PartNumber(4),
-            Some(TEST_FILE_SIZE),
-        );
-        let part_sums = vec![
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(429496730), None),
-            PartChecksum::new(Some(214748364), None),
-        ];
-        expected.add_checksum(
-            Ctx::AWSEtag(ctx),
-            Checksum::new("md5-aws-4".to_string(), Some(PartChecksums::new(part_sums))),
-        );
-
-        assert_eq!(sums, expected);
+        assert_all_same(sums, expected);
 
         Ok(())
     }
 
     #[tokio::test]
-    pub async fn test_multi_part_with_sha256() -> Result<()> {
+    pub async fn test_multi_part_with_sha256() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_multi_part_with_sha256())
             .parse_from_url("s3://bucket/key".to_string())
             .build()?;
 
-        let sums = s3.sums_from_metadata().await?;
-        let mut expected = SumsFile::default().with_size(Some(TEST_FILE_SIZE));
-        expected.add_name("key".to_string());
+        let sums = s3.sums_from_metadata().await?.split();
+        let expected = generate_for("key", vec!["md5-aws-5", "sha256-aws-5"], true, false)
+            .await?
+            .split();
 
-        let ctx = AWSETagCtx::new(
-            StandardCtx::MD5(Default::default()),
-            PartMode::PartNumber(5),
-            Some(TEST_FILE_SIZE),
-        );
-        let part_sums = vec![
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(214748364), None),
-        ];
-        expected.add_checksum(
-            Ctx::AWSEtag(ctx),
-            Checksum::new("md5-aws-5".to_string(), Some(PartChecksums::new(part_sums))),
-        );
-
-        let ctx = AWSETagCtx::new(
-            StandardCtx::SHA256(Default::default()),
-            PartMode::PartNumber(5),
-            Some(TEST_FILE_SIZE),
-        );
-        let part_sums = vec![
-            PartChecksum::new(Some(214748365), Some(EXPECTED_SHA256_PART_1.to_string())),
-            PartChecksum::new(Some(214748365), Some(EXPECTED_SHA256_PART_2.to_string())),
-            PartChecksum::new(Some(214748365), Some(EXPECTED_SHA256_PART_3.to_string())),
-            PartChecksum::new(Some(214748365), Some(EXPECTED_SHA256_PART_4.to_string())),
-            PartChecksum::new(Some(214748364), Some(EXPECTED_SHA256_PART_5.to_string())),
-        ];
-        expected.add_checksum(
-            Ctx::AWSEtag(ctx),
-            Checksum::new(
-                "sha256-aws-5".to_string(),
-                Some(PartChecksums::new(part_sums)),
-            ),
-        );
-
-        assert_eq!(sums, expected);
+        assert_all_same(sums, expected);
 
         Ok(())
     }
 
+    fn assert_all_same(result: Vec<SumsFile>, expected: Vec<SumsFile>) {
+        assert!(result.into_iter().zip(expected).all(|(a, b)| a.is_same(&b)));
+    }
+
     #[tokio::test]
-    pub async fn test_multi_part_etag_only() -> Result<()> {
+    pub async fn test_multi_part_etag_only() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_multi_part_etag_only())
             .parse_from_url("s3://bucket/key".to_string())
             .build()?;
 
-        let sums = s3.sums_from_metadata().await?;
-        let mut expected = SumsFile::default().with_size(Some(TEST_FILE_SIZE));
-        expected.add_name("key".to_string());
+        let sums = s3.sums_from_metadata().await?.split();
+        let expected = generate_for("key", vec!["md5-aws-5"], true, false)
+            .await?
+            .split();
 
-        let ctx = AWSETagCtx::new(
-            StandardCtx::MD5(Default::default()),
-            PartMode::PartNumber(5),
-            Some(TEST_FILE_SIZE),
-        );
-        let part_sums = vec![
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(214748365), None),
-            PartChecksum::new(Some(214748364), None),
-        ];
-        expected.add_checksum(
-            Ctx::AWSEtag(ctx),
-            Checksum::new("md5-aws-5".to_string(), Some(PartChecksums::new(part_sums))),
-        );
-
-        assert_eq!(sums, expected);
+        assert_all_same(sums, expected);
 
         Ok(())
     }
 
     #[tokio::test]
-    pub async fn test_single_part_with_sha256() -> Result<()> {
+    pub async fn test_single_part_with_sha256() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_single_part_with_sha256())
             .parse_from_url("s3://bucket/key".to_string())
             .build()?;
 
-        let sums = s3.sums_from_metadata().await?;
-        let mut expected = SumsFile::default().with_size(Some(TEST_FILE_SIZE));
-        expected.add_name("key".to_string());
-        expected.add_checksum(
-            Ctx::Regular(StandardCtx::MD5(Default::default())),
-            Checksum::new("md5".to_string(), None),
-        );
-        expected.add_checksum(
-            Ctx::Regular(StandardCtx::SHA256(Default::default())),
-            Checksum::new("sha256".to_string(), None),
-        );
+        let sums = s3.sums_from_metadata().await?.split();
+        let expected = generate_for("key", vec!["md5", "sha256"], true, false)
+            .await?
+            .split();
 
-        assert_eq!(sums, expected);
+        assert_all_same(sums, expected);
 
         Ok(())
     }
 
     #[tokio::test]
-    pub async fn test_single_part_etag_only() -> Result<()> {
+    pub async fn test_single_part_etag_only() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_single_part_etag_only())
             .parse_from_url("s3://bucket/key".to_string())
             .build()?;
 
-        let sums = s3.sums_from_metadata().await?;
-        let mut expected = SumsFile::default().with_size(Some(TEST_FILE_SIZE));
-        expected.add_name("key".to_string());
-        expected.add_checksum(
-            Ctx::Regular(StandardCtx::MD5(Default::default())),
-            Checksum::new("md5".to_string(), None),
-        );
+        let sums = s3.sums_from_metadata().await?.split();
+        let expected = generate_for("key", vec!["md5"], true, false).await?.split();
 
-        assert_eq!(sums, expected);
+        assert_all_same(sums, expected);
 
         Ok(())
     }
