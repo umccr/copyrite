@@ -390,22 +390,28 @@ pub(crate) mod test {
         .await
     }
 
-    async fn test_generate(
-        name: String,
+    pub(crate) async fn generate_for(
+        name: &str,
+        tasks: Vec<&str>,
         overwrite: bool,
         verify: bool,
-        tasks: Vec<&str>,
-        md5: &str,
-    ) -> Result<()> {
+    ) -> Result<SumsFile> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
+        let file_size = file_size(&test_file).await;
+
         let file = File::open(test_file).await?;
         let mut reader = channel_reader(file).await;
 
-        let tasks = tasks
+        let mut tasks: Vec<Ctx> = tasks
             .into_iter()
             .map(|task| Ok(task.parse()?))
             .collect::<Result<Vec<_>>>()?;
-        let file = GenerateTaskBuilder::default()
+
+        tasks
+            .iter_mut()
+            .for_each(|task| task.set_file_size(file_size));
+
+        Ok(GenerateTaskBuilder::default()
             .with_input_file_name(name.to_string())
             .with_overwrite(overwrite)
             .with_verify(verify)
@@ -414,7 +420,17 @@ pub(crate) mod test {
             .add_generate_tasks(HashSet::from_iter(tasks), &mut reader)?
             .add_reader_task(reader)?
             .run()
-            .await?;
+            .await?)
+    }
+
+    async fn test_generate(
+        name: String,
+        overwrite: bool,
+        verify: bool,
+        tasks: Vec<&str>,
+        md5: &str,
+    ) -> Result<()> {
+        let file = generate_for(&name, tasks, overwrite, verify).await?;
 
         assert_eq!(file.names, BTreeSet::from_iter(vec![name]));
         assert_eq!(file.size, Some(TEST_FILE_SIZE));
