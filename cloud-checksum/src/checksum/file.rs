@@ -152,13 +152,28 @@ impl SumsFile {
 
         for (key, checksum) in &self.checksums {
             if let Some(other_checksum) = other.checksums.get(key) {
-                if checksum == other_checksum {
+                // Two checksums are the same if they have the same top-level checksum and identical
+                // part sizes. It is not necessary to use the part checksum values to determine if
+                // the sums are the same because the sizes alone determine the top-level checksum.
+                if checksum.checksum == other_checksum.checksum
+                    && Self::get_part_sizes(checksum) == Self::get_part_sizes(other_checksum)
+                {
                     return true;
                 }
             }
         }
 
         false
+    }
+
+    /// Get only the part sizes from part checksums
+    fn get_part_sizes(checksum: &Checksum) -> Option<Vec<u64>> {
+        checksum.part_checksums.as_ref().map(|sums| {
+            sums.0
+                .iter()
+                .filter_map(|part| part.part_size)
+                .collect::<Vec<_>>()
+        })
     }
 
     /// Check if the sums file is comparable to another sums file because it contains at least
@@ -263,6 +278,11 @@ impl PartChecksums {
     /// Get the inner vector of values.
     pub fn into_inner(self) -> Vec<PartChecksum> {
         self.0
+    }
+
+    /// Get a reference to the inner values.
+    pub fn get_ref(&self) -> &[PartChecksum] {
+        &self.0
     }
 }
 

@@ -351,11 +351,20 @@ impl S3 {
                     sum = format!("{}-{}", sum, total_parts);
                 }
 
-                Ctx::AWSEtag(AWSETagCtx::new(
-                    ctx,
-                    PartMode::PartNumber(total_parts),
-                    file_size,
-                ))
+                // Get the part mode from the individual part sizes. This will be used to format
+                // the output.
+                let part_mode = if let Some(ref parts) = parts {
+                    let parts = parts
+                        .get_ref()
+                        .iter()
+                        .filter_map(|part| part.part_size)
+                        .collect::<Vec<u64>>();
+                    PartMode::PartSizes(parts)
+                } else {
+                    PartMode::PartNumber(total_parts)
+                };
+
+                Ctx::AWSEtag(AWSETagCtx::new(ctx, part_mode, file_size)?)
             }
             _ => Ctx::Regular(ctx),
         };
