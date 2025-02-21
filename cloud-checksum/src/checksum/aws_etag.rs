@@ -15,6 +15,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct AWSETagCtx {
     part_mode: PartMode,
+    part_size_index: usize,
+    current_part_size: u64,
     current_bytes: u64,
     remainder: Option<Arc<[u8]>>,
     part_checksums: Vec<(u64, Vec<u8>)>,
@@ -55,35 +57,42 @@ impl Hash for AWSETagCtx {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum PartMode {
     PartNumber(u64),
-    PartSize(u64),
+    PartSizes(Vec<u64>),
 }
 
 impl AWSETagCtx {
     /// Create a new checksummer.
-    pub fn new(ctx: StandardCtx, part_mode: PartMode, file_size: Option<u64>) -> Self {
-        Self {
+    pub fn new(ctx: StandardCtx, part_mode: PartMode, file_size: Option<u64>) -> Result<Self> {
+        let mut new = Self {
             part_mode,
+            part_size_index: 0,
+            current_part_size: 0,
             current_bytes: 0,
             remainder: None,
             part_checksums: vec![],
             n_checksums: 0,
             ctx,
             file_size,
-        }
+        };
+
+        new.current_part_size = new.next_part_size()?;
+
+        Ok(new)
     }
 
     /// Update using data.
     pub fn update(&mut self, data: Arc<[u8]>) -> Result<()> {
         let len = u64::try_from(data.len())?;
-        if self.current_bytes + len > self.part_size()? {
+        if self.current_bytes + len > self.current_part_size {
             // If the current byte position is greater than the part size, then split into a new
             // part checksum.
-            let (data, remainder) =
-                data.split_at(usize::try_from(self.part_size()? - self.current_bytes)?);
+            let (data, remainder) = data.split_at(usize::try_from(
+                self.current_part_size - self.current_bytes,
+            )?);
 
             self.ctx.update(Arc::from(data))?;
             self.part_checksums
-                .push((self.part_size()?, self.ctx.finalize()?));
+                .push((self.current_part_size, self.ctx.finalize()?));
 
             // Reset the current bytes and any remainder bytes.
             self.current_bytes = u64::try_from(remainder.len())?;
@@ -91,6 +100,9 @@ impl AWSETagCtx {
 
             // Reset the context for next chunk.
             self.ctx = self.ctx.reset();
+
+            // Update the part size.
+            self.current_part_size = self.next_part_size()?;
         } else {
             // Otherwise update as usual, tracking the byte position.
             self.update_with_remainder()?;
@@ -150,21 +162,26 @@ impl AWSETagCtx {
 
         let mut iter = s.rsplitn(2, "-aws-");
 
-        let part_size = iter
+        let part_sizes = iter
             .next()
             .ok_or_else(|| ParseError("expected part size".to_string()))?;
-        let part_size = part_size.strip_prefix("etag-").unwrap_or(part_size);
+        let part_sizes = part_sizes.strip_prefix("etag-").unwrap_or(part_sizes);
 
-        let part_mode = if let Ok(part_number) = part_size.parse::<u64>() {
+        // Try a part number first, otherwise use part sizes.
+        let part_mode = if let Ok(part_number) = part_sizes.parse::<u64>() {
             if part_number == 0 {
                 return Err(ParseError("cannot use zero part number".to_string()));
             }
 
             PartMode::PartNumber(part_number)
         } else {
-            PartMode::PartSize(
-                parse_size::parse_size(part_size).map_err(|err| ParseError(err.to_string()))?,
-            )
+            // Allow multiple part sizes to be specified separated with a dash.
+            let part_sizes = part_sizes
+                .split("-")
+                .map(|part| parse_size::parse_size(part).map_err(|err| ParseError(err.to_string())))
+                .collect::<Result<Vec<_>>>()?;
+
+            PartMode::PartSizes(part_sizes)
         };
 
         let algorithm = iter
@@ -179,10 +196,22 @@ impl AWSETagCtx {
         format!("{}-{}", self.ctx.digest_to_string(digest), self.n_checksums)
     }
 
-    /// Get the part size, returning an error if using part numbers without a file size.
-    pub fn part_size(&self) -> Result<u64> {
+    /// Get the next part size.
+    pub fn next_part_size(&mut self) -> Result<u64> {
         match (&self.part_mode, &self.file_size) {
-            (PartMode::PartSize(part_size), _) => Ok(*part_size),
+            (PartMode::PartSizes(part_sizes), _) => {
+                // Get the part size based on the index.
+                let part_size = part_sizes
+                    .get(self.part_size_index)
+                    .ok_or_else(|| ParseError("expected part size".to_string()))?;
+
+                // If we reach the end, just return the last value.
+                if self.part_size_index != part_sizes.len() - 1 {
+                    self.part_size_index += 1;
+                }
+
+                Ok(*part_size)
+            }
             (PartMode::PartNumber(part_number), Some(file_size)) => {
                 Ok(file_size.div_ceil(*part_number))
             }
@@ -213,18 +242,22 @@ impl FromStr for AWSETagCtx {
         let (s, part_mode) = Self::parse_part_size(s)?;
         let ctx = StandardCtx::from_str(&s)?;
 
-        Ok(AWSETagCtx::new(ctx, part_mode, None))
+        AWSETagCtx::new(ctx, part_mode, None)
     }
 }
 
 impl Display for AWSETagCtx {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let n_checksums = match self.part_mode {
-            PartMode::PartNumber(part_number) => part_number,
-            PartMode::PartSize(_) => self.n_checksums,
+        let parts = match self.part_mode {
+            PartMode::PartNumber(part_number) => part_number.to_string(),
+            PartMode::PartSizes(ref part_sizes) => part_sizes
+                .iter()
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+                .join("-"),
         };
 
-        write!(f, "{}-aws-{}", self.ctx, n_checksums)
+        write!(f, "{}-aws-{}", self.ctx, parts)
     }
 }
 
