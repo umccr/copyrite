@@ -254,66 +254,47 @@ pub(crate) mod test {
     use crate::checksum::test::test_checksum;
     use anyhow::Result;
 
+    pub(crate) const EXPECTED_MD5_SUM: &str = "d93e71879054f205ede90d35c8081ca5";
+    pub(crate) const EXPECTED_SHA1_SUM: &str = "3eafdb6ad3a27167e0db70fccc40d0614307dabf";
+    pub(crate) const EXPECTED_SHA256_SUM: &str =
+        "29ffbd53cbe43179ab2fa62dbd958c0ec30b340ab50ce7c785e8a7a4b4771e39";
+    pub(crate) const EXPECTED_CRC32_BE_SUM: &str = "3320f39e";
+    pub(crate) const EXPECTED_CRC32_LE_SUM: &str = "9ef32033";
+    pub(crate) const EXPECTED_CRC32C_BE_SUM: &str = "4920106a";
+    pub(crate) const EXPECTED_CRC32C_LE_SUM: &str = "6a102049";
+
     #[tokio::test]
     async fn test_md5() -> Result<()> {
-        test_checksum("md5", expected_md5_sum()).await
+        test_checksum("md5", EXPECTED_MD5_SUM).await
     }
 
     #[tokio::test]
     async fn test_sha1() -> Result<()> {
-        test_checksum("sha1", expected_sha1_sum()).await
+        test_checksum("sha1", EXPECTED_SHA1_SUM).await
     }
 
     #[tokio::test]
     async fn test_sha256() -> Result<()> {
-        test_checksum("sha256", expected_sha256_sum()).await
+        test_checksum("sha256", EXPECTED_SHA256_SUM).await
     }
 
     #[tokio::test]
     async fn test_crc32_be() -> Result<()> {
-        test_checksum("crc32", expected_crc32_be()).await
+        test_checksum("crc32", EXPECTED_CRC32_BE_SUM).await
     }
 
     #[tokio::test]
     async fn test_crc32_le() -> Result<()> {
-        test_checksum("crc32-le", expected_crc32_le()).await
+        test_checksum("crc32-le", EXPECTED_CRC32_LE_SUM).await
     }
 
     #[tokio::test]
     async fn test_crc32c_be() -> Result<()> {
-        test_checksum("crc32c", expected_crc32c_be()).await
+        test_checksum("crc32c", EXPECTED_CRC32C_BE_SUM).await
     }
 
     #[tokio::test]
     async fn test_crc32c_le() -> Result<()> {
-        test_checksum("crc32c-le", expected_crc32c_le()).await
-    }
-
-    pub(crate) fn expected_md5_sum() -> &'static str {
-        "d93e71879054f205ede90d35c8081ca5"
-    }
-
-    pub(crate) fn expected_sha1_sum() -> &'static str {
-        "3eafdb6ad3a27167e0db70fccc40d0614307dabf"
-    }
-
-    pub(crate) fn expected_sha256_sum() -> &'static str {
-        "29ffbd53cbe43179ab2fa62dbd958c0ec30b340ab50ce7c785e8a7a4b4771e39"
-    }
-
-    pub(crate) fn expected_crc32_be() -> &'static str {
-        "3320f39e"
-    }
-
-    pub(crate) fn expected_crc32_le() -> &'static str {
-        "9ef32033"
-    }
-
-    pub(crate) fn expected_crc32c_be() -> &'static str {
-        "4920106a"
-    }
-
-    pub(crate) fn expected_crc32c_le() -> &'static str {
-        "6a102049"
+        test_checksum("crc32c-le", EXPECTED_CRC32C_LE_SUM).await
     }
 }

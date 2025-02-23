@@ -2,21 +2,24 @@
 //!
 
 use crate::checksum::aws_etag::{AWSETagCtx, PartMode};
-use crate::checksum::file::{Checksum, PartChecksum, PartChecksums, SumsFile};
+use crate::checksum::file::SumsFile;
+use crate::checksum::file::{Checksum, PartChecksum, PartChecksums};
 use crate::checksum::standard::StandardCtx;
 use crate::checksum::Ctx;
-use crate::error::Error::ParseError;
+use crate::error::Error::{AwsError, ParseError};
 use crate::error::{Error, Result};
-use crate::Endianness;
+use crate::reader::ObjectSums;
 use aws_config::{load_defaults, BehaviorVersion};
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::get_object_attributes::GetObjectAttributesOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::{ChecksumMode, ChecksumType, ObjectAttributes, ObjectPart};
 use aws_sdk_s3::Client;
+use aws_smithy_types::byte_stream::ByteStream;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use std::collections::HashMap;
+use tokio::io::AsyncRead;
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
@@ -78,6 +81,11 @@ impl S3Builder {
         ))
     }
 
+    /// Is this an S3 url.
+    pub fn is_s3(s: &str) -> bool {
+        s.starts_with("s3://")
+    }
+
     /// Parse from an S3 url, e.g.`s3://bucket/key`.
     pub fn parse_url(s: &str) -> Result<(String, String)> {
         let Some(s) = s.strip_prefix("s3://") else {
@@ -101,7 +109,7 @@ impl S3Builder {
 }
 
 /// An S3 object and AWS-related existing sums.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct S3 {
     client: Client,
     bucket: String,
@@ -134,11 +142,7 @@ impl S3 {
         {
             Ok(sums) => {
                 let data = sums.body.collect().await?.to_vec();
-                let sums = SumsFile::read_from_slice(
-                    data.as_slice(),
-                    SumsFile::format_target_file(&self.key),
-                )
-                .await?;
+                let sums = SumsFile::read_from_slice(data.as_slice()).await?;
                 Ok(Some(sums))
             }
             Err(err) if matches!(err.as_service_error(), Some(GetObjectError::NoSuchKey(_))) => {
@@ -190,27 +194,26 @@ impl S3 {
         Ok(self.head_object.entry(part_number).or_insert(head_object))
     }
 
-    /// Decode the base64 string and convert it to a hex string.
-    /// All additional checksums (not including the `ETag`) are base64 encoded when returned from
-    /// the SDK.
-    fn base64_decode_as_hex(data: &str) -> Result<String> {
-        let data = BASE64_STANDARD
-            .decode(data.as_bytes())
-            .map_err(|_| ParseError(format!("failed to decode base64 checksum: {}", data)))?;
-        Ok(hex::encode(data))
-    }
-
     /// Is this an additional checksum, i.e. not an `ETag`.
     fn is_additional_checksum(ctx: &StandardCtx) -> bool {
         !matches!(ctx, StandardCtx::MD5(_))
     }
 
-    /// Convert the checksum value to a hex string if it is an additional checksum.
-    fn convert_to_hex(ctx: &StandardCtx, sum: Option<&str>) -> Result<Option<String>> {
+    /// Decode the base64 encoded checksum if it is an additional checksum. All additional
+    /// checksums (not including the `ETag`) are base64 encoded when returned from the SDK.
+    /// The `ETag` is hex encoded.
+    fn decode_sum(ctx: &StandardCtx, sum: String) -> Result<Vec<u8>> {
+        let sum = sum.split("-").next().unwrap_or_else(|| &sum);
+
         if Self::is_additional_checksum(ctx) {
-            Ok(sum.map(Self::base64_decode_as_hex).transpose()?)
+            let data = BASE64_STANDARD
+                .decode(sum.as_bytes())
+                .map_err(|_| ParseError(format!("failed to decode base64 checksum: {}", sum)))?;
+
+            Ok(data)
         } else {
-            Ok(sum.map(|sum| sum.to_string()))
+            Ok(hex::decode(sum.as_bytes())
+                .map_err(|_| ParseError(format!("failed to decode hex `ETag`: {}", sum)))?)
         }
     }
 
@@ -228,11 +231,11 @@ impl S3 {
             _ => None,
         };
 
-        Self::convert_to_hex(ctx, sum)
+        Ok(sum.map(|sum| sum.to_string()))
     }
 
     /// Get the AWS checksum part from `ObjectPart`.
-    pub fn aws_parts_from_ctx(ctx: &StandardCtx, part: &ObjectPart) -> Result<Option<String>> {
+    pub fn aws_parts_from_ctx(ctx: &StandardCtx, part: &ObjectPart) -> Option<String> {
         let sum = match ctx {
             // Every checksum other than `ETag` has part checksums available if uploaded using multipart uploads.
             StandardCtx::SHA1(_) => part.checksum_sha1(),
@@ -243,7 +246,7 @@ impl S3 {
             _ => None,
         };
 
-        Self::convert_to_hex(ctx, sum)
+        sum.map(|sum| sum.to_string())
     }
 
     /// Get the AWS checksum parts from `GetObjectAttributes` parts output.
@@ -260,9 +263,15 @@ impl S3 {
                     .parts()
                     .iter()
                     .map(|part| {
+                        // Decode the part checksum and re-encode it as a hex string.
+                        let part_sum = Self::aws_parts_from_ctx(ctx, part)
+                            .map(|part_sum| Self::decode_sum(ctx, part_sum))
+                            .transpose()?
+                            .map(|sum| ctx.digest_to_string(&sum));
+
                         Ok(PartChecksum::new(
                             part.size().map(u64::try_from).transpose()?,
-                            Self::aws_parts_from_ctx(ctx, part)?.map(|c| c.to_string()),
+                            part_sum,
                         ))
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -310,7 +319,7 @@ impl S3 {
     /// Add checksums to an existing sums file using AWS metadata.
     async fn add_checksum(&mut self, sums_file: &mut SumsFile, ctx: StandardCtx) -> Result<()> {
         // If there is no sum for this context, return early.
-        let Some(mut sum) = self.aws_sums_from_ctx(&ctx).await? else {
+        let Some(sum) = self.aws_sums_from_ctx(&ctx).await? else {
             return Ok(());
         };
 
@@ -342,15 +351,12 @@ impl S3 {
             _ => None,
         };
 
+        let sum = Self::decode_sum(&ctx, sum)?;
+
         // Create the AWS context with the available information. This can be a composite checksum
         // with a part size, or a regular context otherwise.
         let ctx = match (total_parts, checksum_type) {
             (Some(total_parts), Some(ChecksumType::Composite) | None) => {
-                // Need to add this back in as it doesn't come with additional checksums.
-                if Self::is_additional_checksum(&ctx) {
-                    sum = format!("{}-{}", sum, total_parts);
-                }
-
                 // Get the part mode from the individual part sizes. This will be used to format
                 // the output.
                 let part_mode = if let Some(ref parts) = parts {
@@ -364,12 +370,15 @@ impl S3 {
                     PartMode::PartNumber(total_parts)
                 };
 
-                Ctx::AWSEtag(AWSETagCtx::new(ctx, part_mode, file_size)?)
+                let mut ctx = AWSETagCtx::new(ctx, part_mode, file_size);
+                ctx.update_part_sizes();
+
+                Ctx::AWSEtag(ctx)
             }
             _ => Ctx::Regular(ctx),
         };
 
-        let checksum = Checksum::new(sum, parts);
+        let checksum = Checksum::new(ctx.digest_to_string(&sum), parts);
         sums_file.add_checksum(ctx, checksum);
 
         Ok(())
@@ -396,25 +405,24 @@ impl S3 {
         let attributes = self.get_object_attributes().await?;
         let file_size = attributes.object_size().map(u64::try_from).transpose()?;
         let mut sums_file = SumsFile::default().with_size(file_size);
-        sums_file.add_name(SumsFile::format_target_file(&self.key));
 
         // Add the individual checksums for each type.
-        self.add_checksum(&mut sums_file, StandardCtx::MD5(Default::default()))
+        self.add_checksum(&mut sums_file, StandardCtx::md5())
             .await?;
-        self.add_checksum(
-            &mut sums_file,
-            StandardCtx::CRC32(Default::default(), Endianness::LittleEndian),
-        )
-        .await?;
-        self.add_checksum(
-            &mut sums_file,
-            StandardCtx::CRC32C(Default::default(), Endianness::LittleEndian),
-        )
-        .await?;
-        self.add_checksum(&mut sums_file, StandardCtx::SHA1(Default::default()))
+        self.add_checksum(&mut sums_file, StandardCtx::crc32())
             .await?;
-        self.add_checksum(&mut sums_file, StandardCtx::SHA256(Default::default()))
+        self.add_checksum(&mut sums_file, StandardCtx::crc32c())
             .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::sha1())
+            .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::sha256())
+            .await?;
+
+        if sums_file.checksums.is_empty() {
+            return Err(AwsError(
+                "failed to create sums file from metadata".to_string(),
+            ));
+        }
 
         Ok(sums_file)
     }
@@ -423,18 +431,85 @@ impl S3 {
     pub fn into_inner(self) -> (String, String) {
         (self.bucket, self.key)
     }
+
+    /// Get the object and convert it into an `AsyncRead`.
+    pub async fn object_reader(&self) -> Result<impl AsyncRead> {
+        Ok(Box::new(
+            self.client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(SumsFile::format_target_file(&self.key))
+                .send()
+                .await?
+                .body
+                .into_async_read(),
+        ))
+    }
+
+    /// Get the object file size.
+    async fn size(&mut self) -> Result<Option<u64>> {
+        Ok(self
+            .get_object_attributes()
+            .await?
+            .object_size
+            .map(|size| size.try_into())
+            .transpose()?)
+    }
+
+    /// Write the sums file to the configured location using `PutObject`.
+    pub async fn put_sums(&self, sums_file: &SumsFile) -> Result<()> {
+        let key = SumsFile::format_sums_file(&self.key);
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .body(ByteStream::from(sums_file.to_json_string()?.into_bytes()))
+            .send()
+            .await?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectSums for S3 {
+    async fn sums_file(&mut self) -> Result<Option<SumsFile>> {
+        let metadata_sums = self.sums_from_metadata().await?;
+
+        match self.get_existing_sums().await? {
+            None => Ok(Some(metadata_sums)),
+            Some(existing) => Ok(Some(metadata_sums.merge(existing)?)),
+        }
+    }
+
+    async fn reader(&mut self) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+        Ok(Box::new(self.object_reader().await?))
+    }
+
+    async fn file_size(&mut self) -> Result<Option<u64>> {
+        self.size().await
+    }
+
+    async fn write_sums_file(&self, sums_file: &SumsFile) -> Result<()> {
+        self.put_sums(sums_file).await
+    }
+
+    fn location(&self) -> String {
+        format!("s3://{}/{}", self.bucket, self.key)
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::checksum::standard::test::{expected_md5_sum, expected_sha256_sum};
+    use crate::checksum::standard::test::EXPECTED_MD5_SUM;
     use crate::error::Result;
     use crate::task::generate::test::generate_for;
-    use crate::test::TEST_FILE_SIZE;
+    use crate::test::{TEST_FILE_NAME, TEST_FILE_SIZE};
     use aws_sdk_s3::types;
     use aws_sdk_s3::types::GetObjectAttributesParts;
     use aws_smithy_mocks_experimental::{mock, mock_client, Rule, RuleMode};
+
+    const EXPECTED_SHA256_SUM: &str = "Kf+9U8vkMXmrL6YtvZWMDsMLNAq1DOfHheinpLR3Hjk=";
 
     const EXPECTED_MD5_SUM_5: &str = "0798905b42c575d43e921be42e126a26-5";
     const EXPECTED_MD5_SUM_4: &str = "75652bd9b9c3652b9f43e7663b3f14b6-4";
@@ -478,9 +553,17 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for("key", vec!["md5-aws-4", "sha256-aws-4"], true, false)
-            .await?
-            .split();
+        let expected = generate_for(
+            "key",
+            vec![
+                "md5-aws-214748365b-214748365b-429496730b",
+                "sha256-aws-214748365b-214748365b-429496730b",
+            ],
+            true,
+            false,
+        )
+        .await?
+        .split();
 
         assert_all_same(sums, expected);
 
@@ -495,9 +578,14 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for("key", vec!["md5-aws-4"], true, false)
-            .await?
-            .split();
+        let expected = generate_for(
+            "key",
+            vec!["md5-aws-214748365b-214748365b-429496730b"],
+            true,
+            false,
+        )
+        .await?
+        .split();
 
         assert_all_same(sums, expected);
 
@@ -522,6 +610,9 @@ pub(crate) mod test {
     }
 
     fn assert_all_same(result: Vec<SumsFile>, expected: Vec<SumsFile>) {
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        println!("{}", serde_json::to_string_pretty(&expected).unwrap());
+
         assert!(result.into_iter().zip(expected).all(|(a, b)| a.is_same(&b)));
     }
 
@@ -533,7 +624,7 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for("key", vec!["md5-aws-5"], true, false)
+        let expected = generate_for(TEST_FILE_NAME, vec!["md5-aws-5"], true, false)
             .await?
             .split();
 
@@ -550,7 +641,7 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for("key", vec!["md5", "sha256"], true, false)
+        let expected = generate_for(TEST_FILE_NAME, vec!["md5", "sha256"], true, false)
             .await?
             .split();
 
@@ -567,7 +658,9 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for("key", vec!["md5"], true, false).await?.split();
+        let expected = generate_for(TEST_FILE_NAME, vec!["md5"], true, false)
+            .await?
+            .split();
 
         assert_all_same(sums, expected);
 
@@ -761,10 +854,10 @@ pub(crate) mod test {
             .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
             .then_output(|| {
                 GetObjectAttributesOutput::builder()
-                    .e_tag(expected_md5_sum())
+                    .e_tag(EXPECTED_MD5_SUM)
                     .checksum(
                         types::Checksum::builder()
-                            .checksum_sha256(expected_sha256_sum())
+                            .checksum_sha256(EXPECTED_SHA256_SUM)
                             .build(),
                     )
                     .object_size(TEST_FILE_SIZE as i64)
@@ -779,7 +872,7 @@ pub(crate) mod test {
             .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
             .then_output(|| {
                 GetObjectAttributesOutput::builder()
-                    .e_tag(expected_md5_sum())
+                    .e_tag(EXPECTED_MD5_SUM)
                     .object_size(TEST_FILE_SIZE as i64)
                     .build()
             });
