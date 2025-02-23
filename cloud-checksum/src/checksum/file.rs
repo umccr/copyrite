@@ -29,7 +29,7 @@ pub struct SumsFile {
     pub(crate) version: String,
     pub(crate) size: Option<u64>,
     // The name of the checksum is always the most canonical form.
-    // E.g. no -be prefix for big-endian, and the number of parts as
+    // E.g. no -be prefix for big-endian, and the part size as
     // the suffix for AWS checksums.
     #[serde_as(as = "BTreeMap<DisplayFromStr, _>")]
     #[serde(flatten)]
@@ -152,28 +152,16 @@ impl SumsFile {
 
         for (key, checksum) in &self.checksums {
             if let Some(other_checksum) = other.checksums.get(key) {
-                // Two checksums are the same if they have the same top-level checksum and identical
-                // part sizes. It is not necessary to use the part checksum values to determine if
-                // the sums are the same because the sizes alone determine the top-level checksum.
-                if checksum.checksum == other_checksum.checksum
-                    && Self::get_part_sizes(checksum) == Self::get_part_sizes(other_checksum)
-                {
+                // Two checksums are the same if they have the same top-level checksum. Since the
+                // top level checksum encodes part information for AWS sums, there is no need to
+                // compare the part checksums.
+                if checksum.checksum == other_checksum.checksum {
                     return true;
                 }
             }
         }
 
         false
-    }
-
-    /// Get only the part sizes from part checksums
-    fn get_part_sizes(checksum: &Checksum) -> Option<Vec<u64>> {
-        checksum.part_checksums.as_ref().map(|sums| {
-            sums.0
-                .iter()
-                .filter_map(|part| part.part_size)
-                .collect::<Vec<_>>()
-        })
     }
 
     /// Check if the sums file is comparable to another sums file because it contains at least
@@ -301,12 +289,14 @@ impl From<Vec<(Option<u64>, Option<String>)>> for PartChecksums {
 pub(crate) mod test {
     use super::*;
     use crate::checksum::aws_etag::test::expected_md5_1gib;
-    use crate::checksum::standard::test::expected_md5_sum;
+    use crate::checksum::standard::test::EXPECTED_MD5_SUM;
     use serde_json::{from_value, json, to_value, Value};
+
+    const EXPECTED_ETAG: &str = "1c3490f45b0cdc4299a128410def3a1d-b";
 
     #[test]
     fn serialize_output_file() -> Result<()> {
-        let expected_md5 = expected_md5_sum();
+        let expected_md5 = EXPECTED_MD5_SUM;
         let value = expected_output_file(expected_md5);
         let result = to_value(&value)?;
         let expected = expected_output_json(expected_md5);
@@ -318,7 +308,7 @@ pub(crate) mod test {
 
     #[test]
     fn deserialize_output_file() -> Result<()> {
-        let expected_md5 = expected_md5_sum();
+        let expected_md5 = EXPECTED_MD5_SUM;
         let value = expected_output_json(expected_md5);
         let result: SumsFile = from_value(value)?;
         let expected = expected_output_file(expected_md5);
@@ -330,26 +320,26 @@ pub(crate) mod test {
 
     #[test]
     fn is_same() -> Result<()> {
-        let expected_md5 = expected_md5_sum();
+        let expected_md5 = EXPECTED_MD5_SUM;
         let file_one = expected_output_file(expected_md5);
         let mut file_two = file_one.clone();
+        let mut aws: Ctx = "md5-aws-123b".parse()?;
+        aws.set_file_size(Some(123));
+
         file_two.checksums.insert(
-            "md5".parse()?,
+            aws,
             Checksum::new(
-                expected_md5_1gib().to_string(),
-                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
+                EXPECTED_ETAG.to_string(),
+                Some(vec![(Some(123), Some(expected_md5.to_string()))].into()),
             ),
         );
         assert!(file_one.is_same(&file_two));
 
         let mut file_two = file_one.clone();
-        file_two.checksums = BTreeMap::from_iter(vec![(
-            "aws-etag".parse()?,
-            Checksum::new(
-                expected_md5_1gib().to_string(),
-                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
-            ),
-        )]);
+        let mut aws: Ctx = "aws-etag-1b".parse()?;
+        aws.set_file_size(Some(1));
+        set_checksums(expected_md5, &mut file_two, aws);
+
         assert!(!file_one.is_same(&file_two));
 
         Ok(())
@@ -357,11 +347,14 @@ pub(crate) mod test {
 
     #[test]
     fn comparable() -> Result<()> {
-        let expected_md5 = expected_md5_sum();
+        let expected_md5 = EXPECTED_MD5_SUM;
         let file_one = expected_output_file(expected_md5);
         let mut file_two = file_one.clone();
+
+        let mut aws: Ctx = "md5-aws-1b".parse()?;
+        aws.set_file_size(Some(1));
         file_two.checksums.insert(
-            "aws-etag".parse()?,
+            aws,
             Checksum::new(
                 expected_md5_1gib().to_string(),
                 Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
@@ -370,13 +363,10 @@ pub(crate) mod test {
         assert!(file_one.comparable(&file_two));
 
         let mut file_two = file_one.clone();
-        file_two.checksums = BTreeMap::from_iter(vec![(
-            "md5".parse()?,
-            Checksum::new(
-                expected_md5_1gib().to_string(),
-                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
-            ),
-        )]);
+        let mut aws: Ctx = "aws-etag-1b".parse()?;
+        aws.set_file_size(Some(1));
+        set_checksums(expected_md5, &mut file_two, aws);
+
         assert!(!file_one.comparable(&file_two));
 
         Ok(())
@@ -384,24 +374,23 @@ pub(crate) mod test {
 
     #[test]
     fn merge() -> Result<()> {
-        let expected_md5 = expected_md5_sum();
+        let expected_md5 = EXPECTED_MD5_SUM;
         let mut file_one = expected_output_file(expected_md5);
+
+        let mut aws_one: Ctx = "aws-etag-123b".parse()?;
+        aws_one.set_file_size(Some(123));
         file_one.checksums.insert(
-            "aws-etag".parse()?,
+            aws_one.clone(),
             Checksum::new(
                 expected_md5.to_string(),
-                Some(vec![(Some(2), Some(expected_md5.to_string()))].into()),
+                Some(vec![(Some(123), Some(expected_md5.to_string()))].into()),
             ),
         );
 
         let mut file_two = expected_output_file(expected_md5);
-        file_two.checksums.insert(
-            "md5".parse()?,
-            Checksum::new(
-                expected_md5.to_string(),
-                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
-            ),
-        );
+        let mut aws_two: Ctx = "md5-aws-123b".parse()?;
+        aws_two.set_file_size(Some(123));
+        set_checksums(expected_md5, &mut file_two, aws_two.clone());
 
         let result = file_one.clone().merge(file_two)?;
         assert_eq!(result.names, file_one.names);
@@ -410,17 +399,17 @@ pub(crate) mod test {
             result.checksums,
             BTreeMap::from_iter(vec![
                 (
-                    "md5".parse()?,
+                    aws_two,
                     Checksum::new(
                         expected_md5.to_string(),
-                        Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
+                        Some(vec![(Some(123), Some(expected_md5.to_string()))].into()),
                     ),
                 ),
                 (
-                    "aws-etag".parse()?,
+                    aws_one,
                     Checksum::new(
                         expected_md5.to_string(),
-                        Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
+                        Some(vec![(Some(123), Some(expected_md5.to_string()))].into()),
                     )
                 ),
             ])
@@ -429,11 +418,23 @@ pub(crate) mod test {
         Ok(())
     }
 
-    fn expected_output_file(expected_md5: &str) -> SumsFile {
-        let checksums = vec![(
-            "aws-etag".parse().unwrap(),
+    fn set_checksums(expected_md5: &str, file_two: &mut SumsFile, aws: Ctx) {
+        file_two.checksums = BTreeMap::from_iter(vec![(
+            aws,
             Checksum::new(
-                expected_md5.to_string(),
+                expected_md5_1gib().to_string(),
+                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
+            ),
+        )]);
+    }
+
+    fn expected_output_file(expected_md5: &str) -> SumsFile {
+        let mut aws: Ctx = "md5-aws-123b".parse().unwrap();
+        aws.set_file_size(Some(123));
+        let checksums = vec![(
+            aws,
+            Checksum::new(
+                EXPECTED_ETAG.to_string(),
                 Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
             ),
         )];
@@ -444,8 +445,8 @@ pub(crate) mod test {
         json!({
             "version": OUTPUT_FILE_VERSION,
             "size": 123,
-            "md5-aws-1": {
-                "checksum": expected_md5,
+            "md5-aws-123b": {
+                "checksum": EXPECTED_ETAG,
                 "part-checksums": [{
                     "part-size": 1,
                     "part-checksum": expected_md5

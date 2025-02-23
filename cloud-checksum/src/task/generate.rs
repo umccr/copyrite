@@ -305,8 +305,8 @@ pub(crate) mod test {
     use super::*;
     use crate::checksum::aws_etag::test::expected_md5_1gib;
     use crate::checksum::standard::test::{
-        expected_crc32_be, expected_crc32c_be, expected_md5_sum, expected_sha1_sum,
-        expected_sha256_sum,
+        EXPECTED_CRC32C_BE_SUM, EXPECTED_CRC32_BE_SUM, EXPECTED_MD5_SUM, EXPECTED_SHA1_SUM,
+        EXPECTED_SHA256_SUM,
     };
     use crate::checksum::standard::StandardCtx;
     use crate::reader::channel::test::channel_reader;
@@ -355,7 +355,7 @@ pub(crate) mod test {
             true,
             false,
             vec!["sha1", "sha256", "md5", "aws-etag-1gib", "crc32", "crc32c"],
-            expected_md5_sum(),
+            EXPECTED_MD5_SUM,
         )
         .await
     }
@@ -370,7 +370,7 @@ pub(crate) mod test {
             false,
             true,
             vec!["sha1", "sha256", "aws-etag-1gib", "crc32", "crc32c"],
-            expected_md5_sum(),
+            EXPECTED_MD5_SUM,
         )
         .await
     }
@@ -440,11 +440,11 @@ pub(crate) mod test {
         );
         assert_eq!(
             file.checksums[&"sha1".parse()?],
-            Checksum::new(expected_sha1_sum().to_string(), None)
+            Checksum::new(EXPECTED_SHA1_SUM.to_string(), None)
         );
         assert_eq!(
             file.checksums[&"sha256".parse()?],
-            Checksum::new(expected_sha256_sum().to_string(), None)
+            Checksum::new(EXPECTED_SHA256_SUM.to_string(), None)
         );
         assert_eq!(
             file.checksums[&"md5-aws-1073741824b".parse()?],
@@ -461,11 +461,11 @@ pub(crate) mod test {
         );
         assert_eq!(
             file.checksums[&"crc32".parse()?],
-            Checksum::new(expected_crc32_be().to_string(), None)
+            Checksum::new(EXPECTED_CRC32_BE_SUM.to_string(), None)
         );
         assert_eq!(
             file.checksums[&"crc32c".parse()?],
-            Checksum::new(expected_crc32c_be().to_string(), None)
+            Checksum::new(EXPECTED_CRC32C_BE_SUM.to_string(), None)
         );
 
         Ok(())

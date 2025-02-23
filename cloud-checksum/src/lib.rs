@@ -69,19 +69,19 @@ pub enum Subcommands {
         input: Vec<String>,
         /// Checksums to use. Can be specified multiple times or comma-separated. Defaults to
         /// `md5` if unspecified.
-        /// 
+        ///
         /// Use an  `aws-<part_size>` suffix to create AWS ETag-style checksums, e.g. `md5-aws-8mib`.
         /// `<part_size>` should contain a size unit, e.g. `mib` or `b`. When the unit is omitted,
         /// this is interpreted as a `<part-number>` where the input file is split evenly into the
         /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits the
         /// file into 10 parts. `<part-number>` is not supported when the file size is not known, such
         /// as when taking input from stdin.
-        /// 
+        ///
         /// It is possible to specify different part sizes by appending additional parts separated
         /// by a `-`. In this case, if the file is bigger than the number of parts, the last part
         /// will be repeated until the end. If it is smaller, then some parts may be ignored. For
         /// example, `md5-aws-8mib-16mib` will create one 8 MiB part and the rest will be 16 MiB
-        /// parts. 
+        /// parts.
         #[arg(value_delimiter = ',', short, long)]
         checksum: Vec<Ctx>,
         #[clap(skip)]
