@@ -18,6 +18,7 @@ pub struct AWSETagCtx {
     part_size_index: usize,
     current_part_size: u64,
     current_bytes: u64,
+    total_bytes: u64,
     remainder: Option<Arc<[u8]>>,
     part_checksums: Vec<(u64, Vec<u8>)>,
     n_checksums: u64,
@@ -27,7 +28,7 @@ pub struct AWSETagCtx {
 
 impl Ord for AWSETagCtx {
     fn cmp(&self, other: &Self) -> Ordering {
-        (&self.part_mode, &self.ctx).cmp(&(&other.part_mode, &other.ctx))
+        self.to_string().cmp(&other.to_string())
     }
 }
 
@@ -41,14 +42,13 @@ impl Eq for AWSETagCtx {}
 
 impl PartialEq for AWSETagCtx {
     fn eq(&self, other: &Self) -> bool {
-        self.part_mode == other.part_mode && self.ctx == other.ctx
+        self.to_string() == other.to_string()
     }
 }
 
 impl Hash for AWSETagCtx {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.part_mode.hash(state);
-        self.current_bytes.hash(state);
+        self.to_string().hash(state);
     }
 }
 
@@ -62,27 +62,115 @@ pub enum PartMode {
 
 impl AWSETagCtx {
     /// Create a new checksummer.
-    pub fn new(ctx: StandardCtx, part_mode: PartMode, file_size: Option<u64>) -> Result<Self> {
-        let mut new = Self {
+    pub fn new(ctx: StandardCtx, part_mode: PartMode, file_size: Option<u64>) -> Self {
+        Self {
             part_mode,
             part_size_index: 0,
             current_part_size: 0,
             current_bytes: 0,
+            total_bytes: 0,
             remainder: None,
             part_checksums: vec![],
             n_checksums: 0,
             ctx,
             file_size,
+        }
+    }
+
+    /// Update the part sizes so that they represent the correct part sizes for the file size.
+    /// This takes two steps, first it iterates forward to determine the correct number of part
+    /// sizes, and then it removes duplicate part sizes from the back as they are assumed to be
+    /// repeated.
+    pub fn update_part_sizes(&mut self) {
+        let PartMode::PartSizes(part_sizes) = &mut self.part_mode else {
+            return;
         };
 
-        new.current_part_size = new.next_part_size()?;
+        Self::iterate_part_sizes(self.file_size.unwrap_or(self.total_bytes), part_sizes);
+        Self::remove_duplicates(part_sizes);
+    }
 
-        Ok(new)
+    /// Iterate over the part sizes and remove duplicates from the end.
+    fn remove_duplicates(part_sizes: &mut Vec<u64>) {
+        // Iterate backwards to remove duplicate part sizes from the end only. This only
+        // applies if there are at least two elements and the last element is smaller than the
+        // second last element.
+        let (Some(last), Some(second_last)) = (
+            part_sizes.iter().nth_back(0).cloned(),
+            part_sizes.iter().nth_back(1).cloned(),
+        ) else {
+            return;
+        };
+        if last > second_last {
+            return;
+        }
+
+        // Ignore the last element as it can be smaller than the previous sizes.
+        part_sizes.pop();
+
+        // Only remove the second last element duplicates onwards.
+        part_sizes.reverse();
+        let mut done = false;
+        part_sizes.retain(|part_size| {
+            // Only remove one set of duplicates from the back, and then stop.
+            if *part_size != second_last {
+                done = true;
+            }
+
+            done || *part_size != second_last
+        });
+        part_sizes.reverse();
+
+        // Add the removed elements back.
+        part_sizes.push(second_last);
+    }
+
+    /// Iterate over the part sizes and correct the parts based on the file size.
+    fn iterate_part_sizes(mut file_size: u64, part_sizes: &mut Vec<u64>) {
+        // Iterate the part sizes until the end of the file is reached to find the
+        // true ending part size.
+        let mut remove_from = None;
+        for (i, part_size) in part_sizes.iter_mut().enumerate() {
+            // If the counter is less than the current part size, stop here, and set
+            // the index to remove bytes from.
+            if file_size <= *part_size {
+                // The ending part size needs to be updated with the remaining bytes.
+                *part_size = file_size;
+                remove_from = Some(i + 1);
+                file_size = file_size.saturating_sub(*part_size);
+                break;
+            }
+            file_size = file_size.saturating_sub(*part_size);
+        }
+
+        // Remove the elements after iterating the counter.
+        if let Some(remove_from) = remove_from {
+            if let Some((keep, _)) = part_sizes.split_at_checked(remove_from) {
+                *part_sizes = keep.to_vec();
+            }
+        }
+
+        // Add back in whatever is left in the counter to ensure that the following code works
+        // properly.
+        let last = *part_sizes.last().unwrap_or(&0);
+        while file_size > 0 {
+            if file_size < last {
+                part_sizes.push(file_size);
+            } else {
+                part_sizes.push(last);
+            }
+            file_size = file_size.saturating_sub(last);
+        }
     }
 
     /// Update using data.
     pub fn update(&mut self, data: Arc<[u8]>) -> Result<()> {
         let len = u64::try_from(data.len())?;
+
+        if self.current_part_size == 0 {
+            self.current_part_size = self.next_part_size()?;
+        }
+
         if self.current_bytes + len > self.current_part_size {
             // If the current byte position is greater than the part size, then split into a new
             // part checksum.
@@ -108,6 +196,8 @@ impl AWSETagCtx {
             self.update_with_remainder()?;
 
             self.current_bytes += len;
+            self.total_bytes += len;
+
             self.ctx.update(data)?;
         }
 
@@ -132,9 +222,13 @@ impl AWSETagCtx {
             self.part_checksums
                 .push((self.current_bytes, self.ctx.finalize()?));
 
+            self.total_bytes += self.current_bytes;
+
             // Reset the context for merged chunks.
             self.ctx = self.ctx.reset();
         }
+
+        self.update_part_sizes();
 
         // Then merge the part checksums and compute a single checksum.
         self.n_checksums = u64::try_from(self.part_checksums.len())?;
@@ -193,13 +287,17 @@ impl AWSETagCtx {
 
     /// Get the digest output.
     pub fn digest_to_string(&self, digest: &[u8]) -> String {
-        format!("{}-{}", self.ctx.digest_to_string(digest), self.n_checksums)
+        format!(
+            "{}-{}",
+            self.ctx.digest_to_string(digest),
+            self.format_parts()
+        )
     }
 
     /// Get the next part size.
     pub fn next_part_size(&mut self) -> Result<u64> {
-        match (&self.part_mode, &self.file_size) {
-            (PartMode::PartSizes(part_sizes), _) => {
+        match &self.part_mode {
+            PartMode::PartSizes(part_sizes) => {
                 // Get the part size based on the index.
                 let part_size = part_sizes
                     .get(self.part_size_index)
@@ -212,13 +310,47 @@ impl AWSETagCtx {
 
                 Ok(*part_size)
             }
-            (PartMode::PartNumber(part_number), Some(file_size)) => {
-                Ok(file_size.div_ceil(*part_number))
+            PartMode::PartNumber(part_number) => {
+                let file_size = self.file_size.ok_or_else(|| {
+                    ParseError("cannot use part number syntax without file size".to_string())
+                })?;
+                Ok(Self::part_number_to_size(*part_number, file_size))
             }
-            _ => Err(ParseError(
-                "cannot use part number syntax without file size".to_string(),
-            )),
         }
+    }
+
+    /// Format the part size. The canonical form always a has a bytes ending to distinguish it
+    /// from part numbers.
+    fn format_part_size<T: Display>(part_size: T) -> String {
+        format!("{}b", part_size)
+    }
+
+    /// Format the parts into a string based on the part mode. This will panic if the file size
+    /// was not set and `finalize` was not called.
+    pub fn format_parts(&self) -> String {
+        match self.part_mode {
+            PartMode::PartNumber(part_number) => {
+                if self.file_size.is_none() && self.n_checksums == 0 {
+                    panic!("cannot format part number without the file size and without finalizing the checksum");
+                }
+
+                // Get the file size if it exists or default to the total bytes.
+                let file_size = self.file_size.unwrap_or(self.total_bytes);
+                let part_size = Self::part_number_to_size(part_number, file_size).to_string();
+
+                Self::format_part_size(part_size)
+            }
+            PartMode::PartSizes(ref part_sizes) => part_sizes
+                .iter()
+                .map(Self::format_part_size)
+                .collect::<Vec<_>>()
+                .join("-"),
+        }
+    }
+
+    /// Convert a part number to a part size using the file size.
+    pub fn part_number_to_size(part_number: u64, file_size: u64) -> u64 {
+        file_size.div_ceil(part_number)
     }
 
     /// Set the file size.
@@ -242,44 +374,114 @@ impl FromStr for AWSETagCtx {
         let (s, part_mode) = Self::parse_part_size(s)?;
         let ctx = StandardCtx::from_str(&s)?;
 
-        AWSETagCtx::new(ctx, part_mode, None)
+        Ok(AWSETagCtx::new(ctx, part_mode, None))
     }
 }
 
 impl Display for AWSETagCtx {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let parts = match self.part_mode {
-            PartMode::PartNumber(part_number) => part_number.to_string(),
-            PartMode::PartSizes(ref part_sizes) => part_sizes
-                .iter()
-                .map(|part| part.to_string())
-                .collect::<Vec<_>>()
-                .join("-"),
-        };
-
-        write!(f, "{}-aws-{}", self.ctx, parts)
+        write!(f, "{}-aws-{}", self.ctx, self.format_parts())
     }
 }
 
 #[cfg(test)]
 pub(crate) mod test {
+    use crate::checksum::aws_etag::{AWSETagCtx, PartMode};
+    use crate::checksum::standard::StandardCtx;
     use crate::checksum::test::test_checksum;
     use anyhow::Result;
 
     pub(crate) fn expected_md5_1gib() -> &'static str {
-        "6c434b38867bbd608ba2f06e92ed4e43-1"
+        "6c434b38867bbd608ba2f06e92ed4e43-1073741824b"
     }
 
     pub(crate) fn expected_md5_100mib() -> &'static str {
-        "e5727bb1cb678220f6782ff6cb927569-11"
+        "e5727bb1cb678220f6782ff6cb927569-104857600b"
     }
 
     pub(crate) fn expected_md5_10() -> &'static str {
-        "9a9666a5c313c53fbc3a3ea1d43cc981-10"
+        "9a9666a5c313c53fbc3a3ea1d43cc981-107374183b"
     }
 
     pub(crate) fn expected_sha256_100mib() -> &'static str {
-        "a9ed6c4b6aadf887f90a3d483b5c5b79bc08075af2a1718e3e15c63b9904ebf7-11"
+        "a9ed6c4b6aadf887f90a3d483b5c5b79bc08075af2a1718e3e15c63b9904ebf7-104857600b"
+    }
+
+    #[test]
+    fn test_update_part_sizes() -> Result<()> {
+        assert_update_part_sizes(vec![214748365], 1073741824, vec![214748365]);
+        assert_update_part_sizes(
+            vec![214748365, 214748365, 214748365, 214748365, 214748364],
+            1073741824,
+            vec![214748365],
+        );
+        assert_update_part_sizes(
+            vec![214748365, 214748365, 214748365, 214748365, 214748365],
+            1073741824,
+            vec![214748365],
+        );
+        assert_update_part_sizes(
+            vec![214748365, 214748365, 214748365, 214748365, 214748366],
+            1073741824,
+            vec![214748365],
+        );
+        assert_update_part_sizes(
+            vec![214748365, 214748365, 214748365, 214748365, 214748367],
+            1073741826,
+            vec![214748365, 214748365, 214748365, 214748365, 214748366],
+        );
+
+        assert_update_part_sizes(
+            vec![214748365, 214748365, 429496730, 214748364],
+            1073741824,
+            vec![214748365, 214748365, 429496730],
+        );
+        assert_update_part_sizes(
+            vec![214748365, 214748365, 429496730, 214748366],
+            1073741824,
+            vec![214748365, 214748365, 429496730],
+        );
+        assert_update_part_sizes(
+            vec![214748365, 214748365, 429496730, 214748365],
+            1073741824,
+            vec![214748365, 214748365, 429496730],
+        );
+
+        assert_update_part_sizes(
+            vec![214748365, 214748365, 429496730],
+            644245094,
+            vec![214748365],
+        );
+
+        assert_update_part_sizes(
+            vec![214748365, 214748365, 429496730, 214748364],
+            1073741825,
+            vec![214748365, 214748365, 429496730, 214748364],
+        );
+
+        assert_update_part_sizes(
+            vec![214748365, 214748365, 429496730, 214748365, 429496730],
+            1073741826,
+            vec![214748365, 214748365, 429496730, 214748365],
+        );
+
+        assert_update_part_sizes(
+            vec![214748365, 214748365, 429496730, 214748365, 600000000],
+            1288590200,
+            vec![214748365, 214748365, 429496730, 214748365, 214848375],
+        );
+
+        Ok(())
+    }
+
+    fn assert_update_part_sizes(part_sizes: Vec<u64>, file_size: u64, expected: Vec<u64>) {
+        let mut ctx = AWSETagCtx::new(
+            StandardCtx::md5(),
+            PartMode::PartSizes(part_sizes),
+            Some(file_size),
+        );
+        ctx.update_part_sizes();
+        assert_eq!(ctx.part_mode, PartMode::PartSizes(expected));
     }
 
     #[tokio::test]

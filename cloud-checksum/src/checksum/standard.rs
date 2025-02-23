@@ -70,11 +70,11 @@ impl FromStr for StandardCtx {
 
         let checksum = Checksum::from_str(s)?;
         let ctx = match checksum {
-            Checksum::MD5 => Self::MD5(Some(md5::Md5::new())),
-            Checksum::SHA1 => Self::SHA1(Some(sha1::Sha1::new())),
-            Checksum::SHA256 => Self::SHA256(Some(sha2::Sha256::new())),
-            Checksum::CRC32 => Self::CRC32(Some(crc32fast::Hasher::new()), Endianness::BigEndian),
-            Checksum::CRC32C => Self::CRC32C(0, Endianness::BigEndian),
+            Checksum::MD5 => Self::md5(),
+            Checksum::SHA1 => Self::sha1(),
+            Checksum::SHA256 => Self::sha256(),
+            Checksum::CRC32 => Self::crc32(),
+            Checksum::CRC32C => Self::crc32c(),
             _ => return Err(ParseError("unsupported checksum algorithm".to_string())),
         };
         Ok(ctx)
@@ -115,24 +115,45 @@ impl Display for StandardCtx {
 }
 
 impl StandardCtx {
+    /// Create the MD5 variant.
+    pub fn md5() -> Self {
+        Self::MD5(Some(md5::Md5::new()))
+    }
+
+    /// Create the SHA1 variant.
+    pub fn sha1() -> Self {
+        Self::SHA1(Some(sha1::Sha1::new()))
+    }
+
+    /// Create the SHA256 variant.
+    pub fn sha256() -> Self {
+        Self::SHA256(Some(sha2::Sha256::new()))
+    }
+
+    /// Create the CRC32 variant.
+    pub fn crc32() -> Self {
+        Self::CRC32(Some(crc32fast::Hasher::new()), Endianness::BigEndian)
+    }
+
+    /// Create the CRC32C variant.
+    pub fn crc32c() -> Self {
+        Self::CRC32C(0, Endianness::BigEndian)
+    }
+
     /// Parse into a `ChecksumCtx` for values that use endianness. Uses an -le suffix for
     /// little-endian and -be for big-endian.
     pub fn parse_endianness(s: &str) -> Result<Option<Self>> {
         if let Some(s) = s.strip_suffix("-le") {
             let ctx = match Checksum::from_str(s)? {
-                Checksum::CRC32 => {
-                    StandardCtx::CRC32(Some(crc32fast::Hasher::new()), Endianness::LittleEndian)
-                }
-                Checksum::CRC32C => StandardCtx::CRC32C(0, Endianness::LittleEndian),
+                Checksum::CRC32 => Self::crc32().with_endianness(Endianness::LittleEndian),
+                Checksum::CRC32C => Self::crc32c().with_endianness(Endianness::LittleEndian),
                 _ => return Err(ParseError("invalid suffix -le for checksum".to_string())),
             };
             Ok(Some(ctx))
         } else if let Some(s) = s.strip_suffix("-be") {
             let ctx = match Checksum::from_str(s)? {
-                Checksum::CRC32 => {
-                    StandardCtx::CRC32(Some(crc32fast::Hasher::new()), Endianness::BigEndian)
-                }
-                Checksum::CRC32C => StandardCtx::CRC32C(0, Endianness::BigEndian),
+                Checksum::CRC32 => Self::crc32(),
+                Checksum::CRC32C => Self::crc32c(),
                 _ => return Err(ParseError("invalid suffix -be for checksum".to_string())),
             };
             Ok(Some(ctx))
@@ -191,13 +212,11 @@ impl StandardCtx {
     /// Reset the checksum state.
     pub fn reset(&self) -> Self {
         match self {
-            StandardCtx::MD5(_) => StandardCtx::MD5(Some(md5::Md5::new())),
-            StandardCtx::SHA1(_) => StandardCtx::SHA1(Some(sha1::Sha1::new())),
-            StandardCtx::SHA256(_) => StandardCtx::SHA256(Some(sha2::Sha256::new())),
-            StandardCtx::CRC32(_, endianness) => {
-                StandardCtx::CRC32(Some(crc32fast::Hasher::new()), *endianness)
-            }
-            StandardCtx::CRC32C(_, endianness) => StandardCtx::CRC32C(0, *endianness),
+            StandardCtx::MD5(_) => Self::md5(),
+            StandardCtx::SHA1(_) => Self::sha1(),
+            StandardCtx::SHA256(_) => Self::sha256(),
+            StandardCtx::CRC32(_, endianness) => Self::crc32().with_endianness(*endianness),
+            StandardCtx::CRC32C(_, endianness) => Self::crc32c().with_endianness(*endianness),
             StandardCtx::QuickXor => todo!(),
         }
     }
@@ -235,66 +254,47 @@ pub(crate) mod test {
     use crate::checksum::test::test_checksum;
     use anyhow::Result;
 
+    pub(crate) const EXPECTED_MD5_SUM: &str = "d93e71879054f205ede90d35c8081ca5";
+    pub(crate) const EXPECTED_SHA1_SUM: &str = "3eafdb6ad3a27167e0db70fccc40d0614307dabf";
+    pub(crate) const EXPECTED_SHA256_SUM: &str =
+        "29ffbd53cbe43179ab2fa62dbd958c0ec30b340ab50ce7c785e8a7a4b4771e39";
+    pub(crate) const EXPECTED_CRC32_BE_SUM: &str = "3320f39e";
+    pub(crate) const EXPECTED_CRC32_LE_SUM: &str = "9ef32033";
+    pub(crate) const EXPECTED_CRC32C_BE_SUM: &str = "4920106a";
+    pub(crate) const EXPECTED_CRC32C_LE_SUM: &str = "6a102049";
+
     #[tokio::test]
     async fn test_md5() -> Result<()> {
-        test_checksum("md5", expected_md5_sum()).await
+        test_checksum("md5", EXPECTED_MD5_SUM).await
     }
 
     #[tokio::test]
     async fn test_sha1() -> Result<()> {
-        test_checksum("sha1", expected_sha1_sum()).await
+        test_checksum("sha1", EXPECTED_SHA1_SUM).await
     }
 
     #[tokio::test]
     async fn test_sha256() -> Result<()> {
-        test_checksum("sha256", expected_sha256_sum()).await
+        test_checksum("sha256", EXPECTED_SHA256_SUM).await
     }
 
     #[tokio::test]
     async fn test_crc32_be() -> Result<()> {
-        test_checksum("crc32", expected_crc32_be()).await
+        test_checksum("crc32", EXPECTED_CRC32_BE_SUM).await
     }
 
     #[tokio::test]
     async fn test_crc32_le() -> Result<()> {
-        test_checksum("crc32-le", expected_crc32_le()).await
+        test_checksum("crc32-le", EXPECTED_CRC32_LE_SUM).await
     }
 
     #[tokio::test]
     async fn test_crc32c_be() -> Result<()> {
-        test_checksum("crc32c", expected_crc32c_be()).await
+        test_checksum("crc32c", EXPECTED_CRC32C_BE_SUM).await
     }
 
     #[tokio::test]
     async fn test_crc32c_le() -> Result<()> {
-        test_checksum("crc32c-le", expected_crc32c_le()).await
-    }
-
-    pub(crate) fn expected_md5_sum() -> &'static str {
-        "d93e71879054f205ede90d35c8081ca5"
-    }
-
-    pub(crate) fn expected_sha1_sum() -> &'static str {
-        "3eafdb6ad3a27167e0db70fccc40d0614307dabf"
-    }
-
-    pub(crate) fn expected_sha256_sum() -> &'static str {
-        "29ffbd53cbe43179ab2fa62dbd958c0ec30b340ab50ce7c785e8a7a4b4771e39"
-    }
-
-    pub(crate) fn expected_crc32_be() -> &'static str {
-        "3320f39e"
-    }
-
-    pub(crate) fn expected_crc32_le() -> &'static str {
-        "9ef32033"
-    }
-
-    pub(crate) fn expected_crc32c_be() -> &'static str {
-        "4920106a"
-    }
-
-    pub(crate) fn expected_crc32c_le() -> &'static str {
-        "6a102049"
+        test_checksum("crc32c-le", EXPECTED_CRC32C_LE_SUM).await
     }
 }

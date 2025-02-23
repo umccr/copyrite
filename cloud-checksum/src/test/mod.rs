@@ -22,10 +22,10 @@ pub const BENCH_FILE_SIZE: u64 = 10485760;
 /// The default benchmark file name.
 pub const BENCH_FILE_NAME: &str = "bench_file";
 
-/// The default test_for_filemanager file size. 1 GB.
+/// The default test file size. 1 GB.
 pub const TEST_FILE_SIZE: u64 = 1073741824;
 
-/// The default test_for_filemanager file name.
+/// The default test file name.
 pub const TEST_FILE_NAME: &str = "test_file";
 
 /// The default directory name.
@@ -36,7 +36,7 @@ pub const DIRECTORY: &str = "data";
 static GENERATED_FILES: LazyLock<Mutex<HashMap<String, PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashMap::default()));
 
-/// Generate large test_for_filemanager files in an ignored directory.
+/// Generate large test files in an ignored directory.
 pub struct TestFileBuilder {
     directory: PathBuf,
     rng: StdRng,

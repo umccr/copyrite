@@ -1,10 +1,10 @@
 use std::{io, result};
 use thiserror::Error;
 
-/// The result type for the test_for_filemanager module.
+/// The result type for the test module.
 pub type Result<T> = result::Result<T, Error>;
 
-/// Error types for the test_for_filemanager module.
+/// Error types for the test module.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("error generating file: {0}")]
