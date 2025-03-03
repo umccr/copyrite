@@ -18,6 +18,7 @@ use aws_sdk_s3::Client;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use std::collections::HashMap;
+use tokio::io::{AsyncBufRead, AsyncRead};
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
@@ -428,6 +429,19 @@ impl S3 {
     /// Get the inner values not including the S3 client.
     pub fn into_inner(self) -> (String, String) {
         (self.bucket, self.key)
+    }
+
+    /// Get the object and convert it into an `AsyncRead`.
+    pub async fn object_reader(self) -> Result<impl AsyncRead> {
+        Ok(self
+            .client
+            .get_object()
+            .bucket(self.bucket)
+            .key(SumsFile::format_target_file(&self.key))
+            .send()
+            .await?
+            .body
+            .into_async_read())
     }
 }
 
