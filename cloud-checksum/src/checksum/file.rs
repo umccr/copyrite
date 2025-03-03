@@ -27,6 +27,7 @@ pub struct SumsFile {
     #[serde(skip)]
     pub(crate) names: BTreeSet<String>,
     pub(crate) version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) size: Option<u64>,
     // The name of the checksum is always the most canonical form.
     // E.g. no -be prefix for big-endian, and the part size as
@@ -221,6 +222,7 @@ impl TryFrom<&[u8]> for SumsFile {
 #[serde(rename_all = "kebab-case")]
 pub struct Checksum {
     pub(crate) checksum: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) part_checksums: Option<PartChecksums>,
 }
 
