@@ -6,8 +6,6 @@ use crate::error::Error::SumsFileError;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string};
-use serde_with::serde_as;
-use serde_with::DisplayFromStr;
 use std::collections::{BTreeMap, BTreeSet};
 use tokio::fs;
 

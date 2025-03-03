@@ -53,13 +53,14 @@ where
     /// Send data to the channel until the end of the reader is reached. Returns the size of the file.
     pub async fn send_to_end(&mut self) -> Result<u64> {
         let txs = self.txs.drain(..);
+
         let mut size = 0;
         loop {
             // Read data into a buffer.
             let mut buf = vec![0; 1000];
             let n = self.inner.read(&mut buf).await?;
 
-            // Send a stop message if there is no more data.
+            // Stop if there is no more data.
             if n == 0 {
                 break;
             }
