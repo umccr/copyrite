@@ -18,7 +18,6 @@ pub const OUTPUT_FILE_VERSION: &str = "1";
 pub const SUMS_FILE_ENDING: &str = ".sums";
 
 /// A file containing multiple checksums.
-#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub struct SumsFile {
@@ -32,7 +31,6 @@ pub struct SumsFile {
     // The name of the checksum is always the most canonical form.
     // E.g. no -be prefix for big-endian, and the part size as
     // the suffix for AWS checksums.
-    #[serde_as(as = "BTreeMap<DisplayFromStr, _>")]
     #[serde(flatten)]
     pub(crate) checksums: BTreeMap<Ctx, Checksum>,
 }
@@ -403,15 +401,15 @@ pub(crate) mod test {
                 (
                     aws_two,
                     Checksum::new(
-                        expected_md5.to_string(),
-                        Some(vec![(Some(123), Some(expected_md5.to_string()))].into()),
+                        expected_md5_1gib().to_string(),
+                        Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
                     ),
                 ),
                 (
                     aws_one,
                     Checksum::new(
-                        expected_md5.to_string(),
-                        Some(vec![(Some(123), Some(expected_md5.to_string()))].into()),
+                        expected_md5_1gib().to_string(),
+                        Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
                     )
                 ),
             ])
