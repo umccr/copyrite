@@ -479,11 +479,12 @@ impl S3 {
 #[async_trait::async_trait]
 impl ObjectSums for S3 {
     async fn sums_file(&mut self) -> Result<Option<SumsFile>> {
-        self.get_existing_sums().await
-    }
-
-    async fn metadata_sums_file(&mut self) -> Result<SumsFile> {
-        self.sums_from_metadata().await
+        let metadata_sums = self.sums_from_metadata().await?;
+        Ok(self
+            .get_existing_sums()
+            .await?
+            .map(|sums| metadata_sums.merge(sums))
+            .transpose()?)
     }
 
     async fn reader(&mut self) -> Result<Box<dyn AsyncRead + Unpin + Send>> {

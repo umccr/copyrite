@@ -3,9 +3,8 @@
 
 use crate::checksum::file::{State, SumsFile};
 use crate::cloud::ObjectSums;
-use crate::error::Error::{IOError, ParseError};
+use crate::error::Error::ParseError;
 use crate::error::Result;
-use std::io;
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -93,12 +92,6 @@ impl File {
 impl ObjectSums for File {
     async fn sums_file(&mut self) -> Result<Option<SumsFile>> {
         self.get_existing_sums().await
-    }
-
-    async fn metadata_sums_file(&mut self) -> Result<SumsFile> {
-        Err(IOError(io::Error::other(
-            "cannot get sums file from metadata for file objects",
-        )))
     }
 
     async fn reader(&mut self) -> Result<Box<dyn AsyncRead + Unpin + Send>> {

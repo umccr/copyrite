@@ -16,17 +16,13 @@ pub trait ObjectSums {
     /// Get an existing sums file for this object.
     async fn sums_file(&mut self) -> Result<Option<SumsFile>>;
 
-    /// Get a sums file from object metadata. This should not attempt to read the underlying
-    /// object.
-    async fn metadata_sums_file(&mut self) -> Result<SumsFile>;
-
     /// Get a reader to the sums files.
     async fn reader(&mut self) -> Result<Box<dyn AsyncRead + Unpin + Send>>;
 
     /// Get the file size of the target file.
     async fn file_size(&mut self) -> Result<u64>;
 
-    /// Write data to the configured location
+    /// Write data to the configured location.
     async fn write_data(&self, data: String) -> Result<()>;
 
     /// Clone this object.
