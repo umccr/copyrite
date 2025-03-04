@@ -15,7 +15,7 @@ rand = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "test-util", "io-util", "io-std", "fs"] }
 futures-util = "0.3"
 async-stream = "0.3"
-trait-variant = "0.1"
+async-trait = "0.1"
 
 # Checksums
 md-5 = "0.10"

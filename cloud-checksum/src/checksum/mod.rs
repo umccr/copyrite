@@ -136,19 +136,17 @@ pub(crate) mod test {
     use super::*;
     use crate::reader::channel::test::channel_reader;
     use crate::reader::SharedReader;
-    use crate::task::generate::file_size;
-    use crate::test::TestFileBuilder;
+    use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
     use anyhow::Result;
     use tokio::fs::File;
     use tokio::join;
 
     pub(crate) async fn test_checksum(checksum: &str, expected: &str) -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
-        let file_size = file_size(&test_file).await;
         let mut reader = channel_reader(File::open(test_file).await?).await;
 
         let mut checksum = Ctx::from_str(checksum)?;
-        checksum.set_file_size(file_size);
+        checksum.set_file_size(Some(TEST_FILE_SIZE));
 
         let stream = reader.as_stream();
         let task = tokio::spawn(async move { reader.read_task().await });

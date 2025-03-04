@@ -2,11 +2,12 @@
 //!
 
 use crate::checksum::aws_etag::{AWSETagCtx, PartMode};
-use crate::checksum::file::SumsFile;
 use crate::checksum::file::{Checksum, PartChecksum, PartChecksums};
+use crate::checksum::file::{State, SumsFile};
 use crate::checksum::standard::StandardCtx;
 use crate::checksum::Ctx;
-use crate::error::Error::ParseError;
+use crate::cloud::ObjectSums;
+use crate::error::Error::{AwsError, ParseError};
 use crate::error::{Error, Result};
 use crate::Endianness;
 use aws_config::{load_defaults, BehaviorVersion};
@@ -15,10 +16,11 @@ use aws_sdk_s3::operation::get_object_attributes::GetObjectAttributesOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::{ChecksumMode, ChecksumType, ObjectAttributes, ObjectPart};
 use aws_sdk_s3::Client;
+use aws_smithy_types::byte_stream::ByteStream;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use std::collections::HashMap;
-use tokio::io::{AsyncBufRead, AsyncRead};
+use tokio::io::AsyncRead;
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
@@ -80,6 +82,11 @@ impl S3Builder {
         ))
     }
 
+    /// Is this an S3 url.
+    pub fn is_s3(s: &str) -> bool {
+        s.starts_with("s3://")
+    }
+
     /// Parse from an S3 url, e.g.`s3://bucket/key`.
     pub fn parse_url(s: &str) -> Result<(String, String)> {
         let Some(s) = s.strip_prefix("s3://") else {
@@ -103,7 +110,7 @@ impl S3Builder {
 }
 
 /// An S3 object and AWS-related existing sums.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct S3 {
     client: Client,
     bucket: String,
@@ -138,7 +145,7 @@ impl S3 {
                 let data = sums.body.collect().await?.to_vec();
                 let sums = SumsFile::read_from_slice(
                     data.as_slice(),
-                    SumsFile::format_target_file(&self.key),
+                    State::try_from(SumsFile::format_target_file(&self.key)).await?,
                 )
                 .await?;
                 Ok(Some(sums))
@@ -403,7 +410,7 @@ impl S3 {
         let attributes = self.get_object_attributes().await?;
         let file_size = attributes.object_size().map(u64::try_from).transpose()?;
         let mut sums_file = SumsFile::default().with_size(file_size);
-        sums_file.add_name(SumsFile::format_target_file(&self.key));
+        sums_file.add_state(State::try_from(self.key.to_string()).await?);
 
         // Add the individual checksums for each type.
         self.add_checksum(&mut sums_file, StandardCtx::MD5(Default::default()))
@@ -432,16 +439,67 @@ impl S3 {
     }
 
     /// Get the object and convert it into an `AsyncRead`.
-    pub async fn object_reader(self) -> Result<impl AsyncRead> {
+    pub async fn object_reader(&self) -> Result<impl AsyncRead> {
+        Ok(Box::new(
+            self.client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(SumsFile::format_target_file(&self.key))
+                .send()
+                .await?
+                .body
+                .into_async_read(),
+        ))
+    }
+
+    /// Get the object file size.
+    async fn file_size(&mut self) -> Result<u64> {
         Ok(self
-            .client
-            .get_object()
-            .bucket(self.bucket)
-            .key(SumsFile::format_target_file(&self.key))
-            .send()
+            .get_object_attributes()
             .await?
-            .body
-            .into_async_read())
+            .object_size
+            .ok_or_else(|| AwsError("missing file size".to_string()))?
+            .try_into()?)
+    }
+
+    /// Write the sums file to the configured location using `PutObject`.
+    pub async fn put_sums(&self, data: String) -> Result<()> {
+        let key = SumsFile::format_sums_file(&self.key);
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .body(ByteStream::from(data.into_bytes()))
+            .send()
+            .await?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectSums for S3 {
+    async fn sums_file(&mut self) -> Result<Option<SumsFile>> {
+        self.get_existing_sums().await
+    }
+
+    async fn metadata_sums_file(&mut self) -> Result<SumsFile> {
+        self.sums_from_metadata().await
+    }
+
+    async fn reader(&mut self) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+        Ok(Box::new(self.object_reader().await?))
+    }
+
+    async fn file_size(&mut self) -> Result<u64> {
+        self.file_size().await
+    }
+
+    async fn write_data(&self, data: String) -> Result<()> {
+        self.put_sums(data).await
+    }
+
+    fn cloned(&self) -> Box<dyn ObjectSums + Send> {
+        Box::new(self.clone())
     }
 }
 
@@ -501,7 +559,7 @@ pub(crate) mod test {
 
         let sums = s3.sums_from_metadata().await?.split();
         let expected = generate_for(
-            "key",
+            State::try_from("key".to_string()).await?,
             vec![
                 "md5-aws-214748365b-214748365b-429496730b",
                 "sha256-aws-214748365b-214748365b-429496730b",
@@ -526,7 +584,7 @@ pub(crate) mod test {
 
         let sums = s3.sums_from_metadata().await?.split();
         let expected = generate_for(
-            "key",
+            State::try_from("key".to_string()).await?,
             vec!["md5-aws-214748365b-214748365b-429496730b"],
             true,
             false,
@@ -547,9 +605,14 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for("key", vec!["md5-aws-5", "sha256-aws-5"], true, false)
-            .await?
-            .split();
+        let expected = generate_for(
+            State::try_from("key".to_string()).await?,
+            vec!["md5-aws-5", "sha256-aws-5"],
+            true,
+            false,
+        )
+        .await?
+        .split();
 
         assert_all_same(sums, expected);
 
@@ -571,9 +634,14 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for("key", vec!["md5-aws-5"], true, false)
-            .await?
-            .split();
+        let expected = generate_for(
+            State::try_from("key".to_string()).await?,
+            vec!["md5-aws-5"],
+            true,
+            false,
+        )
+        .await?
+        .split();
 
         assert_all_same(sums, expected);
 
@@ -588,9 +656,14 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for("key", vec!["md5", "sha256"], true, false)
-            .await?
-            .split();
+        let expected = generate_for(
+            State::try_from("key".to_string()).await?,
+            vec!["md5", "sha256"],
+            true,
+            false,
+        )
+        .await?
+        .split();
 
         assert_all_same(sums, expected);
 
@@ -605,7 +678,14 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for("key", vec!["md5"], true, false).await?.split();
+        let expected = generate_for(
+            State::try_from("key".to_string()).await?,
+            vec!["md5"],
+            true,
+            false,
+        )
+        .await?
+        .split();
 
         assert_all_same(sums, expected);
 

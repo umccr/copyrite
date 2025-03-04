@@ -2,6 +2,7 @@ use error::Result;
 use std::fmt::{Display, Formatter};
 
 pub mod checksum;
+pub mod cloud;
 pub mod error;
 pub mod reader;
 pub mod task;
@@ -40,7 +41,7 @@ impl Commands {
     pub fn parse_args() -> Result<Self> {
         let mut args = Self::parse();
         if let Subcommands::Generate {
-            is_checksum_defaulted,
+            _is_checksum_defaulted: is_checksum_defaulted,
             checksum,
             ..
         } = &mut args.commands
@@ -66,17 +67,28 @@ pub enum Subcommands {
         /// Multiple files can be specified.
         #[arg(value_delimiter = ',', required = true)]
         input: Vec<String>,
-        /// Checksums to use. Can be specified multiple times or comma-separated. Use an
-        /// `aws-<part_size>` suffix to create AWS ETag-style checksums, e.g. `md5-aws-8mib`.
+        /// Checksums to use. Can be specified multiple times or comma-separated.
+        ///
+        /// Use an `aws-<part_size>` suffix to create AWS ETag-style checksums, e.g. `md5-aws-8mib`.
         /// `<part_size>` should contain a size unit, e.g. `mib` or `b`. When the unit is omitted,
         /// this is interpreted as a `<part-number>` where the input file is split evenly into the
-        /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits the
-        /// file into 10 parts. `<part-number>` is not supported when the file size is not known, such
-        /// as when taking input from stdin. Defaults to `md5` if unspecified.
+        /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits
+        /// the file into 10 parts. `<part-number>` is not supported when the file size is not
+        /// known, such as when taking input from stdin.
+        ///
+        /// It is possible to specify different part sizes by appending additional parts separated
+        /// by a `-`. In this case, if the file is bigger than the number of parts, the last part
+        /// will be repeated until the end. If it is smaller, then some parts may be ignored. For
+        /// example, `md5-aws-8mib-16mib` will create one 8 MiB part and the rest will be 16 MiB
+        /// parts.
+        ///
+        /// This option supports file-based objects and objects in S3 by using the
+        /// `S3://bucket/object` syntax. Defaults to `md5` for file-based objects if unspecified
+        /// and whatever is available in S3 metadata for S3 objects. This means that is no checksums
+        /// are specified with S3 objects, the object will not be read to compute the checksum, and
+        /// will instead use existing ETags and additional checksums.
         #[arg(value_delimiter = ',', short, long)]
         checksum: Vec<Ctx>,
-        #[clap(skip)]
-        is_checksum_defaulted: bool,
         /// Generate any missing checksums that would be required to confirm whether two files are
         /// identical using the `check` subcommand. Any additional checksums specified using
         /// `--checksum` will also be generated. If there are no checksums preset, the default
@@ -86,15 +98,20 @@ pub enum Subcommands {
         /// Overwrite the sums file. By default, only checksums that are missing are computed and
         /// added to an existing sums file. Any existing checksums are preserved (even if not
         /// specified in --checksums). This option allows overwriting any existing sums file. This
-        /// will recompute all checksums specified.
+        /// will recompute all checksums specified. This option will also read objects on S3 to
+        /// compute checksums, even if the metadata for that checksum exists.
         #[arg(short, long, env, conflicts_with = "verify")]
         force_overwrite: bool,
         /// Verify the contents of existing sums files when generating checksums. By default,
         /// existing checksum files are assumed to contain checksums that have correct values. This
         /// option allows computing existing sums file checksums and updating the file to ensure
-        /// that it is correct.
+        /// that it is correct. This option will also read objects on S3 to compute checksums, even
+        /// if the metadata for that checksum exists.
         #[arg(short, long, env, conflicts_with = "force_overwrite")]
         verify: bool,
+        /// Not visible to user, used for default checksum logic.
+        #[clap(skip)]
+        _is_checksum_defaulted: bool,
     },
     /// Confirm a set of files is identical. This returns sets of files that are identical.
     /// Which means that more than two files can be checked at the same time.
