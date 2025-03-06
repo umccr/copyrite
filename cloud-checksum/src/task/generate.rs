@@ -368,7 +368,6 @@ pub(crate) mod test {
     use crate::task::check::test::write_test_files_not_comparable;
     use crate::task::check::{CheckTaskBuilder, GroupBy};
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
-    use crate::Endianness;
     use anyhow::Result;
     use std::path::Path;
     use tempfile::tempdir;
@@ -392,7 +391,7 @@ pub(crate) mod test {
             result,
             vec![SumCtxPair::new(
                 files.first().unwrap().to_string(),
-                Ctx::Regular(StandardCtx::CRC32C(0, Endianness::BigEndian))
+                Ctx::Regular(StandardCtx::crc32c())
             )]
             .into()
         );
