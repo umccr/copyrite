@@ -2,8 +2,8 @@
 //!
 
 use crate::checksum::aws_etag::{AWSETagCtx, PartMode};
+use crate::checksum::file::SumsFile;
 use crate::checksum::file::{Checksum, PartChecksum, PartChecksums};
-use crate::checksum::file::{State, SumsFile};
 use crate::checksum::standard::StandardCtx;
 use crate::checksum::Ctx;
 use crate::cloud::ObjectSums;
@@ -143,11 +143,7 @@ impl S3 {
         {
             Ok(sums) => {
                 let data = sums.body.collect().await?.to_vec();
-                let sums = SumsFile::read_from_slice(
-                    data.as_slice(),
-                    State::try_from(SumsFile::format_target_file(&self.key)).await?,
-                )
-                .await?;
+                let sums = SumsFile::read_from_slice(data.as_slice()).await?;
                 Ok(Some(sums))
             }
             Err(err) if matches!(err.as_service_error(), Some(GetObjectError::NoSuchKey(_))) => {
@@ -410,7 +406,6 @@ impl S3 {
         let attributes = self.get_object_attributes().await?;
         let file_size = attributes.object_size().map(u64::try_from).transpose()?;
         let mut sums_file = SumsFile::default().with_size(file_size);
-        sums_file.add_state(State::try_from(self.key.to_string()).await?);
 
         // Add the individual checksums for each type.
         self.add_checksum(&mut sums_file, StandardCtx::MD5(Default::default()))
@@ -429,6 +424,12 @@ impl S3 {
             .await?;
         self.add_checksum(&mut sums_file, StandardCtx::SHA256(Default::default()))
             .await?;
+
+        if sums_file.checksums.is_empty() {
+            return Err(AwsError(
+                "failed to create sums file from metadata".to_string(),
+            ));
+        }
 
         Ok(sums_file)
     }
@@ -453,23 +454,23 @@ impl S3 {
     }
 
     /// Get the object file size.
-    async fn file_size(&mut self) -> Result<u64> {
+    async fn size(&mut self) -> Result<Option<u64>> {
         Ok(self
             .get_object_attributes()
             .await?
             .object_size
-            .ok_or_else(|| AwsError("missing file size".to_string()))?
-            .try_into()?)
+            .map(|size| size.try_into())
+            .transpose()?)
     }
 
     /// Write the sums file to the configured location using `PutObject`.
-    pub async fn put_sums(&self, data: String) -> Result<()> {
+    pub async fn put_sums(&self, sums_file: &SumsFile) -> Result<()> {
         let key = SumsFile::format_sums_file(&self.key);
         self.client
             .put_object()
             .bucket(&self.bucket)
             .key(&key)
-            .body(ByteStream::from(data.into_bytes()))
+            .body(ByteStream::from(sums_file.to_json_string()?.into_bytes()))
             .send()
             .await?;
         Ok(())
@@ -480,27 +481,27 @@ impl S3 {
 impl ObjectSums for S3 {
     async fn sums_file(&mut self) -> Result<Option<SumsFile>> {
         let metadata_sums = self.sums_from_metadata().await?;
-        Ok(self
-            .get_existing_sums()
-            .await?
-            .map(|sums| metadata_sums.merge(sums))
-            .transpose()?)
+
+        match self.get_existing_sums().await? {
+            None => Ok(Some(metadata_sums)),
+            Some(existing) => Ok(Some(metadata_sums.merge(existing)?)),
+        }
     }
 
     async fn reader(&mut self) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
         Ok(Box::new(self.object_reader().await?))
     }
 
-    async fn file_size(&mut self) -> Result<u64> {
-        self.file_size().await
+    async fn file_size(&mut self) -> Result<Option<u64>> {
+        self.size().await
     }
 
-    async fn write_data(&self, data: String) -> Result<()> {
-        self.put_sums(data).await
+    async fn write_sums_file(&self, sums_file: &SumsFile) -> Result<()> {
+        self.put_sums(sums_file).await
     }
 
-    fn cloned(&self) -> Box<dyn ObjectSums + Send> {
-        Box::new(self.clone())
+    fn location(&self) -> String {
+        format!("s3://{}/{}", self.bucket, self.key)
     }
 }
 
@@ -510,7 +511,7 @@ pub(crate) mod test {
     use crate::checksum::standard::test::EXPECTED_MD5_SUM;
     use crate::error::Result;
     use crate::task::generate::test::generate_for;
-    use crate::test::TEST_FILE_SIZE;
+    use crate::test::{TEST_FILE_NAME, TEST_FILE_SIZE};
     use aws_sdk_s3::types;
     use aws_sdk_s3::types::GetObjectAttributesParts;
     use aws_smithy_mocks_experimental::{mock, mock_client, Rule, RuleMode};
@@ -560,7 +561,7 @@ pub(crate) mod test {
 
         let sums = s3.sums_from_metadata().await?.split();
         let expected = generate_for(
-            State::try_from("key".to_string()).await?,
+            "key",
             vec![
                 "md5-aws-214748365b-214748365b-429496730b",
                 "sha256-aws-214748365b-214748365b-429496730b",
@@ -585,7 +586,7 @@ pub(crate) mod test {
 
         let sums = s3.sums_from_metadata().await?.split();
         let expected = generate_for(
-            State::try_from("key".to_string()).await?,
+            "key",
             vec!["md5-aws-214748365b-214748365b-429496730b"],
             true,
             false,
@@ -606,14 +607,9 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for(
-            State::try_from("key".to_string()).await?,
-            vec!["md5-aws-5", "sha256-aws-5"],
-            true,
-            false,
-        )
-        .await?
-        .split();
+        let expected = generate_for("key", vec!["md5-aws-5", "sha256-aws-5"], true, false)
+            .await?
+            .split();
 
         assert_all_same(sums, expected);
 
@@ -635,14 +631,9 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for(
-            State::try_from("key".to_string()).await?,
-            vec!["md5-aws-5"],
-            true,
-            false,
-        )
-        .await?
-        .split();
+        let expected = generate_for(TEST_FILE_NAME, vec!["md5-aws-5"], true, false)
+            .await?
+            .split();
 
         assert_all_same(sums, expected);
 
@@ -657,14 +648,9 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for(
-            State::try_from("key".to_string()).await?,
-            vec!["md5", "sha256"],
-            true,
-            false,
-        )
-        .await?
-        .split();
+        let expected = generate_for(TEST_FILE_NAME, vec!["md5", "sha256"], true, false)
+            .await?
+            .split();
 
         assert_all_same(sums, expected);
 
@@ -679,14 +665,9 @@ pub(crate) mod test {
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
-        let expected = generate_for(
-            State::try_from("key".to_string()).await?,
-            vec!["md5"],
-            true,
-            false,
-        )
-        .await?
-        .split();
+        let expected = generate_for(TEST_FILE_NAME, vec!["md5"], true, false)
+            .await?
+            .split();
 
         assert_all_same(sums, expected);
 

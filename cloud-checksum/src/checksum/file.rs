@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 
@@ -77,7 +77,7 @@ impl Clone for State {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
-            object_sums: self.object_sums.cloned(),
+            object_sums: dyn_clone::clone_box(&*self.object_sums),
         }
     }
 }
@@ -86,10 +86,6 @@ impl Clone for State {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub struct SumsFile {
-    // State is only used internally to track data when merging sums files. It is not
-    // encoded in the actual sums file format.
-    #[serde(skip)]
-    pub(crate) state: BTreeSet<State>,
     pub(crate) version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) size: Option<u64>,
@@ -102,19 +98,14 @@ pub struct SumsFile {
 
 impl Default for SumsFile {
     fn default() -> Self {
-        Self::new(BTreeSet::new(), None, BTreeMap::new())
+        Self::new(None, BTreeMap::new())
     }
 }
 
 impl SumsFile {
     /// Create an output file.
-    pub fn new(
-        state: BTreeSet<State>,
-        size: Option<u64>,
-        checksums: BTreeMap<Ctx, Checksum>,
-    ) -> Self {
+    pub fn new(size: Option<u64>, checksums: BTreeMap<Ctx, Checksum>) -> Self {
         Self {
-            state,
             version: OUTPUT_FILE_VERSION.to_string(),
             size,
             checksums,
@@ -142,29 +133,18 @@ impl SumsFile {
         Ok(to_string(&self)?)
     }
 
-    /// Write the output file based on the state.
-    pub async fn write(&self) -> Result<()> {
-        for state in &self.state {
-            state.object_sums.write_data(self.to_json_string()?).await?;
-        }
-
-        Ok(())
-    }
-
     /// Read from a slice and add the name.
-    pub async fn read_from_slice(slice: &[u8], state: State) -> Result<Self> {
-        let mut value: Self = slice.try_into()?;
-        value.state = BTreeSet::from_iter(vec![state]);
-        Ok(value)
+    pub async fn read_from_slice(slice: &[u8]) -> Result<Self> {
+        slice.try_into()
     }
 
     /// Merge with another output file, overwriting existing checksums,
-    /// taking ownership of self. Returns an error if the name and size
-    /// of the file do not match.
+    /// taking ownership of self. Returns an error if the size of the files
+    /// do not match, and both files are not empty.
     pub fn merge(mut self, other: Self) -> Result<Self> {
-        if self.state != other.state && self.size != other.size {
+        if self.size != other.size && !self.checksums.is_empty() && !other.checksums.is_empty() {
             return Err(SumsFileError(
-                "the name and size of output files do not match".to_string(),
+                "the size of output files do not match".to_string(),
             ));
         }
 
@@ -178,9 +158,6 @@ impl SumsFile {
         for (key, checksum) in other.checksums {
             self.checksums.insert(key, checksum);
         }
-        for name in other.state {
-            self.state.insert(name);
-        }
     }
 
     /// Split the sums file into multiple sums files, one for each checksum.
@@ -189,7 +166,6 @@ impl SumsFile {
             .iter()
             .map(|(ctx, checksum)| {
                 let mut sums_file = Self::default().with_size(self.size);
-                sums_file.state = self.state.clone();
                 sums_file.add_checksum(ctx.clone(), checksum.clone());
 
                 sums_file
@@ -228,21 +204,6 @@ impl SumsFile {
         self.checksums
             .keys()
             .any(|key| other.checksums.contains_key(key))
-    }
-
-    /// Get a reference to the state of the sums file.
-    pub fn state(&self) -> &BTreeSet<State> {
-        &self.state
-    }
-
-    /// Get to the state of the sums file.
-    pub fn into_state(self) -> BTreeSet<State> {
-        self.state
-    }
-
-    /// Add a state to the sums file.
-    pub fn add_state(&mut self, state: State) {
-        self.state.insert(state);
     }
 
     /// Set the size.
@@ -448,7 +409,6 @@ pub(crate) mod test {
         set_checksums(expected_md5, &mut file_two, aws_two.clone());
 
         let result = file_one.clone().merge(file_two)?;
-        assert_eq!(result.state, file_one.state);
         assert_eq!(result.size, file_one.size);
         assert_eq!(
             result.checksums,
@@ -493,7 +453,7 @@ pub(crate) mod test {
                 Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
             ),
         )];
-        SumsFile::new(BTreeSet::new(), Some(123), BTreeMap::from_iter(checksums))
+        SumsFile::new(Some(123), BTreeMap::from_iter(checksums))
     }
 
     fn expected_output_json(expected_md5: &str) -> Value {

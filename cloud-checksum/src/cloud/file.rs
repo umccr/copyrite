@@ -1,7 +1,7 @@
 //! File-based sums file logic.
 //!
 
-use crate::checksum::file::{State, SumsFile};
+use crate::checksum::file::SumsFile;
 use crate::cloud::ObjectSums;
 use crate::error::Error::ParseError;
 use crate::error::Result;
@@ -62,8 +62,7 @@ impl File {
         let mut buf = vec![];
         file.read_to_end(&mut buf).await?;
 
-        let sums =
-            SumsFile::read_from_slice(&buf, State::try_from(self.file.to_string()).await?).await?;
+        let sums = SumsFile::read_from_slice(&buf).await?;
         Ok(Some(sums))
     }
 
@@ -74,16 +73,17 @@ impl File {
     }
 
     /// Get the size of the target file.
-    pub async fn file_size(&self) -> Result<u64> {
+    pub async fn size(&self) -> Result<Option<u64>> {
         Ok(fs::metadata(SumsFile::format_target_file(&self.file))
-            .await?
-            .len())
+            .await
+            .ok()
+            .map(|metadata| metadata.len()))
     }
 
     /// Write the sums file to the configured location.
-    pub async fn write_sums(&self, data: String) -> Result<()> {
+    pub async fn write_sums(&self, sums_file: &SumsFile) -> Result<()> {
         let path = SumsFile::format_sums_file(&self.file);
-        fs::write(&path, data).await?;
+        fs::write(&path, sums_file.to_json_string()?).await?;
         Ok(())
     }
 }
@@ -98,15 +98,15 @@ impl ObjectSums for File {
         Ok(Box::new(self.sums_reader().await?))
     }
 
-    async fn file_size(&mut self) -> Result<u64> {
-        self.file_size().await
+    async fn file_size(&mut self) -> Result<Option<u64>> {
+        self.size().await
     }
 
-    async fn write_data(&self, data: String) -> Result<()> {
-        self.write_sums(data).await
+    async fn write_sums_file(&self, sums_file: &SumsFile) -> Result<()> {
+        self.write_sums(sums_file).await
     }
 
-    fn cloned(&self) -> Box<dyn ObjectSums + Send> {
-        Box::new(self.clone())
+    fn location(&self) -> String {
+        self.file.to_string()
     }
 }

@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 pub mod channel;
 
+/// The type returned when converting a shared reader into a stream.
+pub type ReaderStream = Pin<Box<dyn Stream<Item = Result<Arc<[u8]>>> + Send>>;
+
 /// The shared reader trait defines functions for accessing chunks of data from a
 /// reader in a parallel context.
 #[async_trait::async_trait]
@@ -18,5 +21,5 @@ pub trait SharedReader {
 
     /// Convert the shared reader into a stream of the resulting bytes of reading
     /// the chunks.
-    fn as_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<Arc<[u8]>>> + Send>>;
+    fn as_stream(&mut self) -> ReaderStream;
 }

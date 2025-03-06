@@ -1,8 +1,7 @@
-use cloud_checksum::checksum::file::SumsFile;
 use cloud_checksum::checksum::Ctx;
 use cloud_checksum::error::Result;
 use cloud_checksum::reader::channel::ChannelReader;
-use cloud_checksum::task::check::{CheckOutput, CheckTaskBuilder, GroupBy};
+use cloud_checksum::task::check::{CheckObjects, CheckOutput, CheckTaskBuilder, GroupBy};
 use cloud_checksum::task::generate::{GenerateTaskBuilder, SumCtxPairs};
 use cloud_checksum::{Commands, Subcommands};
 use tokio::io::stdin;
@@ -18,7 +17,6 @@ async fn main() -> Result<()> {
             missing: generate_missing,
             force_overwrite,
             verify,
-            _is_checksum_defaulted,
         } => {
             if input[0] == "-" {
                 let reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
@@ -58,12 +56,6 @@ async fn main() -> Result<()> {
                             )
                             .await?
                         }
-
-                        // If there are no additional non-defaulted checksums to generate, return
-                        // early.
-                        if _is_checksum_defaulted {
-                            return Ok(());
-                        }
                     }
                 };
 
@@ -84,33 +76,21 @@ async fn main() -> Result<()> {
             update,
             group_by,
         } => {
-            let files = check(input, group_by).await?;
+            let files = check(input, group_by, update).await?;
+            let output = CheckOutput::from((files, group_by));
 
-            let mut groups = Vec::with_capacity(files.len());
-            for file in files {
-                if update {
-                    file.write().await?;
-                }
-
-                groups.push(
-                    file.into_state()
-                        .into_iter()
-                        .map(|state| state.into_inner().0)
-                        .collect(),
-                );
-            }
-
-            println!("{}", CheckOutput::new(groups, group_by).to_json_string()?);
+            println!("{}", output.to_json_string()?);
         }
     };
 
     Ok(())
 }
 
-async fn check(input: Vec<String>, group_by: GroupBy) -> Result<Vec<SumsFile>> {
+async fn check(input: Vec<String>, group_by: GroupBy, update: bool) -> Result<CheckObjects> {
     CheckTaskBuilder::default()
         .with_input_files(input)
         .with_group_by(group_by)
+        .with_update(update)
         .build()
         .await?
         .run()

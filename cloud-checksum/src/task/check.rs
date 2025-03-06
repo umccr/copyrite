@@ -1,14 +1,15 @@
 //! Performs the check task to determine if files are identical from .sums files.
 //!
 
-use crate::checksum::file::{State, SumsFile};
-use crate::cloud::ObjectSumsBuilder;
+use crate::checksum::file::SumsFile;
+use crate::cloud::{ObjectSums, ObjectSumsBuilder};
 use crate::error::{Error, Result};
 use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
-use std::collections::BTreeSet;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Build a check task.
@@ -39,36 +40,30 @@ impl CheckTaskBuilder {
     }
 
     /// Update the checked files by writing them back.
-    pub fn update(mut self) -> Self {
-        self.update = true;
+    pub fn with_update(mut self, update: bool) -> Self {
+        self.update = update;
         self
     }
 
     /// Build a check task.
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
-        let files = join_all(self.files.into_iter().map(|file| async {
+        let objects = join_all(self.files.into_iter().map(|file| async move {
             let mut object_sums = ObjectSumsBuilder.build(file.to_string()).await?;
             let file_size = object_sums.file_size().await?;
-            let existing = object_sums.sums_file().await?.unwrap_or_else(|| {
-                SumsFile::new(
-                    BTreeSet::from_iter(vec![State {
-                        name: file,
-                        object_sums,
-                    }]),
-                    Some(file_size),
-                    Default::default(),
-                )
-            });
+            let existing = object_sums
+                .sums_file()
+                .await?
+                .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
 
-            Ok(existing)
+            Ok((existing, BTreeSet::from_iter(vec![State(object_sums)])))
         }))
         .await
         .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<BTreeMap<_, _>>>()?;
 
         Ok(CheckTask {
-            files,
+            objects: CheckObjects(objects),
             group_by,
             update: self.update,
         })
@@ -86,10 +81,49 @@ pub enum GroupBy {
     Comparability,
 }
 
+/// Representation of file state to implement equality and hashing.
+pub struct State(pub(crate) Box<dyn ObjectSums + Send>);
+
+impl Hash for State {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.location().hash(state);
+    }
+}
+
+impl Eq for State {}
+
+impl PartialEq for State {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.location() == other.0.location()
+    }
+}
+
+impl PartialOrd for State {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for State {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.location().cmp(&other.0.location())
+    }
+}
+
+/// Objects processed from the check task.
+#[derive(Default)]
+pub struct CheckObjects(pub(crate) BTreeMap<SumsFile, BTreeSet<State>>);
+
+impl Hash for CheckObjects {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.keys().for_each(|key| key.hash(state));
+    }
+}
+
 /// Execute the check task.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct CheckTask {
-    files: Vec<SumsFile>,
+    objects: CheckObjects,
     group_by: GroupBy,
     update: bool,
 }
@@ -109,34 +143,37 @@ impl CheckTask {
         // This might be more efficient using graph algorithms to find a set of connected
         // graphs based on the equality of the sums files.
 
-        self.files.sort();
-        let mut state = Self::hash(&self.files);
+        let mut state = Self::hash(&self.objects);
         let mut prev_state = state.wrapping_add(1);
         // Loop until the set of sums files does not change between iterations, i.e.
         // until the hash of the previous and current iteration is the same.
         while prev_state != state {
-            let mut reprocess = Vec::with_capacity(self.files.len());
+            // BTreeMap files are sorted already.
+            let mut objects = self.objects.0.into_iter().collect::<Vec<_>>();
+            let mut reprocess = Vec::with_capacity(objects.len());
 
             // Process a single sums file at a time.
-            'outer: while let Some(a) = self.files.pop() {
+            'outer: while let Some((a, mut a_locations)) = objects.pop() {
                 // Check to see if it can be merged with another sums file in the list.
-                for b in self.files.iter_mut() {
+                for (b, b_locations) in objects.iter_mut() {
+                    // If it can be merged with another file, do the merge and add it back in for
+                    // the next loop.
                     if compare(&a, b) {
                         b.merge_mut(a);
+                        b_locations.append(&mut a_locations);
                         continue 'outer;
                     }
                 }
 
                 // If it could not be merged, add it back into the list for re-processing.
-                reprocess.push(a);
+                reprocess.push((a, a_locations));
             }
 
-            self.files = reprocess;
-            self.files.sort();
+            self.objects = CheckObjects(BTreeMap::from_iter(reprocess));
 
             // Update the hashes of the current and previous lists.
             prev_state = state;
-            state = Self::hash(&self.files);
+            state = Self::hash(&self.objects);
         }
 
         Ok(self)
@@ -156,30 +193,45 @@ impl CheckTask {
         self = self.merge_fn(|a, b| a.comparable(b)).await?;
         // The checksum value doesn't mean much if two sums files are comparable but not equal,
         // so it should be cleared.
-        self.files.iter_mut().for_each(|file| {
+        let mut files = BTreeMap::new();
+        while let Some((mut file, locations)) = self.objects.0.pop_last() {
             file.checksums
                 .iter_mut()
                 .for_each(|(_, checksum)| *checksum = Default::default());
-        });
+            files.insert(file, locations);
+        }
+        self.objects = CheckObjects(files);
 
         Ok(self)
     }
 
     /// Runs the check task, returning the list of matching files.
-    pub async fn run(self) -> Result<Vec<SumsFile>> {
+    pub async fn run(self) -> Result<CheckObjects> {
         let update = self.update;
         let result = match self.group_by {
-            GroupBy::Equality => Ok::<_, Error>(self.merge_same().await?.files),
-            GroupBy::Comparability => Ok(self.merge_comparable().await?.files),
+            GroupBy::Equality => Ok::<_, Error>(self.merge_same().await?.objects),
+            GroupBy::Comparability => Ok(self.merge_comparable().await?.objects),
         }?;
 
         if update {
-            for file in &result {
-                file.write().await?;
+            for (file, locations) in &result.0 {
+                for location in locations {
+                    location.0.write_sums_file(file).await?;
+                }
             }
         }
 
         Ok(result)
+    }
+}
+
+impl From<(CheckObjects, GroupBy)> for CheckOutput {
+    fn from((objects, group_by): (CheckObjects, GroupBy)) -> Self {
+        let mut groups = Vec::with_capacity(objects.0.len());
+        for (_, state) in objects.0 {
+            groups.push(state.iter().map(|state| state.0.location()).collect());
+        }
+        CheckOutput::new(groups, group_by)
     }
 }
 
@@ -206,10 +258,11 @@ impl CheckOutput {
 pub(crate) mod test {
     use super::*;
     use crate::checksum::file::Checksum;
+    use crate::cloud::file::FileBuilder;
     use crate::error::Error;
     use crate::test::TEST_FILE_SIZE;
     use anyhow::Result;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::path::Path;
     use tempfile::{tempdir, TempDir};
 
@@ -219,16 +272,15 @@ pub(crate) mod test {
         let files = write_test_files_one_group(tmp).await?;
 
         let check = CheckTaskBuilder::default()
-            .with_input_files(files.iter().map(|state| state.name.to_string()).collect())
+            .with_input_files(files.iter().map(|name| name.to_string()).collect())
             .build()
             .await?;
 
-        let result = check.run().await?;
+        let result: Vec<_> = check.run().await?.0.into_keys().collect();
 
         assert_eq!(
             result,
             vec![SumsFile::new(
-                BTreeSet::from_iter(files),
                 Some(TEST_FILE_SIZE),
                 BTreeMap::from_iter(vec![
                     ("md5".parse()?, Checksum::new("123".to_string(), None, None),),
@@ -257,17 +309,16 @@ pub(crate) mod test {
         let files = write_test_files_multiple_groups(tmp).await?;
 
         let check = CheckTaskBuilder::default()
-            .with_input_files(files.iter().map(|state| state.name.to_string()).collect())
+            .with_input_files(files.iter().map(|name| name.to_string()).collect())
             .with_group_by(GroupBy::Comparability)
             .build()
             .await?;
 
-        let result = check.run().await?;
+        let result: Vec<_> = check.run().await?.0.into_keys().collect();
 
         assert_eq!(
             result,
             vec![SumsFile::new(
-                BTreeSet::from_iter(files),
                 Some(TEST_FILE_SIZE),
                 BTreeMap::from_iter(vec![
                     ("md5".parse()?, Default::default(),),
@@ -288,17 +339,16 @@ pub(crate) mod test {
         let files = write_test_files_multiple_groups(tmp).await?;
 
         let check = CheckTaskBuilder::default()
-            .with_input_files(files.iter().map(|state| state.name.to_string()).collect())
+            .with_input_files(files.iter().map(|name| name.to_string()).collect())
             .build()
             .await?;
 
-        let result = check.run().await?;
+        let result: Vec<_> = check.run().await?.0.into_keys().collect();
 
         assert_eq!(
             result,
             vec![
                 SumsFile::new(
-                    BTreeSet::from_iter(files.clone().into_iter().take(2)),
                     Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
                         ("md5".parse()?, Checksum::new("123".to_string(), None, None),),
@@ -313,7 +363,6 @@ pub(crate) mod test {
                     ])
                 ),
                 SumsFile::new(
-                    BTreeSet::from_iter(files.clone().into_iter().skip(2)),
                     Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
                         (
@@ -342,18 +391,17 @@ pub(crate) mod test {
         let files = write_test_files_not_comparable(tmp).await?;
 
         let check = CheckTaskBuilder::default()
-            .with_input_files(files.iter().map(|state| state.name.to_string()).collect())
+            .with_input_files(files.iter().map(|name| name.to_string()).collect())
             .with_group_by(GroupBy::Comparability)
             .build()
             .await?;
 
-        let result = check.run().await?;
+        let result: Vec<_> = check.run().await?.0.into_keys().collect();
 
         assert_eq!(
             result,
             vec![
                 SumsFile::new(
-                    BTreeSet::from_iter(files.clone().into_iter().take(2)),
                     Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
                         ("md5".parse()?, Default::default(),),
@@ -362,7 +410,6 @@ pub(crate) mod test {
                     ])
                 ),
                 SumsFile::new(
-                    BTreeSet::from_iter(files.clone().into_iter().skip(2)),
                     Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
                         ("crc32".parse()?, Default::default(),),
@@ -375,14 +422,13 @@ pub(crate) mod test {
         Ok(())
     }
 
-    pub(crate) async fn write_test_files_one_group(tmp: TempDir) -> Result<Vec<State>, Error> {
+    pub(crate) async fn write_test_files_one_group(tmp: TempDir) -> Result<Vec<String>, Error> {
         let path = tmp.into_path();
 
         let mut names = write_test_files(&path).await?;
 
-        let c_name = State::try_from(path.join("c").to_string_lossy().to_string()).await?;
+        let c_name = path.join("c").to_string_lossy().to_string();
         let c = SumsFile::new(
-            BTreeSet::from_iter(vec![c_name.clone()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 (
@@ -395,21 +441,26 @@ pub(crate) mod test {
                 ),
             ]),
         );
-        c.write().await?;
+        FileBuilder::default()
+            .with_file(c_name.to_string())
+            .build()?
+            .write_sums(&c)
+            .await?;
 
         names.push(c_name);
 
         Ok(names)
     }
 
-    pub(crate) async fn write_test_files_not_comparable(tmp: TempDir) -> Result<Vec<State>, Error> {
+    pub(crate) async fn write_test_files_not_comparable(
+        tmp: TempDir,
+    ) -> Result<Vec<String>, Error> {
         let path = tmp.into_path();
 
         let mut names = write_test_files(&path).await?;
 
-        let c_name = State::try_from(path.join("c").to_string_lossy().to_string()).await?;
+        let c_name = path.join("c").to_string_lossy().to_string();
         let c = SumsFile::new(
-            BTreeSet::from_iter(vec![c_name.clone()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 (
@@ -422,7 +473,11 @@ pub(crate) mod test {
                 ),
             ]),
         );
-        c.write().await?;
+        FileBuilder::default()
+            .with_file(c_name.to_string())
+            .build()?
+            .write_sums(&c)
+            .await?;
 
         names.push(c_name);
 
@@ -431,14 +486,13 @@ pub(crate) mod test {
 
     pub(crate) async fn write_test_files_multiple_groups(
         tmp: TempDir,
-    ) -> Result<Vec<State>, Error> {
+    ) -> Result<Vec<String>, Error> {
         let path = tmp.into_path();
 
         let mut names = write_test_files(&path).await?;
 
-        let c_name = State::try_from(path.join("c").to_string_lossy().to_string()).await?;
+        let c_name = path.join("c").to_string_lossy().to_string();
         let c = SumsFile::new(
-            BTreeSet::from_iter(vec![c_name.clone()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 (
@@ -451,11 +505,14 @@ pub(crate) mod test {
                 ),
             ]),
         );
-        c.write().await?;
+        FileBuilder::default()
+            .with_file(c_name.to_string())
+            .build()?
+            .write_sums(&c)
+            .await?;
 
-        let d_name = State::try_from(path.join("d").to_string_lossy().to_string()).await?;
+        let d_name = path.join("d").to_string_lossy().to_string();
         let d = SumsFile::new(
-            BTreeSet::from_iter(vec![d_name.clone()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 (
@@ -468,17 +525,20 @@ pub(crate) mod test {
                 ),
             ]),
         );
-        d.write().await?;
+        FileBuilder::default()
+            .with_file(d_name.to_string())
+            .build()?
+            .write_sums(&d)
+            .await?;
 
         names.extend(vec![c_name, d_name]);
 
         Ok(names)
     }
 
-    async fn write_test_files(path: &Path) -> Result<Vec<State>, Error> {
-        let a_name = State::try_from(path.join("a").to_string_lossy().to_string()).await?;
+    async fn write_test_files(path: &Path) -> Result<Vec<String>, Error> {
+        let a_name = path.join("a").to_string_lossy().to_string();
         let a = SumsFile::new(
-            BTreeSet::from_iter(vec![a_name.clone()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 ("md5".parse()?, Checksum::new("123".to_string(), None, None)),
@@ -488,11 +548,14 @@ pub(crate) mod test {
                 ),
             ]),
         );
-        a.write().await?;
+        FileBuilder::default()
+            .with_file(a_name.to_string())
+            .build()?
+            .write_sums(&a)
+            .await?;
 
-        let b_name = State::try_from(path.join("b").to_string_lossy().to_string()).await?;
+        let b_name = path.join("b").to_string_lossy().to_string();
         let b = SumsFile::new(
-            BTreeSet::from_iter(vec![b_name.clone()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![
                 (
@@ -505,7 +568,11 @@ pub(crate) mod test {
                 ),
             ]),
         );
-        b.write().await?;
+        FileBuilder::default()
+            .with_file(b_name.to_string())
+            .build()?
+            .write_sums(&b)
+            .await?;
 
         Ok(vec![a_name, b_name])
     }

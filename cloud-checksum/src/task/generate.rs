@@ -1,16 +1,17 @@
 //! Generate checksums for files.
 //!
 
-use crate::checksum::file::{Checksum, PartChecksum, PartChecksums, State, SumsFile};
+use crate::checksum::file::{Checksum, PartChecksum, PartChecksums, SumsFile};
 use crate::checksum::Ctx;
-use crate::cloud::ObjectSumsBuilder;
+use crate::cloud::{ObjectSums, ObjectSumsBuilder};
 use crate::error::Error::GenerateError;
 use crate::error::{Error, Result};
 use crate::reader::channel::ChannelReader;
 use crate::reader::SharedReader;
+use crate::task::check::CheckObjects;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use futures_util::future::join_all;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use tokio::task::JoinHandle;
 
 /// Define the kind of task that is running.
@@ -87,16 +88,6 @@ impl GenerateTaskBuilder {
             None
         };
 
-        if self.overwrite && self.verify {
-            return Err(GenerateError(
-                "cannot verify and overwrite checksums".to_string(),
-            ));
-        }
-
-        if self.ctxs.is_empty() {
-            return Err(GenerateError("checksums not specified".to_string()));
-        }
-
         let mode = if self.overwrite {
             OverwriteMode::Overwrite
         } else if self.verify {
@@ -108,13 +99,10 @@ impl GenerateTaskBuilder {
         let reader: Box<dyn SharedReader + Send> = if let Some(reader) = self.reader {
             reader
         } else {
-            let mut object_sums = ObjectSumsBuilder
-                .build(self.input_file_name.to_string())
-                .await?;
             let file_size = object_sums.file_size().await?;
             self.ctxs
                 .iter_mut()
-                .for_each(|ctx| ctx.set_file_size(Some(file_size)));
+                .for_each(|ctx| ctx.set_file_size(file_size));
             let reader = object_sums.reader().await?;
 
             let reader = ChannelReader::new(reader, self.capacity);
@@ -123,16 +111,14 @@ impl GenerateTaskBuilder {
 
         let task = GenerateTask {
             tasks: Default::default(),
-            input_file_name: self.input_file_name,
             overwrite: mode,
             existing_output,
             reader: Some(reader),
             write: self.write,
+            object_sums,
         };
 
-        let task = task
-            .add_generate_tasks(HashSet::from_iter(self.ctxs))?
-            .add_reader_task()?;
+        let task = task.add_tasks(HashSet::from_iter(self.ctxs))?;
         Ok(task)
     }
 }
@@ -148,11 +134,11 @@ enum OverwriteMode {
 /// Execute the generate checksums tasks.
 pub struct GenerateTask {
     tasks: Vec<JoinHandle<Result<Task>>>,
-    input_file_name: String,
     overwrite: OverwriteMode,
     existing_output: Option<SumsFile>,
     reader: Option<Box<dyn SharedReader + Send>>,
     write: bool,
+    object_sums: Box<dyn ObjectSums + Send>,
 }
 
 impl GenerateTask {
@@ -183,7 +169,7 @@ impl GenerateTask {
         self
     }
 
-    fn add_generate_tasks_direct(mut self, checksums: HashSet<Ctx>) -> Self {
+    fn add_generate_tasks(mut self, checksums: HashSet<Ctx>) -> Self {
         for checksum in checksums {
             self = self.add_generate_task(checksum);
         }
@@ -191,10 +177,11 @@ impl GenerateTask {
     }
 
     /// Spawns tasks for a series of checksums.
-    pub fn add_generate_tasks(mut self, mut checksums: HashSet<Ctx>) -> Result<Self> {
+    pub fn add_tasks(mut self, mut checksums: HashSet<Ctx>) -> Result<Self> {
         let existing = self.existing_output.as_ref();
 
         match self.overwrite {
+            // If verifying, add existing checksums into the set that needs to be generated.
             OverwriteMode::Verify => {
                 existing
                     .map(|file| {
@@ -204,12 +191,25 @@ impl GenerateTask {
                         Ok::<_, Error>(())
                     })
                     .transpose()?;
+            }
+            // Otherwise, if unspecified, remove existing checksums to not re-compute them.
+            OverwriteMode::None => {
+                existing
+                    .map(|file| {
+                        for name in file.checksums.keys() {
+                            checksums.remove(name);
+                        }
+                        Ok::<_, Error>(())
+                    })
+                    .transpose()?;
+            }
+            // If it's overwriting, just use the checksums as specified on the command line.
+            _ => {}
+        }
 
-                self = self.add_generate_tasks_direct(checksums);
-            }
-            OverwriteMode::Overwrite | OverwriteMode::None => {
-                self = self.add_generate_tasks_direct(checksums);
-            }
+        // Only perform generate tasks if there is something to do.
+        if !checksums.is_empty() {
+            self = self.add_generate_tasks(checksums).add_reader_task()?;
         }
 
         Ok(self)
@@ -251,11 +251,7 @@ impl GenerateTask {
             .flatten();
 
         let checksums = BTreeMap::from_iter(checksums);
-        let new_file = SumsFile::new(
-            BTreeSet::from_iter(vec![State::try_from(self.input_file_name).await?]),
-            Some(file_size),
-            checksums,
-        );
+        let new_file = SumsFile::new(Some(file_size), checksums);
 
         let output = match self.existing_output {
             Some(file) if !matches!(self.overwrite, OverwriteMode::Overwrite) => {
@@ -264,8 +260,14 @@ impl GenerateTask {
             _ => new_file,
         };
 
+        if output.checksums.is_empty() {
+            return Err(GenerateError(
+                "no checksums were generated because they may not have been specified".to_string(),
+            ));
+        }
+
         if self.write {
-            output.write().await?;
+            self.object_sums.write_sums_file(&output).await?;
         }
 
         Ok(output)
@@ -307,11 +309,12 @@ impl SumCtxPairs {
     }
 
     /// Get the additional checksums required from a group of comparables sums files.
-    pub fn from_comparable(files: Vec<SumsFile>) -> Result<Option<Self>> {
+    pub fn from_comparable(files: CheckObjects) -> Result<Option<Self>> {
         // Get the checksum which contains the most amount of occurrences across groups of sums files.
         let file_ctx = files
+            .0
             .iter()
-            .flat_map(|file| file.checksums.keys().cloned())
+            .flat_map(|(file, _)| file.checksums.keys().cloned())
             .fold(BTreeMap::new(), |mut map, val| {
                 // Count occurrences
                 map.entry(val).and_modify(|count| *count += 1).or_insert(1);
@@ -324,16 +327,17 @@ impl SumCtxPairs {
         if let Some(mut file_ctx) = file_ctx {
             // Use the checksum for one of the elements in the group.
             let ctxs = files
+                .0
                 .into_iter()
-                .flat_map(|mut file| {
+                .flat_map(|(file, state)| {
                     // If the sums group already contains this checksum, skip.
                     if file.checksums.contains_key(&file_ctx) {
                         return None;
                     }
                     file_ctx.set_file_size(file.size);
 
-                    let first = file.state.pop_first();
-                    first.map(|state| SumCtxPair::new(state.name, file_ctx.clone()))
+                    let first = state.into_iter().next();
+                    first.map(|state| SumCtxPair::new(state.0.location(), file_ctx.clone()))
                 })
                 .collect();
 
@@ -359,13 +363,16 @@ pub(crate) mod test {
         EXPECTED_SHA256_SUM,
     };
     use crate::checksum::standard::StandardCtx;
+    use crate::cloud::file::FileBuilder;
+    use crate::reader::channel::test::channel_reader;
     use crate::task::check::test::write_test_files_not_comparable;
     use crate::task::check::{CheckTaskBuilder, GroupBy};
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
     use crate::Endianness;
     use anyhow::Result;
-    use std::collections::BTreeSet;
-    use tempfile::{tempdir, TempDir};
+    use std::path::Path;
+    use tempfile::tempdir;
+    use tokio::fs::File;
 
     #[tokio::test]
     async fn test_sum_ctx_pairs() -> Result<()> {
@@ -373,7 +380,7 @@ pub(crate) mod test {
         let files = write_test_files_not_comparable(tmp).await?;
 
         let check = CheckTaskBuilder::default()
-            .with_input_files(files.iter().map(|state| state.name.to_string()).collect())
+            .with_input_files(files.iter().map(|name| name.to_string()).collect())
             .with_group_by(GroupBy::Comparability)
             .build()
             .await?;
@@ -384,7 +391,7 @@ pub(crate) mod test {
         assert_eq!(
             result,
             vec![SumCtxPair::new(
-                files.first().unwrap().clone().name,
+                files.first().unwrap().to_string(),
                 Ctx::Regular(StandardCtx::CRC32C(0, Endianness::BigEndian))
             )]
             .into()
@@ -396,7 +403,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_generate_overwrite() -> Result<()> {
         let tmp = tempdir()?;
-        let name = write_test_files(tmp).await?;
+        let name = write_test_files(tmp.path()).await?;
 
         test_generate(
             name,
@@ -411,7 +418,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_generate_verify() -> Result<()> {
         let tmp = tempdir()?;
-        let name = write_test_files(tmp).await?;
+        let name = write_test_files(tmp.path()).await?;
 
         test_generate(
             name,
@@ -426,7 +433,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_generate_no_verify() -> Result<()> {
         let tmp = tempdir()?;
-        let name = write_test_files(tmp).await?;
+        let name = write_test_files(tmp.path()).await?;
 
         test_generate(
             name,
@@ -439,22 +446,30 @@ pub(crate) mod test {
     }
 
     pub(crate) async fn generate_for(
-        state: State,
+        name: &str,
         tasks: Vec<&str>,
         overwrite: bool,
         verify: bool,
     ) -> Result<SumsFile> {
-        TestFileBuilder::default().generate_test_defaults()?;
+        let test_file = TestFileBuilder::default().generate_test_defaults()?;
 
-        let tasks: Vec<Ctx> = tasks
+        let file = File::open(test_file).await?;
+        let reader = channel_reader(file).await;
+
+        let mut tasks: Vec<Ctx> = tasks
             .into_iter()
             .map(|task| Ok(task.parse()?))
             .collect::<Result<Vec<_>>>()?;
 
+        tasks
+            .iter_mut()
+            .for_each(|task| task.set_file_size(Some(TEST_FILE_SIZE)));
+
         Ok(GenerateTaskBuilder::default()
-            .with_input_file_name(state.name)
+            .with_input_file_name(name.to_string())
             .with_overwrite(overwrite)
             .with_verify(verify)
+            .with_reader(reader)
             .with_context(tasks)
             .build()
             .await?
@@ -463,15 +478,14 @@ pub(crate) mod test {
     }
 
     async fn test_generate(
-        state: State,
+        name: String,
         overwrite: bool,
         verify: bool,
         tasks: Vec<&str>,
         md5: &str,
     ) -> Result<()> {
-        let file = generate_for(state.clone(), tasks, overwrite, verify).await?;
+        let file = generate_for(&name, tasks, overwrite, verify).await?;
 
-        assert_eq!(file.state, BTreeSet::from_iter(vec![state]));
         assert_eq!(file.size, Some(TEST_FILE_SIZE));
         assert_eq!(
             file.checksums[&"md5".parse()?],
@@ -510,18 +524,20 @@ pub(crate) mod test {
         Ok(())
     }
 
-    async fn write_test_files(tmp: TempDir) -> Result<State, Error> {
-        let name = tmp.path().to_string_lossy().to_string() + "name";
-        let name = State::try_from(name).await?;
+    async fn write_test_files(tmp: &Path) -> Result<String, Error> {
+        let name = tmp.join("name").to_string_lossy().to_string();
         let existing = SumsFile::new(
-            BTreeSet::from_iter(vec![name.clone()]),
             Some(TEST_FILE_SIZE),
             BTreeMap::from_iter(vec![(
                 "md5".parse()?,
                 Checksum::new("123".to_string(), None),
             )]),
         );
-        existing.write().await?;
+        FileBuilder::default()
+            .with_file(name.to_string())
+            .build()?
+            .write_sums(&existing)
+            .await?;
 
         Ok(name)
     }
