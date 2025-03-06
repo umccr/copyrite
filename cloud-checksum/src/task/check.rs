@@ -2,8 +2,8 @@
 //!
 
 use crate::checksum::file::SumsFile;
-use crate::cloud::{ObjectSums, ObjectSumsBuilder};
 use crate::error::{Error, Result};
+use crate::reader::{ObjectSums, ObjectSumsBuilder};
 use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -258,8 +258,8 @@ impl CheckOutput {
 pub(crate) mod test {
     use super::*;
     use crate::checksum::file::Checksum;
-    use crate::cloud::file::FileBuilder;
     use crate::error::Error;
+    use crate::reader::file::FileBuilder;
     use crate::test::TEST_FILE_SIZE;
     use anyhow::Result;
     use std::collections::BTreeMap;

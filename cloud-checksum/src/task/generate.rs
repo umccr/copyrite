@@ -3,11 +3,10 @@
 
 use crate::checksum::file::{Checksum, PartChecksum, PartChecksums, SumsFile};
 use crate::checksum::Ctx;
-use crate::cloud::{ObjectSums, ObjectSumsBuilder};
 use crate::error::Error::GenerateError;
 use crate::error::{Error, Result};
 use crate::reader::channel::ChannelReader;
-use crate::reader::SharedReader;
+use crate::reader::{ObjectSums, ObjectSumsBuilder, SharedReader};
 use crate::task::check::CheckObjects;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use futures_util::future::join_all;
@@ -363,8 +362,8 @@ pub(crate) mod test {
         EXPECTED_SHA256_SUM,
     };
     use crate::checksum::standard::StandardCtx;
-    use crate::cloud::file::FileBuilder;
     use crate::reader::channel::test::channel_reader;
+    use crate::reader::file::FileBuilder;
     use crate::task::check::test::write_test_files_not_comparable;
     use crate::task::check::{CheckTaskBuilder, GroupBy};
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};

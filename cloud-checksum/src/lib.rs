@@ -2,7 +2,6 @@ use error::Result;
 use std::fmt::{Display, Formatter};
 
 pub mod checksum;
-pub mod cloud;
 pub mod error;
 pub mod reader;
 pub mod task;
@@ -11,9 +10,9 @@ pub mod task;
 pub mod test;
 
 use crate::checksum::Ctx;
-use crate::cloud::aws::S3Builder;
 use crate::error::Error;
 use crate::error::Error::ParseError;
+use crate::reader::aws::S3Builder;
 use crate::task::check::GroupBy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::Duration;

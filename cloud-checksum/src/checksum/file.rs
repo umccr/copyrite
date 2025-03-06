@@ -2,9 +2,9 @@
 //!
 
 use crate::checksum::Ctx;
-use crate::cloud::{ObjectSums, ObjectSumsBuilder};
 use crate::error::Error::SumsFileError;
 use crate::error::{Error, Result};
+use crate::reader::{ObjectSums, ObjectSumsBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string};
 use std::cmp::Ordering;

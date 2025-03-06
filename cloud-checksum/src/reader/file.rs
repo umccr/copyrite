@@ -2,9 +2,9 @@
 //!
 
 use crate::checksum::file::SumsFile;
-use crate::cloud::ObjectSums;
 use crate::error::Error::ParseError;
 use crate::error::Result;
+use crate::reader::ObjectSums;
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt};
