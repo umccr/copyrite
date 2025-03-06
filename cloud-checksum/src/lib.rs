@@ -2,7 +2,6 @@ use error::Result;
 use std::fmt::{Display, Formatter};
 
 pub mod checksum;
-pub mod cloud;
 pub mod error;
 pub mod reader;
 pub mod task;
@@ -11,7 +10,6 @@ pub mod task;
 pub mod test;
 
 use crate::checksum::Ctx;
-use crate::cloud::aws::S3Builder;
 use crate::error::Error;
 use crate::error::Error::ParseError;
 use crate::task::check::GroupBy;
@@ -42,16 +40,12 @@ impl Commands {
     pub fn parse_args() -> Result<Self> {
         let mut args = Self::parse();
         if let Subcommands::Generate {
-            input,
-            checksum,
-            verify,
-            ..
+            checksum, verify, ..
         } = &mut args.commands
         {
             // For S3 objects, passing no checksums is valid as metadata can be used, otherwise
             // it's an error if not verifying the data.
-            if checksum.is_empty() && !*verify && !input.iter().all(|input| S3Builder::is_s3(input))
-            {
+            if checksum.is_empty() && !*verify {
                 return Err(ParseError(
                     "some checksums must be specified if using file based objects and not verify existing sums".to_string(),
                 ));

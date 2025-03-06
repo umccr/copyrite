@@ -2,9 +2,9 @@
 //!
 
 use crate::checksum::Ctx;
-use crate::cloud::{ObjectSums, ObjectSumsBuilder};
 use crate::error::Error::SumsFileError;
 use crate::error::{Error, Result};
+use crate::reader::{ObjectSums, ObjectSumsBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string};
 use std::cmp::Ordering;
@@ -305,17 +305,17 @@ impl From<Vec<(Option<u64>, Option<String>)>> for PartChecksums {
 pub(crate) mod test {
     use super::*;
     use crate::checksum::aws_etag::test::expected_md5_1gib;
-    use crate::checksum::standard::test::EXPECTED_MD5_SUM;
+    use crate::checksum::standard::test::expected_md5_sum;
     use serde_json::{from_value, json, to_value, Value};
 
     const EXPECTED_ETAG: &str = "1c3490f45b0cdc4299a128410def3a1d-b";
 
     #[test]
     fn serialize_output_file() -> Result<()> {
-        let expected_md5 = EXPECTED_MD5_SUM;
+        let expected_md5 = expected_md5_sum();
         let value = expected_output_file(expected_md5);
         let result = to_value(&value)?;
-        let expected = expected_output_json(expected_md5);
+        let expected = expected_output_json(expected_md5, "md5-aws-0");
 
         assert_eq!(result, expected);
 
@@ -324,8 +324,8 @@ pub(crate) mod test {
 
     #[test]
     fn deserialize_output_file() -> Result<()> {
-        let expected_md5 = EXPECTED_MD5_SUM;
-        let value = expected_output_json(expected_md5);
+        let expected_md5 = expected_md5_sum();
+        let value = expected_output_json(expected_md5, "md5-aws-123b");
         let result: SumsFile = from_value(value)?;
         let expected = expected_output_file(expected_md5);
 
@@ -336,7 +336,7 @@ pub(crate) mod test {
 
     #[test]
     fn is_same() -> Result<()> {
-        let expected_md5 = EXPECTED_MD5_SUM;
+        let expected_md5 = expected_md5_sum();
         let file_one = expected_output_file(expected_md5);
         let mut file_two = file_one.clone();
         let mut aws: Ctx = "md5-aws-123b".parse()?;
@@ -363,7 +363,7 @@ pub(crate) mod test {
 
     #[test]
     fn comparable() -> Result<()> {
-        let expected_md5 = EXPECTED_MD5_SUM;
+        let expected_md5 = expected_md5_sum();
         let file_one = expected_output_file(expected_md5);
         let mut file_two = file_one.clone();
 
@@ -390,7 +390,7 @@ pub(crate) mod test {
 
     #[test]
     fn merge() -> Result<()> {
-        let expected_md5 = EXPECTED_MD5_SUM;
+        let expected_md5 = expected_md5_sum();
         let mut file_one = expected_output_file(expected_md5);
 
         let mut aws_one: Ctx = "aws-etag-123b".parse()?;
@@ -456,11 +456,11 @@ pub(crate) mod test {
         SumsFile::new(Some(123), BTreeMap::from_iter(checksums))
     }
 
-    fn expected_output_json(expected_md5: &str) -> Value {
+    fn expected_output_json(expected_md5: &str, sum: &str) -> Value {
         json!({
             "version": OUTPUT_FILE_VERSION,
             "size": 123,
-            "md5-aws-123b": {
+            sum: {
                 "checksum": EXPECTED_ETAG,
                 "part-checksums": [{
                     "part-size": 1,

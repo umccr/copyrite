@@ -3,11 +3,10 @@
 
 use crate::checksum::file::{Checksum, PartChecksum, PartChecksums, SumsFile};
 use crate::checksum::Ctx;
-use crate::cloud::{ObjectSums, ObjectSumsBuilder};
 use crate::error::Error::GenerateError;
 use crate::error::{Error, Result};
 use crate::reader::channel::ChannelReader;
-use crate::reader::SharedReader;
+use crate::reader::{ObjectSums, ObjectSumsBuilder, SharedReader};
 use crate::task::check::CheckObjects;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use futures_util::future::join_all;
@@ -234,9 +233,7 @@ impl GenerateTask {
                         let part_checksums = ctx.part_checksums().map(|sums| {
                             PartChecksums::new(
                                 sums.into_iter()
-                                    .map(|(part_size, sum)| {
-                                        PartChecksum::new(Some(part_size), Some(sum))
-                                    })
+                                    .map(|sum| PartChecksum::new(ctx.part_size(), Some(sum)))
                                     .collect::<Vec<_>>(),
                             )
                         });
@@ -359,12 +356,12 @@ pub(crate) mod test {
     use super::*;
     use crate::checksum::aws_etag::test::expected_md5_1gib;
     use crate::checksum::standard::test::{
-        EXPECTED_CRC32C_BE_SUM, EXPECTED_CRC32_BE_SUM, EXPECTED_MD5_SUM, EXPECTED_SHA1_SUM,
-        EXPECTED_SHA256_SUM,
+        expected_crc32_be, expected_crc32c_be, expected_md5_sum, expected_sha1_sum,
+        expected_sha256_sum,
     };
     use crate::checksum::standard::StandardCtx;
-    use crate::cloud::file::FileBuilder;
     use crate::reader::channel::test::channel_reader;
+    use crate::reader::file::FileBuilder;
     use crate::task::check::test::write_test_files_not_comparable;
     use crate::task::check::{CheckTaskBuilder, GroupBy};
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
@@ -409,7 +406,7 @@ pub(crate) mod test {
             true,
             false,
             vec!["sha1", "sha256", "md5", "aws-etag-1gib", "crc32", "crc32c"],
-            EXPECTED_MD5_SUM,
+            expected_md5_sum(),
         )
         .await
     }
@@ -424,7 +421,7 @@ pub(crate) mod test {
             false,
             true,
             vec!["sha1", "sha256", "aws-etag-1gib", "crc32", "crc32c"],
-            EXPECTED_MD5_SUM,
+            expected_md5_sum(),
         )
         .await
     }
@@ -492,11 +489,11 @@ pub(crate) mod test {
         );
         assert_eq!(
             file.checksums[&"sha1".parse()?],
-            Checksum::new(EXPECTED_SHA1_SUM.to_string(), None)
+            Checksum::new(expected_sha1_sum().to_string(), None)
         );
         assert_eq!(
             file.checksums[&"sha256".parse()?],
-            Checksum::new(EXPECTED_SHA256_SUM.to_string(), None)
+            Checksum::new(expected_sha256_sum().to_string(), None)
         );
         assert_eq!(
             file.checksums[&"md5-aws-1073741824b".parse()?],
@@ -513,11 +510,11 @@ pub(crate) mod test {
         );
         assert_eq!(
             file.checksums[&"crc32".parse()?],
-            Checksum::new(EXPECTED_CRC32_BE_SUM.to_string(), None)
+            Checksum::new(expected_crc32_be().to_string(), None)
         );
         assert_eq!(
             file.checksums[&"crc32c".parse()?],
-            Checksum::new(EXPECTED_CRC32C_BE_SUM.to_string(), None)
+            Checksum::new(expected_crc32c_be().to_string(), None)
         );
 
         Ok(())
