@@ -11,6 +11,7 @@ pub mod task;
 pub mod test;
 
 use crate::checksum::Ctx;
+use crate::cloud::aws::S3Builder;
 use crate::error::Error;
 use crate::error::Error::ParseError;
 use crate::task::check::GroupBy;
@@ -41,16 +42,19 @@ impl Commands {
     pub fn parse_args() -> Result<Self> {
         let mut args = Self::parse();
         if let Subcommands::Generate {
-            _is_checksum_defaulted: is_checksum_defaulted,
+            input,
             checksum,
+            verify,
             ..
         } = &mut args.commands
         {
-            // This checks to see if something was passed on the command line for the checksum or
-            // if the default value has been used.
-            if checksum.is_empty() {
-                *is_checksum_defaulted = true;
-                checksum.push(Ctx::from_str("md5")?);
+            // For S3 objects, passing no checksums is valid as metadata can be used, otherwise
+            // it's an error if not verifying the data.
+            if checksum.is_empty() && !*verify && !input.iter().all(|input| S3Builder::is_s3(input))
+            {
+                return Err(ParseError(
+                    "some checksums must be specified if using file based objects and not verify existing sums".to_string(),
+                ));
             }
         }
         Ok(args)
@@ -83,10 +87,10 @@ pub enum Subcommands {
         /// parts.
         ///
         /// This option supports file-based objects and objects in S3 by using the
-        /// `S3://bucket/object` syntax. Defaults to `md5` for file-based objects if unspecified
-        /// and whatever is available in S3 metadata for S3 objects. This means that is no checksums
-        /// are specified with S3 objects, the object will not be read to compute the checksum, and
-        /// will instead use existing ETags and additional checksums.
+        /// `S3://bucket/object` syntax. This option must be specified for file-based objects. It
+        /// does not need to be specified for S3 objects as it will use metadata by default. This
+        /// means that if no checksums are specified with S3 objects, the object will not be read
+        /// to compute the checksum, and will instead use existing ETags and additional checksums.
         #[arg(value_delimiter = ',', short, long)]
         checksum: Vec<Ctx>,
         /// Generate any missing checksums that would be required to confirm whether two files are
@@ -98,8 +102,7 @@ pub enum Subcommands {
         /// Overwrite the sums file. By default, only checksums that are missing are computed and
         /// added to an existing sums file. Any existing checksums are preserved (even if not
         /// specified in --checksums). This option allows overwriting any existing sums file. This
-        /// will recompute all checksums specified. This option will also read objects on S3 to
-        /// compute checksums, even if the metadata for that checksum exists.
+        /// will recompute all checksums specified.
         #[arg(short, long, env, conflicts_with = "verify")]
         force_overwrite: bool,
         /// Verify the contents of existing sums files when generating checksums. By default,
@@ -109,9 +112,6 @@ pub enum Subcommands {
         /// if the metadata for that checksum exists.
         #[arg(short, long, env, conflicts_with = "force_overwrite")]
         verify: bool,
-        /// Not visible to user, used for default checksum logic.
-        #[clap(skip)]
-        _is_checksum_defaulted: bool,
     },
     /// Confirm a set of files is identical. This returns sets of files that are identical.
     /// Which means that more than two files can be checked at the same time.
