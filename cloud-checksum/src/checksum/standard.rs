@@ -70,11 +70,11 @@ impl FromStr for StandardCtx {
 
         let checksum = Checksum::from_str(s)?;
         let ctx = match checksum {
-            Checksum::MD5 => Self::MD5(Some(md5::Md5::new())),
-            Checksum::SHA1 => Self::SHA1(Some(sha1::Sha1::new())),
-            Checksum::SHA256 => Self::SHA256(Some(sha2::Sha256::new())),
-            Checksum::CRC32 => Self::CRC32(Some(crc32fast::Hasher::new()), Endianness::BigEndian),
-            Checksum::CRC32C => Self::CRC32C(0, Endianness::BigEndian),
+            Checksum::MD5 => Self::md5(),
+            Checksum::SHA1 => Self::sha1(),
+            Checksum::SHA256 => Self::sha256(),
+            Checksum::CRC32 => Self::crc32(),
+            Checksum::CRC32C => Self::crc32c(),
             _ => return Err(ParseError("unsupported checksum algorithm".to_string())),
         };
         Ok(ctx)
@@ -115,24 +115,45 @@ impl Display for StandardCtx {
 }
 
 impl StandardCtx {
+    /// Create the MD5 variant.
+    pub fn md5() -> Self {
+        Self::MD5(Some(md5::Md5::new()))
+    }
+
+    /// Create the SHA1 variant.
+    pub fn sha1() -> Self {
+        Self::SHA1(Some(sha1::Sha1::new()))
+    }
+
+    /// Create the SHA256 variant.
+    pub fn sha256() -> Self {
+        Self::SHA256(Some(sha2::Sha256::new()))
+    }
+
+    /// Create the CRC32 variant.
+    pub fn crc32() -> Self {
+        Self::CRC32(Some(crc32fast::Hasher::new()), Endianness::BigEndian)
+    }
+
+    /// Create the CRC32C variant.
+    pub fn crc32c() -> Self {
+        Self::CRC32C(0, Endianness::BigEndian)
+    }
+
     /// Parse into a `ChecksumCtx` for values that use endianness. Uses an -le suffix for
     /// little-endian and -be for big-endian.
     pub fn parse_endianness(s: &str) -> Result<Option<Self>> {
         if let Some(s) = s.strip_suffix("-le") {
             let ctx = match Checksum::from_str(s)? {
-                Checksum::CRC32 => {
-                    StandardCtx::CRC32(Some(crc32fast::Hasher::new()), Endianness::LittleEndian)
-                }
-                Checksum::CRC32C => StandardCtx::CRC32C(0, Endianness::LittleEndian),
+                Checksum::CRC32 => Self::crc32().with_endianness(Endianness::LittleEndian),
+                Checksum::CRC32C => Self::crc32c().with_endianness(Endianness::LittleEndian),
                 _ => return Err(ParseError("invalid suffix -le for checksum".to_string())),
             };
             Ok(Some(ctx))
         } else if let Some(s) = s.strip_suffix("-be") {
             let ctx = match Checksum::from_str(s)? {
-                Checksum::CRC32 => {
-                    StandardCtx::CRC32(Some(crc32fast::Hasher::new()), Endianness::BigEndian)
-                }
-                Checksum::CRC32C => StandardCtx::CRC32C(0, Endianness::BigEndian),
+                Checksum::CRC32 => Self::crc32(),
+                Checksum::CRC32C => Self::crc32c(),
                 _ => return Err(ParseError("invalid suffix -be for checksum".to_string())),
             };
             Ok(Some(ctx))
@@ -191,13 +212,11 @@ impl StandardCtx {
     /// Reset the checksum state.
     pub fn reset(&self) -> Self {
         match self {
-            StandardCtx::MD5(_) => StandardCtx::MD5(Some(md5::Md5::new())),
-            StandardCtx::SHA1(_) => StandardCtx::SHA1(Some(sha1::Sha1::new())),
-            StandardCtx::SHA256(_) => StandardCtx::SHA256(Some(sha2::Sha256::new())),
-            StandardCtx::CRC32(_, endianness) => {
-                StandardCtx::CRC32(Some(crc32fast::Hasher::new()), *endianness)
-            }
-            StandardCtx::CRC32C(_, endianness) => StandardCtx::CRC32C(0, *endianness),
+            StandardCtx::MD5(_) => Self::md5(),
+            StandardCtx::SHA1(_) => Self::sha1(),
+            StandardCtx::SHA256(_) => Self::sha256(),
+            StandardCtx::CRC32(_, endianness) => Self::crc32().with_endianness(*endianness),
+            StandardCtx::CRC32C(_, endianness) => Self::crc32c().with_endianness(*endianness),
             StandardCtx::QuickXor => todo!(),
         }
     }

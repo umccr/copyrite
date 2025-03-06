@@ -476,7 +476,7 @@ pub(crate) mod test {
 
     fn assert_update_part_sizes(part_sizes: Vec<u64>, file_size: u64, expected: Vec<u64>) {
         let mut ctx = AWSETagCtx::new(
-            StandardCtx::MD5(Default::default()),
+            StandardCtx::md5(),
             PartMode::PartSizes(part_sizes),
             Some(file_size),
         );

@@ -9,7 +9,6 @@ use crate::checksum::Ctx;
 use crate::cloud::ObjectSums;
 use crate::error::Error::{AwsError, ParseError};
 use crate::error::{Error, Result};
-use crate::Endianness;
 use aws_config::{load_defaults, BehaviorVersion};
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::get_object_attributes::GetObjectAttributesOutput;
@@ -408,21 +407,15 @@ impl S3 {
         let mut sums_file = SumsFile::default().with_size(file_size);
 
         // Add the individual checksums for each type.
-        self.add_checksum(&mut sums_file, StandardCtx::MD5(Default::default()))
+        self.add_checksum(&mut sums_file, StandardCtx::md5())
             .await?;
-        self.add_checksum(
-            &mut sums_file,
-            StandardCtx::CRC32(Default::default(), Endianness::LittleEndian),
-        )
-        .await?;
-        self.add_checksum(
-            &mut sums_file,
-            StandardCtx::CRC32C(Default::default(), Endianness::LittleEndian),
-        )
-        .await?;
-        self.add_checksum(&mut sums_file, StandardCtx::SHA1(Default::default()))
+        self.add_checksum(&mut sums_file, StandardCtx::crc32())
             .await?;
-        self.add_checksum(&mut sums_file, StandardCtx::SHA256(Default::default()))
+        self.add_checksum(&mut sums_file, StandardCtx::crc32c())
+            .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::sha1())
+            .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::sha256())
             .await?;
 
         if sums_file.checksums.is_empty() {
