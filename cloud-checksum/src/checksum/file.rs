@@ -185,7 +185,7 @@ impl SumsFile {
                 // Two checksums are the same if they have the same top-level checksum. Since the
                 // top level checksum encodes part information for AWS sums, there is no need to
                 // compare the part checksums.
-                if checksum.checksum == other_checksum.checksum {
+                if checksum == other_checksum {
                     return true;
                 }
             }
@@ -234,70 +234,12 @@ impl TryFrom<&[u8]> for SumsFile {
 /// The output of a checksum.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "kebab-case")]
-pub struct Checksum {
-    pub(crate) checksum: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) part_checksums: Option<PartChecksums>,
-}
+pub struct Checksum(String);
 
 impl Checksum {
     /// Create an output checksum.
-    pub fn new(checksum: String, part_checksums: Option<PartChecksums>) -> Self {
-        Self {
-            checksum,
-            part_checksums,
-        }
-    }
-}
-
-/// A part checksum with the part size.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub struct PartChecksum {
-    pub(crate) part_size: Option<u64>,
-    pub(crate) part_checksum: Option<String>,
-}
-
-impl PartChecksum {
-    /// Create a part checksum.
-    pub fn new(part_size: Option<u64>, part_checksum: Option<String>) -> Self {
-        Self {
-            part_size,
-            part_checksum,
-        }
-    }
-}
-
-/// A list of part checksums.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub struct PartChecksums(Vec<PartChecksum>);
-
-impl PartChecksums {
-    /// Create a new part checksums.
-    pub fn new(part_checksums: Vec<PartChecksum>) -> Self {
-        Self(part_checksums)
-    }
-
-    /// Get the inner vector of values.
-    pub fn into_inner(self) -> Vec<PartChecksum> {
-        self.0
-    }
-
-    /// Get a reference to the inner values.
-    pub fn get_ref(&self) -> &[PartChecksum] {
-        &self.0
-    }
-}
-
-impl From<Vec<(Option<u64>, Option<String>)>> for PartChecksums {
-    fn from(part_sums: Vec<(Option<u64>, Option<String>)>) -> Self {
-        Self::new(
-            part_sums
-                .into_iter()
-                .map(|(part_size, part_sum)| PartChecksum::new(part_size, part_sum))
-                .collect(),
-        )
+    pub fn new(checksum: String) -> Self {
+        Self(checksum)
     }
 }
 
@@ -312,10 +254,9 @@ pub(crate) mod test {
 
     #[test]
     fn serialize_output_file() -> Result<()> {
-        let expected_md5 = EXPECTED_MD5_SUM;
-        let value = expected_output_file(expected_md5);
+        let value = expected_output_file();
         let result = to_value(&value)?;
-        let expected = expected_output_json(expected_md5);
+        let expected = expected_output_json();
 
         assert_eq!(result, expected);
 
@@ -324,10 +265,9 @@ pub(crate) mod test {
 
     #[test]
     fn deserialize_output_file() -> Result<()> {
-        let expected_md5 = EXPECTED_MD5_SUM;
-        let value = expected_output_json(expected_md5);
+        let value = expected_output_json();
         let result: SumsFile = from_value(value)?;
-        let expected = expected_output_file(expected_md5);
+        let expected = expected_output_file();
 
         assert_eq!(result, expected);
 
@@ -336,25 +276,20 @@ pub(crate) mod test {
 
     #[test]
     fn is_same() -> Result<()> {
-        let expected_md5 = EXPECTED_MD5_SUM;
-        let file_one = expected_output_file(expected_md5);
+        let file_one = expected_output_file();
         let mut file_two = file_one.clone();
         let mut aws: Ctx = "md5-aws-123b".parse()?;
         aws.set_file_size(Some(123));
 
-        file_two.checksums.insert(
-            aws,
-            Checksum::new(
-                EXPECTED_ETAG.to_string(),
-                Some(vec![(Some(123), Some(expected_md5.to_string()))].into()),
-            ),
-        );
+        file_two
+            .checksums
+            .insert(aws, Checksum::new(EXPECTED_ETAG.to_string()));
         assert!(file_one.is_same(&file_two));
 
         let mut file_two = file_one.clone();
         let mut aws: Ctx = "aws-etag-1b".parse()?;
         aws.set_file_size(Some(1));
-        set_checksums(expected_md5, &mut file_two, aws);
+        set_checksums(&mut file_two, aws);
 
         assert!(!file_one.is_same(&file_two));
 
@@ -363,25 +298,20 @@ pub(crate) mod test {
 
     #[test]
     fn comparable() -> Result<()> {
-        let expected_md5 = EXPECTED_MD5_SUM;
-        let file_one = expected_output_file(expected_md5);
+        let file_one = expected_output_file();
         let mut file_two = file_one.clone();
 
         let mut aws: Ctx = "md5-aws-1b".parse()?;
         aws.set_file_size(Some(1));
-        file_two.checksums.insert(
-            aws,
-            Checksum::new(
-                expected_md5_1gib().to_string(),
-                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
-            ),
-        );
+        file_two
+            .checksums
+            .insert(aws, Checksum::new(expected_md5_1gib().to_string()));
         assert!(file_one.comparable(&file_two));
 
         let mut file_two = file_one.clone();
         let mut aws: Ctx = "aws-etag-1b".parse()?;
         aws.set_file_size(Some(1));
-        set_checksums(expected_md5, &mut file_two, aws);
+        set_checksums(&mut file_two, aws);
 
         assert!(!file_one.comparable(&file_two));
 
@@ -391,82 +321,49 @@ pub(crate) mod test {
     #[test]
     fn merge() -> Result<()> {
         let expected_md5 = EXPECTED_MD5_SUM;
-        let mut file_one = expected_output_file(expected_md5);
+        let mut file_one = expected_output_file();
 
         let mut aws_one: Ctx = "aws-etag-123b".parse()?;
         aws_one.set_file_size(Some(123));
-        file_one.checksums.insert(
-            aws_one.clone(),
-            Checksum::new(
-                expected_md5.to_string(),
-                Some(vec![(Some(123), Some(expected_md5.to_string()))].into()),
-            ),
-        );
+        file_one
+            .checksums
+            .insert(aws_one.clone(), Checksum::new(expected_md5.to_string()));
 
-        let mut file_two = expected_output_file(expected_md5);
+        let mut file_two = expected_output_file();
         let mut aws_two: Ctx = "md5-aws-123b".parse()?;
         aws_two.set_file_size(Some(123));
-        set_checksums(expected_md5, &mut file_two, aws_two.clone());
+        set_checksums(&mut file_two, aws_two.clone());
 
         let result = file_one.clone().merge(file_two)?;
         assert_eq!(result.size, file_one.size);
         assert_eq!(
             result.checksums,
             BTreeMap::from_iter(vec![
-                (
-                    aws_two,
-                    Checksum::new(
-                        expected_md5_1gib().to_string(),
-                        Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
-                    ),
-                ),
-                (
-                    aws_one,
-                    Checksum::new(
-                        expected_md5_1gib().to_string(),
-                        Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
-                    )
-                ),
+                (aws_two, Checksum::new(expected_md5_1gib().to_string()),),
+                (aws_one, Checksum::new(expected_md5_1gib().to_string())),
             ])
         );
 
         Ok(())
     }
 
-    fn set_checksums(expected_md5: &str, file_two: &mut SumsFile, aws: Ctx) {
-        file_two.checksums = BTreeMap::from_iter(vec![(
-            aws,
-            Checksum::new(
-                expected_md5_1gib().to_string(),
-                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
-            ),
-        )]);
+    fn set_checksums(file_two: &mut SumsFile, aws: Ctx) {
+        file_two.checksums =
+            BTreeMap::from_iter(vec![(aws, Checksum::new(expected_md5_1gib().to_string()))]);
     }
 
-    fn expected_output_file(expected_md5: &str) -> SumsFile {
+    fn expected_output_file() -> SumsFile {
         let mut aws: Ctx = "md5-aws-123b".parse().unwrap();
         aws.set_file_size(Some(123));
-        let checksums = vec![(
-            aws,
-            Checksum::new(
-                EXPECTED_ETAG.to_string(),
-                Some(vec![(Some(1), Some(expected_md5.to_string()))].into()),
-            ),
-        )];
+        let checksums = vec![(aws, Checksum::new(EXPECTED_ETAG.to_string()))];
         SumsFile::new(Some(123), BTreeMap::from_iter(checksums))
     }
 
-    fn expected_output_json(expected_md5: &str) -> Value {
+    fn expected_output_json() -> Value {
         json!({
             "version": OUTPUT_FILE_VERSION,
             "size": 123,
-            "md5-aws-123b": {
-                "checksum": EXPECTED_ETAG,
-                "part-checksums": [{
-                    "part-size": 1,
-                    "part-checksum": expected_md5
-                }]
-            }
+            "md5-aws-123b": EXPECTED_ETAG,
         })
     }
 }

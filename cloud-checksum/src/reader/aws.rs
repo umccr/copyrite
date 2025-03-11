@@ -2,8 +2,8 @@
 //!
 
 use crate::checksum::aws_etag::{AWSETagCtx, PartMode};
+use crate::checksum::file::Checksum;
 use crate::checksum::file::SumsFile;
-use crate::checksum::file::{Checksum, PartChecksum, PartChecksums};
 use crate::checksum::standard::StandardCtx;
 use crate::checksum::Ctx;
 use crate::error::Error::{AwsError, ParseError};
@@ -250,10 +250,7 @@ impl S3 {
     }
 
     /// Get the AWS checksum parts from `GetObjectAttributes` parts output.
-    pub async fn aws_parts_from_attributes(
-        &mut self,
-        ctx: &StandardCtx,
-    ) -> Result<Option<PartChecksums>> {
+    pub async fn aws_parts_from_attributes(&mut self) -> Result<Option<Vec<Option<u64>>>> {
         let parts = self
             .get_object_attributes()
             .await?
@@ -262,18 +259,7 @@ impl S3 {
                 let parts = parts
                     .parts()
                     .iter()
-                    .map(|part| {
-                        // Decode the part checksum and re-encode it as a hex string.
-                        let part_sum = Self::aws_parts_from_ctx(ctx, part)
-                            .map(|part_sum| Self::decode_sum(ctx, part_sum))
-                            .transpose()?
-                            .map(|sum| ctx.digest_to_string(&sum));
-
-                        Ok(PartChecksum::new(
-                            part.size().map(u64::try_from).transpose()?,
-                            part_sum,
-                        ))
-                    })
+                    .map(|part| Ok(part.size().map(u64::try_from).transpose()?))
                     .collect::<Result<Vec<_>>>()?;
 
                 if parts.is_empty() {
@@ -283,8 +269,7 @@ impl S3 {
                 }
             })
             .transpose()?
-            .flatten()
-            .map(PartChecksums::new);
+            .flatten();
 
         Ok(parts)
     }
@@ -294,7 +279,10 @@ impl S3 {
     /// is useful to determine how to re-calculate an `ETag`. If the exact part sizes are not known
     /// then it's not possible to know for sure that the `ETag` was calculated with equal part sizes
     /// as they are allowed to be different.
-    pub async fn aws_parts_from_head(&mut self, total_parts: u64) -> Result<Option<PartChecksums>> {
+    pub async fn aws_parts_from_head(
+        &mut self,
+        total_parts: u64,
+    ) -> Result<Option<Vec<Option<u64>>>> {
         let mut part_sums = vec![];
 
         for part_number in 1..=total_parts {
@@ -310,10 +298,10 @@ impl S3 {
                 return Ok(None);
             };
 
-            part_sums.push(PartChecksum::new(Some(part_size), None));
+            part_sums.push(Some(part_size));
         }
 
-        Ok(Some(PartChecksums::new(part_sums)))
+        Ok(Some(part_sums))
     }
 
     /// Add checksums to an existing sums file using AWS metadata.
@@ -342,7 +330,7 @@ impl S3 {
         };
 
         // Determine the parts if they exist.
-        let parts = self.aws_parts_from_attributes(&ctx).await?;
+        let parts = self.aws_parts_from_attributes().await?;
         // If there are no parts, try and find them using the total part count and head object.
         // This should only trigger on `ETag`s.
         let parts = match (parts, total_parts) {
@@ -360,11 +348,7 @@ impl S3 {
                 // Get the part mode from the individual part sizes. This will be used to format
                 // the output.
                 let part_mode = if let Some(ref parts) = parts {
-                    let parts = parts
-                        .get_ref()
-                        .iter()
-                        .filter_map(|part| part.part_size)
-                        .collect::<Vec<u64>>();
+                    let parts = parts.iter().filter_map(|part| *part).collect::<Vec<u64>>();
                     PartMode::PartSizes(parts)
                 } else {
                     PartMode::PartNumber(total_parts)
@@ -378,7 +362,7 @@ impl S3 {
             _ => Ctx::Regular(ctx),
         };
 
-        let checksum = Checksum::new(ctx.digest_to_string(&sum), parts);
+        let checksum = Checksum::new(ctx.digest_to_string(&sum));
         sums_file.add_checksum(ctx, checksum);
 
         Ok(())
