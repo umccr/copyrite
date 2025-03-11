@@ -9,8 +9,11 @@ use crate::checksum::aws_etag::AWSETagCtx;
 use crate::checksum::standard::StandardCtx;
 use crate::error::{Error, Result};
 use futures_util::{pin_mut, Stream, StreamExt};
+use serde::de::Error as SerdeError;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
+use std::result;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -19,6 +22,28 @@ use std::sync::Arc;
 pub enum Ctx {
     Regular(StandardCtx),
     AWSEtag(AWSETagCtx),
+}
+
+impl<'de> Deserialize<'de> for Ctx {
+    /// Implement deserialize using `FromStr`.
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(D::Error::custom)
+    }
+}
+
+impl Serialize for Ctx {
+    /// Implement serialize using `ToString`.
+    fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        String::serialize(&self.to_string(), serializer)
+    }
 }
 
 impl Ctx {
@@ -111,19 +136,17 @@ pub(crate) mod test {
     use super::*;
     use crate::reader::channel::test::channel_reader;
     use crate::reader::SharedReader;
-    use crate::task::generate::file_size;
-    use crate::test::TestFileBuilder;
+    use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
     use anyhow::Result;
     use tokio::fs::File;
     use tokio::join;
 
     pub(crate) async fn test_checksum(checksum: &str, expected: &str) -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
-        let file_size = file_size(&test_file).await;
         let mut reader = channel_reader(File::open(test_file).await?).await;
 
         let mut checksum = Ctx::from_str(checksum)?;
-        checksum.set_file_size(file_size);
+        checksum.set_file_size(Some(TEST_FILE_SIZE));
 
         let stream = reader.as_stream();
         let task = tokio::spawn(async move { reader.read_task().await });

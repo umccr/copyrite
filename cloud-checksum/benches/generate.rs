@@ -1,28 +1,25 @@
 use cloud_checksum::reader::channel::ChannelReader;
-use cloud_checksum::task::generate::GenerateTask;
+use cloud_checksum::task::generate::GenerateTaskBuilder;
 use cloud_checksum::test::TestFileBuilder;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use std::collections::HashSet;
 use std::path::Path;
 use tokio::fs::File;
 use tokio::runtime::Runtime;
 
 async fn channel_reader(path: &Path) {
-    let mut reader = ChannelReader::new(File::open(path).await.unwrap(), 100);
+    let reader = ChannelReader::new(File::open(path).await.unwrap(), 100);
 
-    let result = GenerateTask::default()
-        .add_generate_tasks(
-            HashSet::from_iter(vec![
-                "sha1".parse().unwrap(),
-                "sha256".parse().unwrap(),
-                "md5".parse().unwrap(),
-                "crc32".parse().unwrap(),
-                "crc32c".parse().unwrap(),
-            ]),
-            &mut reader,
-        )
-        .unwrap()
-        .add_reader_task(reader)
+    let result = GenerateTaskBuilder::default()
+        .with_context(vec![
+            "sha1".parse().unwrap(),
+            "sha256".parse().unwrap(),
+            "md5".parse().unwrap(),
+            "crc32".parse().unwrap(),
+            "crc32c".parse().unwrap(),
+        ])
+        .with_reader(reader)
+        .build()
+        .await
         .unwrap()
         .run()
         .await

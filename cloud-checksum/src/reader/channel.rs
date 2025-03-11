@@ -5,6 +5,7 @@ use crate::error::Result;
 use crate::reader::SharedReader;
 use async_stream::stream;
 use futures_util::Stream;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -53,13 +54,14 @@ where
     /// Send data to the channel until the end of the reader is reached. Returns the size of the file.
     pub async fn send_to_end(&mut self) -> Result<u64> {
         let txs = self.txs.drain(..);
+
         let mut size = 0;
         loop {
             // Read data into a buffer.
             let mut buf = vec![0; 1000];
             let n = self.inner.read(&mut buf).await?;
 
-            // Send a stop message if there is no more data.
+            // Stop if there is no more data.
             if n == 0 {
                 break;
             }
@@ -79,6 +81,7 @@ where
     }
 }
 
+#[async_trait::async_trait]
 impl<R> SharedReader for ChannelReader<R>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -87,8 +90,8 @@ where
         self.send_to_end().await
     }
 
-    fn as_stream(&mut self) -> impl Stream<Item = Result<Arc<[u8]>>> + 'static {
-        self.subscribe_stream()
+    fn as_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<Arc<[u8]>>> + Send>> {
+        Box::pin(self.subscribe_stream())
     }
 }
 

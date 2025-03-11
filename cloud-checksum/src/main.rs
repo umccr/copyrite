@@ -1,12 +1,9 @@
-use cloud_checksum::checksum::file::SumsFile;
 use cloud_checksum::checksum::Ctx;
 use cloud_checksum::error::Result;
 use cloud_checksum::reader::channel::ChannelReader;
-use cloud_checksum::task::check::{CheckOutput, CheckTaskBuilder, GroupBy};
-use cloud_checksum::task::generate::{file_size, GenerateTaskBuilder, SumCtxPairs};
+use cloud_checksum::task::check::{CheckObjects, CheckOutput, CheckTaskBuilder, GroupBy};
+use cloud_checksum::task::generate::{GenerateTaskBuilder, SumCtxPairs};
 use cloud_checksum::{Commands, Subcommands};
-use std::collections::HashSet;
-use tokio::fs::File;
 use tokio::io::stdin;
 
 #[tokio::main]
@@ -20,23 +17,22 @@ async fn main() -> Result<()> {
             missing: generate_missing,
             force_overwrite,
             verify,
-            is_checksum_defaulted,
         } => {
             if input[0] == "-" {
-                let mut reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
+                let reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
 
                 let output = GenerateTaskBuilder::default()
                     .with_overwrite(force_overwrite)
                     .with_verify(verify)
+                    .with_context(checksum)
+                    .with_reader(reader)
                     .build()
                     .await?
-                    .add_generate_tasks(HashSet::from_iter(checksum), &mut reader)?
-                    .add_reader_task(reader)?
                     .run()
                     .await?
                     .to_json_string()?;
 
-                println!("{}", output);
+                println!("{}", output)
             } else {
                 if generate_missing {
                     let ctxs = CheckTaskBuilder::default()
@@ -60,12 +56,6 @@ async fn main() -> Result<()> {
                             )
                             .await?
                         }
-
-                        // If there are no additional non-defaulted checksums to generate, return
-                        // early.
-                        if is_checksum_defaulted {
-                            return Ok(());
-                        }
                     }
                 };
 
@@ -86,28 +76,21 @@ async fn main() -> Result<()> {
             update,
             group_by,
         } => {
-            let files = check(input, group_by).await?;
+            let files = check(input, group_by, update).await?;
+            let output = CheckOutput::from((files, group_by));
 
-            let mut groups = Vec::with_capacity(files.len());
-            for file in files {
-                if update {
-                    file.write().await?;
-                }
-
-                groups.push(file.into_names().into_iter().collect());
-            }
-
-            println!("{}", CheckOutput::new(groups, group_by).to_json_string()?);
+            println!("{}", output.to_json_string()?);
         }
     };
 
     Ok(())
 }
 
-async fn check(input: Vec<String>, group_by: GroupBy) -> Result<Vec<SumsFile>> {
+async fn check(input: Vec<String>, group_by: GroupBy, update: bool) -> Result<CheckObjects> {
     CheckTaskBuilder::default()
         .with_input_files(input)
         .with_group_by(group_by)
+        .with_update(update)
         .build()
         .await?
         .run()
@@ -119,23 +102,18 @@ async fn generate(
     force_overwrite: bool,
     verify: bool,
     input: String,
-    mut ctxs: Vec<Ctx>,
+    ctxs: Vec<Ctx>,
 ) -> Result<()> {
-    let file_size = file_size(&input).await;
-    ctxs.iter_mut().for_each(|ctx| ctx.set_file_size(file_size));
-
-    let mut reader = ChannelReader::new(File::open(&input).await?, capacity);
-
     GenerateTaskBuilder::default()
         .with_overwrite(force_overwrite)
         .with_verify(verify)
         .with_input_file_name(input)
+        .with_context(ctxs)
+        .with_capacity(capacity)
+        .write()
         .build()
         .await?
-        .add_generate_tasks(HashSet::from_iter(ctxs), &mut reader)?
-        .add_reader_task(reader)?
         .run()
-        .await?
-        .write()
-        .await
+        .await?;
+    Ok(())
 }
