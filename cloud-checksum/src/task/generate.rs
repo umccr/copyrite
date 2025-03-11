@@ -1,7 +1,7 @@
 //! Generate checksums for files.
 //!
 
-use crate::checksum::file::{Checksum, PartChecksum, PartChecksums, SumsFile};
+use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
 use crate::error::Error::GenerateError;
 use crate::error::{Error, Result};
@@ -230,16 +230,8 @@ impl GenerateTask {
                     ChecksumTask(ctx) => {
                         let (ctx, digest) = *ctx;
 
-                        let part_checksums = ctx.part_checksums().map(|sums| {
-                            PartChecksums::new(
-                                sums.into_iter()
-                                    .map(|sum| PartChecksum::new(ctx.part_size(), Some(sum)))
-                                    .collect::<Vec<_>>(),
-                            )
-                        });
-
                         let checksum = ctx.digest_to_string(&digest);
-                        Ok(Some((ctx, Checksum::new(checksum, part_checksums))))
+                        Ok(Some((ctx, Checksum::new(checksum))))
                     }
                 }
             })
@@ -356,8 +348,8 @@ pub(crate) mod test {
     use super::*;
     use crate::checksum::aws_etag::test::expected_md5_1gib;
     use crate::checksum::standard::test::{
-        expected_crc32_be, expected_crc32c_be, expected_md5_sum, expected_sha1_sum,
-        expected_sha256_sum,
+        EXPECTED_CRC32C_BE_SUM, EXPECTED_CRC32_BE_SUM, EXPECTED_MD5_SUM, EXPECTED_SHA1_SUM,
+        EXPECTED_SHA256_SUM,
     };
     use crate::checksum::standard::StandardCtx;
     use crate::reader::channel::test::channel_reader;
@@ -406,7 +398,7 @@ pub(crate) mod test {
             true,
             false,
             vec!["sha1", "sha256", "md5", "aws-etag-1gib", "crc32", "crc32c"],
-            expected_md5_sum(),
+            EXPECTED_MD5_SUM,
         )
         .await
     }
@@ -421,7 +413,7 @@ pub(crate) mod test {
             false,
             true,
             vec!["sha1", "sha256", "aws-etag-1gib", "crc32", "crc32c"],
-            expected_md5_sum(),
+            EXPECTED_MD5_SUM,
         )
         .await
     }
@@ -485,36 +477,27 @@ pub(crate) mod test {
         assert_eq!(file.size, Some(TEST_FILE_SIZE));
         assert_eq!(
             file.checksums[&"md5".parse()?],
-            Checksum::new(md5.to_string(), None)
+            Checksum::new(md5.to_string())
         );
         assert_eq!(
             file.checksums[&"sha1".parse()?],
-            Checksum::new(expected_sha1_sum().to_string(), None)
+            Checksum::new(EXPECTED_SHA1_SUM.to_string())
         );
         assert_eq!(
             file.checksums[&"sha256".parse()?],
-            Checksum::new(expected_sha256_sum().to_string(), None)
+            Checksum::new(EXPECTED_SHA256_SUM.to_string())
         );
         assert_eq!(
             file.checksums[&"md5-aws-1073741824b".parse()?],
-            Checksum::new(
-                expected_md5_1gib().to_string(),
-                Some(
-                    vec![(
-                        Some(1073741824),
-                        Some("d93e71879054f205ede90d35c8081ca5".to_string())
-                    )]
-                    .into()
-                )
-            )
+            Checksum::new(expected_md5_1gib().to_string())
         );
         assert_eq!(
             file.checksums[&"crc32".parse()?],
-            Checksum::new(expected_crc32_be().to_string(), None)
+            Checksum::new(EXPECTED_CRC32_BE_SUM.to_string())
         );
         assert_eq!(
             file.checksums[&"crc32c".parse()?],
-            Checksum::new(expected_crc32c_be().to_string(), None)
+            Checksum::new(EXPECTED_CRC32C_BE_SUM.to_string())
         );
 
         Ok(())
@@ -524,10 +507,7 @@ pub(crate) mod test {
         let name = tmp.join("name").to_string_lossy().to_string();
         let existing = SumsFile::new(
             Some(TEST_FILE_SIZE),
-            BTreeMap::from_iter(vec![(
-                "md5".parse()?,
-                Checksum::new("123".to_string(), None),
-            )]),
+            BTreeMap::from_iter(vec![("md5".parse()?, Checksum::new("123".to_string()))]),
         );
         FileBuilder::default()
             .with_file(name.to_string())

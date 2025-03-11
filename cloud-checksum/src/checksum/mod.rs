@@ -85,14 +85,6 @@ impl Ctx {
         }
     }
 
-    /// Get the part size if this is an AWS checksum context.
-    pub fn part_size(&self) -> Option<u64> {
-        match self {
-            Ctx::Regular(_) => None,
-            Ctx::AWSEtag(ctx) => ctx.part_size().ok(),
-        }
-    }
-
     /// Set the file size if this is an AWS context.
     pub fn set_file_size(&mut self, file_size: Option<u64>) {
         if let Ctx::AWSEtag(ctx) = self {
@@ -100,8 +92,8 @@ impl Ctx {
         }
     }
 
-    /// Get the encoded part checksums if this is an AWS checksum context.
-    pub fn part_checksums(&self) -> Option<Vec<String>> {
+    /// Get the encoded part checksums and their part sizes if this is an AWS checksum context.
+    pub fn part_checksums(&self) -> Option<Vec<(u64, String)>> {
         match self {
             Ctx::Regular(_) => None,
             Ctx::AWSEtag(ctx) => Some(ctx.part_checksums()),

@@ -3,6 +3,7 @@
 
 use crate::checksum::file::SumsFile;
 use crate::error::Result;
+use crate::reader::aws::S3Builder;
 use crate::reader::file::FileBuilder;
 use dyn_clone::DynClone;
 use futures_util::Stream;
@@ -10,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
 
+pub mod aws;
 pub mod channel;
 pub mod file;
 
@@ -54,6 +56,16 @@ pub struct ObjectSumsBuilder;
 
 impl ObjectSumsBuilder {
     pub async fn build(self, url: String) -> Result<Box<dyn ObjectSums + Send>> {
-        Ok(Box::new(FileBuilder::default().with_file(url).build()?))
+        if S3Builder::is_s3(&url) {
+            Ok(Box::new(
+                S3Builder::default()
+                    .with_default_client()
+                    .await
+                    .parse_from_url(url)
+                    .build()?,
+            ))
+        } else {
+            Ok(Box::new(FileBuilder::default().with_file(url).build()?))
+        }
     }
 }

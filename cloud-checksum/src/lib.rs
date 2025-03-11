@@ -12,6 +12,7 @@ pub mod test;
 use crate::checksum::Ctx;
 use crate::error::Error;
 use crate::error::Error::ParseError;
+use crate::reader::aws::S3Builder;
 use crate::task::check::GroupBy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::Duration;
@@ -40,12 +41,16 @@ impl Commands {
     pub fn parse_args() -> Result<Self> {
         let mut args = Self::parse();
         if let Subcommands::Generate {
-            checksum, verify, ..
+            input,
+            checksum,
+            verify,
+            ..
         } = &mut args.commands
         {
             // For S3 objects, passing no checksums is valid as metadata can be used, otherwise
             // it's an error if not verifying the data.
-            if checksum.is_empty() && !*verify {
+            if checksum.is_empty() && !*verify && !input.iter().all(|input| S3Builder::is_s3(input))
+            {
                 return Err(ParseError(
                     "some checksums must be specified if using file based objects and not verify existing sums".to_string(),
                 ));

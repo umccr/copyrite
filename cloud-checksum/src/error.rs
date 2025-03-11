@@ -1,8 +1,11 @@
 //! Error handling logic.
 //!
 
+use aws_sdk_s3::error::SdkError;
+use aws_smithy_runtime_api::client::result::CreateUnhandledError;
+use aws_smithy_types::byte_stream;
 use std::num::TryFromIntError;
-use std::{io, result};
+use std::{error, io, result};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
@@ -31,6 +34,8 @@ pub enum Error {
     GenerateError(String),
     #[error("check command error: {0}")]
     CheckError(String),
+    #[error("aws error: {0}")]
+    AwsError(String),
 }
 
 impl From<JoinError> for Error {
@@ -54,5 +59,20 @@ impl From<clap::Error> for Error {
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
         Self::SerdeError(err.to_string())
+    }
+}
+
+impl<T> From<SdkError<T>> for Error
+where
+    T: Send + Sync + error::Error + CreateUnhandledError + 'static,
+{
+    fn from(err: SdkError<T>) -> Self {
+        Self::AwsError(err.into_service_error().to_string())
+    }
+}
+
+impl From<byte_stream::error::Error> for Error {
+    fn from(err: byte_stream::error::Error) -> Self {
+        Self::AwsError(err.to_string())
     }
 }
