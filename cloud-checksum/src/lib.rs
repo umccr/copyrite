@@ -26,11 +26,9 @@ pub struct Commands {
     /// checksum will be saved to the partial checksum file.
     #[arg(global = true, short, long, env)]
     pub timeout: Option<Duration>,
-
     /// The subcommands for cloud-checksum.
     #[command(subcommand)]
     pub commands: Subcommands,
-
     /// Commands related to optimizing IO and CPU tasks.
     #[command(flatten)]
     pub optimization: Optimization,
@@ -40,16 +38,12 @@ impl Commands {
     /// Parse args and set default values.
     pub fn parse_args() -> Result<Self> {
         let mut args = Self::parse();
-        if let Subcommands::Generate {
-            input,
-            checksum,
-            verify,
-            ..
-        } = &mut args.commands
-        {
+        if let Subcommands::Generate(generate) = &mut args.commands {
             // For S3 objects, passing no checksums is valid as metadata can be used, otherwise
             // it's an error if not verifying the data.
-            if checksum.is_empty() && !*verify && !input.iter().all(|input| S3Builder::is_s3(input))
+            if generate.checksum.is_empty()
+                && !generate.verify
+                && !generate.input.iter().all(|input| S3Builder::is_s3(input))
             {
                 return Err(ParseError(
                     "some checksums must be specified if using file based objects and not verify existing sums".to_string(),
@@ -60,74 +54,100 @@ impl Commands {
     }
 }
 
+/// The generate subcommand components.
+#[derive(Debug, Args)]
+pub struct Generate {
+    /// The input file to calculate the checksum for. By default, accepts a file name.
+    /// use - to accept input from stdin. If using stdin, the output will be written to stdout.
+    /// Multiple files can be specified.
+    #[arg(value_delimiter = ',', required = true)]
+    pub input: Vec<String>,
+    /// Checksums to use. Can be specified multiple times or comma-separated.
+    ///
+    /// Use an `aws-<part_size>` suffix to create AWS ETag-style checksums, e.g. `md5-aws-8mib`.
+    /// `<part_size>` should contain a size unit, e.g. `mib` or `b`. When the unit is omitted,
+    /// this is interpreted as a `<part-number>` where the input file is split evenly into the
+    /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits
+    /// the file into 10 parts. `<part-number>` is not supported when the file size is not
+    /// known, such as when taking input from stdin.
+    ///
+    /// It is possible to specify different part sizes by appending additional parts separated
+    /// by a `-`. In this case, if the file is bigger than the number of parts, the last part
+    /// will be repeated until the end. If it is smaller, then some parts may be ignored. For
+    /// example, `md5-aws-8mib-16mib` will create one 8 MiB part and the rest will be 16 MiB
+    /// parts.
+    ///
+    /// This option supports file-based objects and objects in S3 by using the
+    /// `S3://bucket/object` syntax. This option must be specified for file-based objects. It
+    /// does not need to be specified for S3 objects as it will use metadata by default. This
+    /// means that if no checksums are specified with S3 objects, the object will not be read
+    /// to compute the checksum, and will instead use existing ETags and additional checksums.
+    #[arg(value_delimiter = ',', short, long)]
+    pub checksum: Vec<Ctx>,
+    /// Generate any missing checksums that would be required to confirm whether two files are
+    /// identical using the `check` subcommand. Any additional checksums specified using
+    /// `--checksum` will also be generated. If there are no checksums preset, the default
+    /// checksum is generated.
+    #[arg(short, long, env)]
+    pub missing: bool,
+    /// Overwrite the sums file. By default, only checksums that are missing are computed and
+    /// added to an existing sums file. Any existing checksums are preserved (even if not
+    /// specified in --checksums). This option allows overwriting any existing sums file. This
+    /// will recompute all checksums specified.
+    #[arg(short, long, env, conflicts_with = "verify")]
+    pub force_overwrite: bool,
+    /// Verify the contents of existing sums files when generating checksums. By default,
+    /// existing checksum files are assumed to contain checksums that have correct values. This
+    /// option allows computing existing sums file checksums and updating the file to ensure
+    /// that it is correct. This option will also read objects on S3 to compute checksums, even
+    /// if the metadata for that checksum exists.
+    #[arg(short, long, env, conflicts_with = "force_overwrite")]
+    pub verify: bool,
+}
+
+/// The check subcommand components.
+#[derive(Debug, Args)]
+pub struct Check {
+    /// The input file to check a checksum. Requires at least two files.
+    #[arg(value_delimiter = ',', required = true, num_args = 2)]
+    pub input: Vec<String>,
+    /// Update existing sums files when running the `check` subcommand. This will add checksums to
+    /// any sums files that are confirmed to be identical through other sums files.
+    #[arg(short, long, env)]
+    pub update: bool,
+    /// Group outputted checksums by equality or comparability. Equality determines the groups
+    /// of sums files that are equal, and comparability determines the groups of sums files
+    /// that can be compared, but aren't necessarily equal.
+    #[arg(short, long, env, default_value = "equality")]
+    pub group_by: GroupBy,
+}
+
+/// The copy subcommand components.
+#[derive(Debug, Args)]
+pub struct Copy {
+    #[command(flatten)]
+    pub generate: Generate,
+    /// The destination to copy files to. If the input contains multiple files, then this must
+    /// be a directory.
+    #[arg(short, long, env, required = true)]
+    pub destination: String,
+    /// Do not copy any tags or metadata when copying the files. By default, all tags and metadata
+    /// are copied, such as S3 tags.
+    #[arg(short, long, env)]
+    pub no_copy_meta: bool,
+}
+
 /// The subcommands for cloud-checksum.
 #[derive(Subcommand, Debug)]
 pub enum Subcommands {
     /// Generate a checksum.
-    Generate {
-        /// The input file to calculate the checksum for. By default, accepts a file name.
-        /// use - to accept input from stdin. If using stdin, the output will be written to stdout.
-        /// Multiple files can be specified.
-        #[arg(value_delimiter = ',', required = true)]
-        input: Vec<String>,
-        /// Checksums to use. Can be specified multiple times or comma-separated.
-        ///
-        /// Use an `aws-<part_size>` suffix to create AWS ETag-style checksums, e.g. `md5-aws-8mib`.
-        /// `<part_size>` should contain a size unit, e.g. `mib` or `b`. When the unit is omitted,
-        /// this is interpreted as a `<part-number>` where the input file is split evenly into the
-        /// number of parts (where the last part can be smaller). For example `md5-aws-10` splits
-        /// the file into 10 parts. `<part-number>` is not supported when the file size is not
-        /// known, such as when taking input from stdin.
-        ///
-        /// It is possible to specify different part sizes by appending additional parts separated
-        /// by a `-`. In this case, if the file is bigger than the number of parts, the last part
-        /// will be repeated until the end. If it is smaller, then some parts may be ignored. For
-        /// example, `md5-aws-8mib-16mib` will create one 8 MiB part and the rest will be 16 MiB
-        /// parts.
-        ///
-        /// This option supports file-based objects and objects in S3 by using the
-        /// `S3://bucket/object` syntax. This option must be specified for file-based objects. It
-        /// does not need to be specified for S3 objects as it will use metadata by default. This
-        /// means that if no checksums are specified with S3 objects, the object will not be read
-        /// to compute the checksum, and will instead use existing ETags and additional checksums.
-        #[arg(value_delimiter = ',', short, long)]
-        checksum: Vec<Ctx>,
-        /// Generate any missing checksums that would be required to confirm whether two files are
-        /// identical using the `check` subcommand. Any additional checksums specified using
-        /// `--checksum` will also be generated. If there are no checksums preset, the default
-        /// checksum is generated.
-        #[arg(short, long, env)]
-        missing: bool,
-        /// Overwrite the sums file. By default, only checksums that are missing are computed and
-        /// added to an existing sums file. Any existing checksums are preserved (even if not
-        /// specified in --checksums). This option allows overwriting any existing sums file. This
-        /// will recompute all checksums specified.
-        #[arg(short, long, env, conflicts_with = "verify")]
-        force_overwrite: bool,
-        /// Verify the contents of existing sums files when generating checksums. By default,
-        /// existing checksum files are assumed to contain checksums that have correct values. This
-        /// option allows computing existing sums file checksums and updating the file to ensure
-        /// that it is correct. This option will also read objects on S3 to compute checksums, even
-        /// if the metadata for that checksum exists.
-        #[arg(short, long, env, conflicts_with = "force_overwrite")]
-        verify: bool,
-    },
+    Generate(#[arg(flatten)] Generate),
     /// Confirm a set of files is identical. This returns sets of files that are identical.
     /// Which means that more than two files can be checked at the same time.
-    Check {
-        /// The input file to check a checksum. Requires at least two files.
-        #[arg(value_delimiter = ',', required = true, num_args = 2)]
-        input: Vec<String>,
-        /// Update existing sums files when running the `check` subcommand. This will add checksums to
-        /// any sums files that are confirmed to be identical through other sums files.
-        #[arg(short, long, env)]
-        update: bool,
-        /// Group outputted checksums by equality or comparability. Equality determines the groups
-        /// of sums files that are equal, and comparability determines the groups of sums files
-        /// that can be compared, but aren't necessarily equal.
-        #[arg(short, long, env, default_value = "equality")]
-        group_by: GroupBy,
-    },
+    Check(#[arg(flatten)] Check),
+    /// Copy a file to a location. This command can also simultaneously generate checksums, and
+    /// supports all options for generate.
+    Copy(#[arg(flatten)] Copy),
 }
 
 /// The checksum to use.

@@ -3,7 +3,7 @@ use cloud_checksum::error::Result;
 use cloud_checksum::reader::channel::ChannelReader;
 use cloud_checksum::task::check::{CheckObjects, CheckOutput, CheckTaskBuilder, GroupBy};
 use cloud_checksum::task::generate::{GenerateTaskBuilder, SumCtxPairs};
-use cloud_checksum::{Commands, Subcommands};
+use cloud_checksum::{Check, Commands, Generate, Subcommands};
 use tokio::io::stdin;
 
 #[tokio::main]
@@ -11,13 +11,13 @@ async fn main() -> Result<()> {
     let args = Commands::parse_args()?;
 
     match args.commands {
-        Subcommands::Generate {
+        Subcommands::Generate(Generate {
             input,
             checksum,
             missing: generate_missing,
             force_overwrite,
             verify,
-        } => {
+        }) => {
             if input[0] == "-" {
                 let reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
 
@@ -71,16 +71,17 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Subcommands::Check {
+        Subcommands::Check(Check {
             input,
             update,
             group_by,
-        } => {
+        }) => {
             let files = check(input, group_by, update).await?;
             let output = CheckOutput::from((files, group_by));
 
             println!("{}", output.to_json_string()?);
         }
+        _ => {}
     };
 
     Ok(())
