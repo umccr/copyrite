@@ -33,3 +33,34 @@ jobs:
       - name: Run md5
         if: always()
         run: md5sum data/test_file && sha1sum data/test_file && sha256sum data/test_file
+
+  release-binaries:
+    name: ${{ matrix.target }}
+    if: github.repository_owner == 'umccr'
+    runs-on: ${{ matrix.os }}
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-13
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+        if: startsWith(matrix.os, 'ubuntu')
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: cloud-checksum
+          target: ${{ matrix.target }}
+          token: ${{ secrets.GITHUB_TOKEN }}
