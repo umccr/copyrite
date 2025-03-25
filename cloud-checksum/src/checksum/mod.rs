@@ -126,8 +126,8 @@ impl FromStr for Ctx {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::reader::channel::test::channel_reader;
-    use crate::reader::SharedReader;
+    use crate::io::reader::channel::test::channel_reader;
+    use crate::io::reader::SharedReader;
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
     use anyhow::Result;
     use tokio::fs::File;
@@ -141,7 +141,7 @@ pub(crate) mod test {
         checksum.set_file_size(Some(TEST_FILE_SIZE));
 
         let stream = reader.as_stream();
-        let task = tokio::spawn(async move { reader.read_task().await });
+        let task = tokio::spawn(async move { reader.read_chunks().await });
 
         let (digest, _) = join!(checksum.generate(stream), task);
 

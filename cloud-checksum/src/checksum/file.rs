@@ -4,7 +4,9 @@
 use crate::checksum::Ctx;
 use crate::error::Error::SumsFileError;
 use crate::error::{Error, Result};
-use crate::reader::{ObjectSums, ObjectSumsBuilder};
+use crate::io::reader::ObjectRead;
+use crate::io::writer::ObjectWrite;
+use crate::io::IoBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string};
 use std::cmp::Ordering;
@@ -21,23 +23,27 @@ pub const SUMS_FILE_ENDING: &str = ".sums";
 /// Sums file state to enable writing and reading.
 pub struct State {
     pub(crate) name: String,
-    pub(crate) object_sums: Box<dyn ObjectSums + Send>,
+    pub(crate) object_read: Box<dyn ObjectRead + Send>,
+    pub(crate) object_write: Box<dyn ObjectWrite + Send>,
 }
 
 impl State {
     /// Build from a name.
     pub async fn try_from(name: String) -> Result<Self> {
         Ok(Self {
-            object_sums: ObjectSumsBuilder
-                .build(SumsFile::format_target_file(&name))
+            object_read: IoBuilder
+                .build_read(SumsFile::format_target_file(&name))
+                .await?,
+            object_write: IoBuilder
+                .build_write(SumsFile::format_target_file(&name))
                 .await?,
             name,
         })
     }
 
     /// Get the inner values.
-    pub fn into_inner(self) -> (String, Box<dyn ObjectSums + Send>) {
-        (self.name, self.object_sums)
+    pub fn into_inner(self) -> (String, Box<dyn ObjectRead + Send>) {
+        (self.name, self.object_read)
     }
 }
 
@@ -77,7 +83,8 @@ impl Clone for State {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
-            object_sums: dyn_clone::clone_box(&*self.object_sums),
+            object_read: dyn_clone::clone_box(&*self.object_read),
+            object_write: dyn_clone::clone_box(&*self.object_write),
         }
     }
 }

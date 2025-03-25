@@ -3,16 +3,16 @@ use std::fmt::{Display, Formatter};
 
 pub mod checksum;
 pub mod error;
-pub mod reader;
 pub mod task;
 
+pub mod io;
 #[doc(hidden)]
 pub mod test;
 
 use crate::checksum::Ctx;
 use crate::error::Error;
 use crate::error::Error::ParseError;
-use crate::reader::aws::S3Builder;
+use crate::io::Provider;
 use crate::task::check::GroupBy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::Duration;
@@ -43,7 +43,10 @@ impl Commands {
             // it's an error if not verifying the data.
             if generate.checksum.is_empty()
                 && !generate.verify
-                && !generate.input.iter().all(|input| S3Builder::is_s3(input))
+                && !generate
+                    .input
+                    .iter()
+                    .all(|input| matches!(Provider::from(input.as_str()), Provider::S3))
             {
                 return Err(ParseError(
                     "some checksums must be specified if using file based objects and not verify existing sums".to_string(),
@@ -54,7 +57,7 @@ impl Commands {
     }
 }
 
-/// The generate subcommand components.
+/// The generate subcommand components.provenance: false
 #[derive(Debug, Args)]
 pub struct Generate {
     /// The input file to calculate the checksum for. By default, accepts a file name.
@@ -125,11 +128,13 @@ pub struct Check {
 /// The copy subcommand components.
 #[derive(Debug, Args)]
 pub struct Copy {
-    #[command(flatten)]
-    pub generate: Generate,
+    /// The source file to copy from. By default, accepts a file name, use - to accept input from
+    /// stdin.
+    #[arg(required = true)]
+    pub source: String,
     /// The destination to copy files to. If the input contains multiple files, then this must
     /// be a directory.
-    #[arg(short, long, env, required = true)]
+    #[arg(required = true)]
     pub destination: String,
     /// Do not copy any tags or metadata when copying the files. By default, all tags and metadata
     /// are copied, such as S3 tags.

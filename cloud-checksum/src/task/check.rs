@@ -3,7 +3,9 @@
 
 use crate::checksum::file::SumsFile;
 use crate::error::{Error, Result};
-use crate::reader::{ObjectSums, ObjectSumsBuilder};
+use crate::io::reader::ObjectRead;
+use crate::io::writer::ObjectWrite;
+use crate::io::IoBuilder;
 use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -49,14 +51,16 @@ impl CheckTaskBuilder {
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
         let objects = join_all(self.files.into_iter().map(|file| async move {
-            let mut object_sums = ObjectSumsBuilder.build(file.to_string()).await?;
-            let file_size = object_sums.file_size().await?;
-            let existing = object_sums
+            let mut read = IoBuilder.build_read(file.to_string()).await?;
+            let write = IoBuilder.build_write(file.to_string()).await?;
+
+            let file_size = read.file_size().await?;
+            let existing = read
                 .sums_file()
                 .await?
                 .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
 
-            Ok((existing, BTreeSet::from_iter(vec![State(object_sums)])))
+            Ok((existing, BTreeSet::from_iter(vec![State((read, write))])))
         }))
         .await
         .into_iter()
@@ -82,11 +86,11 @@ pub enum GroupBy {
 }
 
 /// Representation of file state to implement equality and hashing.
-pub struct State(pub(crate) Box<dyn ObjectSums + Send>);
+pub struct State(pub(crate) (Box<dyn ObjectRead + Send>, Box<dyn ObjectWrite + Send>));
 
 impl Hash for State {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.location().hash(state);
+        self.0 .0.location().hash(state);
     }
 }
 
@@ -94,7 +98,7 @@ impl Eq for State {}
 
 impl PartialEq for State {
     fn eq(&self, other: &Self) -> bool {
-        self.0.location() == other.0.location()
+        self.0 .0.location() == other.0 .0.location()
     }
 }
 
@@ -106,7 +110,7 @@ impl PartialOrd for State {
 
 impl Ord for State {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.location().cmp(&other.0.location())
+        self.0 .0.location().cmp(&other.0 .0.location())
     }
 }
 
@@ -216,7 +220,7 @@ impl CheckTask {
         if update {
             for (file, locations) in &result.0 {
                 for location in locations {
-                    location.0.write_sums_file(file).await?;
+                    location.0 .1.write_sums_file(file).await?;
                 }
             }
         }
@@ -229,7 +233,7 @@ impl From<(CheckObjects, GroupBy)> for CheckOutput {
     fn from((objects, group_by): (CheckObjects, GroupBy)) -> Self {
         let mut groups = Vec::with_capacity(objects.0.len());
         for (_, state) in objects.0 {
-            groups.push(state.iter().map(|state| state.0.location()).collect());
+            groups.push(state.iter().map(|state| state.0 .0.location()).collect());
         }
         CheckOutput::new(groups, group_by)
     }
@@ -259,7 +263,7 @@ pub(crate) mod test {
     use super::*;
     use crate::checksum::file::Checksum;
     use crate::error::Error;
-    use crate::reader::file::FileBuilder;
+    use crate::io::file::FileBuilder;
     use crate::test::TEST_FILE_SIZE;
     use anyhow::Result;
     use std::collections::BTreeMap;
@@ -413,7 +417,7 @@ pub(crate) mod test {
         );
         FileBuilder::default()
             .with_file(c_name.to_string())
-            .build()?
+            .build_writer()?
             .write_sums(&c)
             .await?;
 
@@ -439,7 +443,7 @@ pub(crate) mod test {
         );
         FileBuilder::default()
             .with_file(c_name.to_string())
-            .build()?
+            .build_writer()?
             .write_sums(&c)
             .await?;
 
@@ -465,7 +469,7 @@ pub(crate) mod test {
         );
         FileBuilder::default()
             .with_file(c_name.to_string())
-            .build()?
+            .build_writer()?
             .write_sums(&c)
             .await?;
 
@@ -479,7 +483,7 @@ pub(crate) mod test {
         );
         FileBuilder::default()
             .with_file(d_name.to_string())
-            .build()?
+            .build_writer()?
             .write_sums(&d)
             .await?;
 
@@ -499,7 +503,7 @@ pub(crate) mod test {
         );
         FileBuilder::default()
             .with_file(a_name.to_string())
-            .build()?
+            .build_writer()?
             .write_sums(&a)
             .await?;
 
@@ -513,7 +517,7 @@ pub(crate) mod test {
         );
         FileBuilder::default()
             .with_file(b_name.to_string())
-            .build()?
+            .build_writer()?
             .write_sums(&b)
             .await?;
 

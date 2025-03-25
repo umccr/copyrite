@@ -2,7 +2,7 @@
 //!
 
 use crate::error::Result;
-use crate::reader::SharedReader;
+use crate::io::reader::SharedReader;
 use async_stream::stream;
 use futures_util::Stream;
 use std::pin::Pin;
@@ -86,7 +86,7 @@ impl<R> SharedReader for ChannelReader<R>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    async fn read_task(&mut self) -> Result<u64> {
+    async fn read_chunks(&mut self) -> Result<u64> {
         self.send_to_end().await
     }
 
@@ -112,7 +112,7 @@ pub(crate) mod test {
 
         let mut reader = channel_reader(Cursor::new(data.clone())).await;
         let stream = reader.as_stream();
-        reader.read_task().await?;
+        reader.read_chunks().await?;
 
         let result: Vec<_> = stream
             .map(|value| Ok(value?.to_vec()))
