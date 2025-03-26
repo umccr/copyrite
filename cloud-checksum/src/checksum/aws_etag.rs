@@ -5,11 +5,66 @@
 use crate::checksum::standard::StandardCtx;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
+use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+const MIB: u64 = 1024_u64.pow(2);
+
+/// Defines the "ideal" order for part sizes that should be preferenced when copying/generating
+/// new checksums. This list takes into account defaults that are likely to show up in the AWS CLI
+/// and SDKs.
+pub const PART_SIZE_ORDERING: [u64; 10] = [
+    // AWS CLI/boto3 uses 8MiB as the default:
+    // https://github.com/aws/aws-cli/blob/b9459db122d9f596a4570b6b5ecca44311b48fc2/awscli/customizations/s3/transferconfig.py#L21
+    // https://github.com/boto/boto3/blob/0442d32d2d2cbc5efbe158f6336993d1ee89b36b/boto3/s3/transfer.py#L243
+    // Java V2 uses 8MiB:
+    // https://github.com/aws/aws-sdk-java-v2/blob/5463dd3d403450e167408895c152c62884da65bd/services/s3/src/main/java/software/amazon/awssdk/services/s3/internal/multipart/MultipartConfigurationResolver.java#L28
+    8 * MIB,
+    // C++ SDK uses 5MiB:
+    // https://github.com/aws/aws-sdk-cpp/blob/93f60cc8aad399a3977287485c19c24d15723b78/src/aws-cpp-sdk-transfer/include/aws/transfer/TransferManager.h#L35
+    // Go seems to also default to 5MiB:
+    // https://github.com/aws/aws-sdk-go-v2/blob/6fa167adb5d1a2618a2f9bbe8f2b885c0d7e2893/feature/s3/transfermanager/options.go#L12-L15
+    // So does JavaScript:
+    // https://github.com/aws/aws-sdk-js-v3/blob/11baa79dff0d9e8fddce873f5306613286990ded/lib/lib-storage/src/Upload.ts#L42
+    // And .NET:
+    // https://github.com/aws/aws-sdk-net/blob/0f72ad1c90f471505c0013c92ec5e9e567239527/sdk/src/Services/S3/Custom/Util/S3Constants.cs#L35
+    // PHP:
+    // https://github.com/aws/aws-sdk-php/blob/713bdb1ff0c2eb519932c111fc450f6b5462b69f/src/S3/MultipartUploader.php#L19
+    5 * MIB,
+    // Ruby SDK uses 50MiB:
+    // https://github.com/aws/aws-sdk-ruby/blob/2c8a0686794e8d03da504fcb25984f7fae93f5b3/gems/aws-sdk-s3/lib/aws-sdk-s3/object_multipart_copier.rb#L31
+    50 * MIB,
+    // Java V1 SDK uses 100MiB and 16mib:
+    // https://github.com/aws/aws-sdk-java/blob/bdca0550fc15769618a51338f5f2f84bc603a1cf/aws-java-sdk-s3/src/main/java/com/amazonaws/services/s3/transfer/TransferManagerConfiguration.java#L32-L46
+    // But it also does some calculations based on the total size:
+    // https://github.com/aws/aws-sdk-java/blob/bdca0550fc15769618a51338f5f2f84bc603a1cf/aws-java-sdk-s3/src/main/java/com/amazonaws/services/s3/transfer/internal/TransferManagerUtils.java#L119-L125
+    100 * MIB,
+    16 * MIB,
+    // Some other options that a user might enter:
+    10 * MIB,
+    500 * MIB,
+    1000 * MIB,
+    2000 * MIB,
+    5000 * MIB,
+];
+
+static PART_SIZE_ORDERING_MAP: OnceLock<HashMap<u64, usize>> = OnceLock::new();
+
+/// Gets the map associated with the part size ordering.
+pub fn part_size_ordering() -> &'static HashMap<u64, usize> {
+    PART_SIZE_ORDERING_MAP.get_or_init(|| {
+        HashMap::from_iter(
+            PART_SIZE_ORDERING
+                .into_iter()
+                .zip(0..PART_SIZE_ORDERING.len()),
+        )
+    })
+}
 
 /// Calculate checksums using an AWS ETag style.
 #[derive(Debug, Clone)]
@@ -28,7 +83,26 @@ pub struct AWSETagCtx {
 
 impl Ord for AWSETagCtx {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.to_string().cmp(&other.to_string())
+        let parts = self.get_part_sizes();
+        let other_parts = other.get_part_sizes();
+
+        // Always preference smaller/simpler part sizes over larger part sizes.
+        if parts.len() != other_parts.len() {
+            return (parts.len(), &self.ctx).cmp(&(other_parts.len(), &other.ctx));
+        }
+
+        // If there is only one part size, use the preferred part size ordering
+        if parts.len() == 1 && other_parts.len() == 1 {
+            let pos = part_size_ordering().get(&parts[0]);
+            let pos_other = part_size_ordering().get(&other_parts[0]);
+
+            if let (Some(pos), Some(pos_other)) = (pos, pos_other) {
+                return (pos, &self.ctx).cmp(&(pos_other, &other.ctx));
+            }
+        }
+
+        // Otherwise just compare normally using the full part size slice.
+        (parts, &self.ctx).cmp(&(other_parts, &other.ctx))
     }
 }
 
@@ -42,13 +116,14 @@ impl Eq for AWSETagCtx {}
 
 impl PartialEq for AWSETagCtx {
     fn eq(&self, other: &Self) -> bool {
-        self.to_string() == other.to_string()
+        (self.get_part_sizes(), &self.ctx).eq(&(other.get_part_sizes(), &self.ctx))
     }
 }
 
 impl Hash for AWSETagCtx {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.to_string().hash(state);
+        self.get_part_sizes().hash(state);
+        self.ctx.hash(state);
     }
 }
 
@@ -325,9 +400,8 @@ impl AWSETagCtx {
         format!("{}b", part_size)
     }
 
-    /// Format the parts into a string based on the part mode. This will panic if the file size
-    /// was not set and `finalize` was not called.
-    pub fn format_parts(&self) -> String {
+    /// Get the part sizes from the part mode.
+    pub fn get_part_sizes(&self) -> Cow<[u64]> {
         match self.part_mode {
             PartMode::PartNumber(part_number) => {
                 if self.file_size.is_none() && self.n_checksums == 0 {
@@ -336,16 +410,22 @@ impl AWSETagCtx {
 
                 // Get the file size if it exists or default to the total bytes.
                 let file_size = self.file_size.unwrap_or(self.total_bytes);
-                let part_size = Self::part_number_to_size(part_number, file_size).to_string();
+                let part_size = Self::part_number_to_size(part_number, file_size);
 
-                Self::format_part_size(part_size)
+                Cow::Owned(vec![part_size])
             }
-            PartMode::PartSizes(ref part_sizes) => part_sizes
-                .iter()
-                .map(Self::format_part_size)
-                .collect::<Vec<_>>()
-                .join("-"),
+            PartMode::PartSizes(ref part_sizes) => Cow::Borrowed(part_sizes.as_slice()),
         }
+    }
+
+    /// Format the parts into a string based on the part mode. This will panic if the file size
+    /// was not set and `finalize` was not called.
+    pub fn format_parts(&self) -> String {
+        self.get_part_sizes()
+            .iter()
+            .map(Self::format_part_size)
+            .collect::<Vec<_>>()
+            .join("-")
     }
 
     /// Convert a part number to a part size using the file size.

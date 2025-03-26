@@ -17,11 +17,13 @@ use std::result;
 use std::str::FromStr;
 use std::sync::Arc;
 
-/// The checksum calculator.
+/// The checksum context. This enum also determines the best order of checksums,
+/// which is useful for copy operations. AWS etag checksums are preferred over
+/// regular checksums.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum Ctx {
-    Regular(StandardCtx),
     AWSEtag(AWSETagCtx),
+    Regular(StandardCtx),
 }
 
 impl<'de> Deserialize<'de> for Ctx {
