@@ -2,8 +2,9 @@ use cloud_checksum::checksum::Ctx;
 use cloud_checksum::error::Result;
 use cloud_checksum::io::reader::channel::ChannelReader;
 use cloud_checksum::task::check::{CheckObjects, CheckOutput, CheckTaskBuilder, GroupBy};
+use cloud_checksum::task::copy::{CopyInfo, CopyTaskBuilder};
 use cloud_checksum::task::generate::{GenerateTaskBuilder, SumCtxPairs};
-use cloud_checksum::{Check, Commands, Generate, Subcommands};
+use cloud_checksum::{Check, Commands, Copy, Generate, Subcommands};
 use tokio::io::stdin;
 
 #[tokio::main]
@@ -81,10 +82,29 @@ async fn main() -> Result<()> {
 
             println!("{}", output.to_json_string()?);
         }
-        _ => {}
+        Subcommands::Copy(Copy {
+            source,
+            destination,
+            no_copy_meta,
+            multipart_threshold,
+            part_size,
+        }) => {
+            let result = copy(source, destination).await?;
+            println!("{}", result.to_json_string()?);
+        }
     };
 
     Ok(())
+}
+
+async fn copy(source: String, destination: String) -> Result<CopyInfo> {
+    CopyTaskBuilder::default()
+        .with_source(source)
+        .with_destination(destination)
+        .build()
+        .await?
+        .run()
+        .await
 }
 
 async fn check(input: Vec<String>, group_by: GroupBy, update: bool) -> Result<CheckObjects> {

@@ -13,4 +13,7 @@ use crate::io::ObjectMeta;
 pub trait ObjectWrite: ObjectMeta {
     /// Write data to the configured location.
     async fn write_sums_file(&self, sums_file: &SumsFile) -> Result<()>;
+
+    /// Copy the object to a new location using a single part.
+    async fn copy_object(&self, destination: String) -> Result<u64>;
 }

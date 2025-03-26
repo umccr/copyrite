@@ -39,6 +39,30 @@ impl S3 {
         Ok(())
     }
 
+    /// Copy the object using the `CopyObject` operation.
+    pub async fn copy_object_single(&self, destination: String) -> Result<u64> {
+        let key = SumsFile::format_target_file(&self.key);
+        let size = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await?
+            .content_length
+            .unwrap_or(0);
+
+        self.client
+            .copy_object()
+            .copy_source(&key)
+            .key(&destination)
+            .bucket(&self.bucket)
+            .send()
+            .await?;
+
+        Ok(size.try_into()?)
+    }
+
     /// Get the inner values.
     pub fn into_inner(self) -> (String, String) {
         (self.bucket, self.key)
@@ -55,5 +79,9 @@ impl ObjectMeta for S3 {
 impl ObjectWrite for S3 {
     async fn write_sums_file(&self, sums_file: &SumsFile) -> Result<()> {
         self.put_sums(sums_file).await
+    }
+
+    async fn copy_object(&self, destination: String) -> Result<u64> {
+        self.copy_object_single(destination).await
     }
 }

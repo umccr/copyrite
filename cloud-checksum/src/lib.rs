@@ -16,6 +16,7 @@ use crate::io::Provider;
 use crate::task::check::GroupBy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::Duration;
+use parse_size::parse_size;
 use std::str::FromStr;
 
 /// Args for the checksum-cloud CLI.
@@ -140,6 +141,14 @@ pub struct Copy {
     /// are copied, such as S3 tags.
     #[arg(short, long, env)]
     pub no_copy_meta: bool,
+    /// The threshold at which a file uses multipart uploads when copying to S3. This can be
+    /// specified with a size unit, e.g. 8mib.
+    #[arg(short, long, env, default_value = "8mib", value_parser = |s: &str| parse_size(s))]
+    pub multipart_threshold: u64,
+    /// The part size to use when copying files using multipart uploads. This can be specified with
+    /// a size unit, e.g. 8mib.
+    #[arg(short, long, env, default_value = "8mib", value_parser = |s: &str| parse_size(s))]
+    pub part_size: u64,
 }
 
 /// The subcommands for cloud-checksum.

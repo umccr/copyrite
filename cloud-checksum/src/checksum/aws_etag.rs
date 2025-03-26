@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 
 const MIB: u64 = 1024_u64.pow(2);
 
-/// Defines the "ideal" order for part sizes that should be preferenced when copying/generating
+/// Defines the "best" order for part sizes that should be preferenced when copying/generating
 /// new checksums. This list takes into account defaults that are likely to show up in the AWS CLI
 /// and SDKs.
 pub const PART_SIZE_ORDERING: [u64; 10] = [
@@ -470,6 +470,7 @@ pub(crate) mod test {
     use crate::checksum::standard::StandardCtx;
     use crate::checksum::test::test_checksum;
     use anyhow::Result;
+    use std::str::FromStr;
 
     pub(crate) fn expected_md5_1gib() -> &'static str {
         "6c434b38867bbd608ba2f06e92ed4e43-1073741824b"
@@ -485,6 +486,22 @@ pub(crate) mod test {
 
     pub(crate) fn expected_sha256_100mib() -> &'static str {
         "a9ed6c4b6aadf887f90a3d483b5c5b79bc08075af2a1718e3e15c63b9904ebf7-104857600b"
+    }
+
+    #[test]
+    fn test_ordering() -> Result<()> {
+        assert!(AWSETagCtx::from_str("md5-aws-8mib")? < AWSETagCtx::from_str("md5-aws-5mib")?);
+        assert!(AWSETagCtx::from_str("sha256-aws-8mib")? < AWSETagCtx::from_str("md5-aws-5mib")?);
+
+        assert!(AWSETagCtx::from_str("md5-aws-1000b")? < AWSETagCtx::from_str("md5-aws-2000b")?);
+        assert!(AWSETagCtx::from_str("sha256-aws-1000b")? < AWSETagCtx::from_str("md5-aws-2000b")?);
+
+        assert!(AWSETagCtx::from_str("md5-aws-1000b")? < AWSETagCtx::from_str("sha256-aws-1000b")?);
+        assert!(
+            AWSETagCtx::from_str("sha256-aws-1000b")? < AWSETagCtx::from_str("md5-aws-100b-100b")?
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -554,16 +571,6 @@ pub(crate) mod test {
         Ok(())
     }
 
-    fn assert_update_part_sizes(part_sizes: Vec<u64>, file_size: u64, expected: Vec<u64>) {
-        let mut ctx = AWSETagCtx::new(
-            StandardCtx::md5(),
-            PartMode::PartSizes(part_sizes),
-            Some(file_size),
-        );
-        ctx.update_part_sizes();
-        assert_eq!(ctx.part_mode, PartMode::PartSizes(expected));
-    }
-
     #[tokio::test]
     async fn test_aws_etag_single_part() -> Result<()> {
         test_checksum("md5-aws-1gib", expected_md5_1gib()).await?;
@@ -589,5 +596,15 @@ pub(crate) mod test {
     async fn test_aws_etag_part_number() -> Result<()> {
         test_checksum("md5-aws-10", expected_md5_10()).await?;
         test_checksum("aws-etag-10", expected_md5_10()).await
+    }
+
+    fn assert_update_part_sizes(part_sizes: Vec<u64>, file_size: u64, expected: Vec<u64>) {
+        let mut ctx = AWSETagCtx::new(
+            StandardCtx::md5(),
+            PartMode::PartSizes(part_sizes),
+            Some(file_size),
+        );
+        ctx.update_part_sizes();
+        assert_eq!(ctx.part_mode, PartMode::PartSizes(expected));
     }
 }
