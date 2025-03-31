@@ -19,9 +19,9 @@ impl FileBuilder {
     }
 
     fn get_components(self) -> Result<String> {
-        Ok(Self::parse_url(&self.file.ok_or_else(|| {
+        Ok(self.file.ok_or_else(|| {
             ParseError("file is required for `FileBuilder`".to_string())
-        })?))
+        })?)
     }
 
     /// Build using the file name.
@@ -35,8 +35,9 @@ impl FileBuilder {
     }
 
     /// Parse from a string a file name which can optionally be prefixed with `file://`
-    pub fn parse_url(s: &str) -> String {
-        s.strip_prefix("file://").unwrap_or(s).to_string()
+    pub fn parse_from_url(mut self, s: &str) -> Self {
+        self.file = Some(s.strip_prefix("file://").unwrap_or(s).to_string());
+        self
     }
 }
 

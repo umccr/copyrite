@@ -3,7 +3,7 @@
 
 use crate::error::Error::ParseError;
 use crate::error::Result;
-use crate::io::{reader, writer};
+use crate::io::{reader, writer, Provider};
 use aws_config::load_defaults;
 use aws_sdk_s3::Client;
 use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
@@ -52,7 +52,10 @@ impl S3Builder {
 
     fn get_components(mut self) -> Result<(Client, String, String)> {
         if let Some(url) = self.url {
-            let (bucket, key) = Self::parse_url(&url)?;
+            let Provider::S3 { bucket, key} = Provider::try_from(url.as_str())? else {
+                return Err(ParseError(format!("{} is not an S3 url", url)));
+            };
+            
             self.bucket = Some(bucket);
             self.key = Some(key);
         }
@@ -75,27 +78,6 @@ impl S3Builder {
     /// Build using the client, bucket and key.
     pub fn build_writer(self) -> Result<writer::aws::S3> {
         Ok(self.get_components()?.into())
-    }
-
-    /// Parse from an S3 url, e.g.`s3://bucket/key`.
-    pub fn parse_url(s: &str) -> Result<(String, String)> {
-        let Some(s) = s.strip_prefix("s3://") else {
-            return Err(ParseError(format!("{} is not an S3 url", s)));
-        };
-
-        let split = s.split_once("/");
-        let Some((bucket, key)) = split else {
-            return Err(ParseError(format!("failed to parse {}", s)));
-        };
-
-        if bucket.is_empty() {
-            return Err(ParseError(format!("{} is missing a bucket", s)));
-        }
-        if key.is_empty() {
-            return Err(ParseError(format!("{} is missing a key", s)));
-        }
-
-        Ok((bucket.to_string(), key.to_string()))
     }
 }
 

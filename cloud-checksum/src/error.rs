@@ -34,6 +34,8 @@ pub enum Error {
     GenerateError(String),
     #[error("check command error: {0}")]
     CheckError(String),
+    #[error("copy command error: {0}")]
+    CopyError(String),
     #[error("aws error: {0}")]
     AwsError(String),
 }

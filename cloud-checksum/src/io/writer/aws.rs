@@ -82,6 +82,8 @@ impl ObjectWrite for S3 {
     }
 
     async fn copy_object(&self, destination: String) -> Result<u64> {
+        // let (destination_key, destination_bucket) = Provider::parse_s3(&destination);
+        
         self.copy_object_single(destination).await
     }
 }
