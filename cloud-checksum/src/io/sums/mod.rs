@@ -3,7 +3,10 @@
 
 use crate::checksum::file::SumsFile;
 use crate::error::Result;
-use crate::io::ObjectMeta;
+use crate::io::sums::aws::S3Builder;
+use crate::io::sums::file::FileBuilder;
+use crate::io::{default_s3_client, Provider};
+use dyn_clone::DynClone;
 use futures_util::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -31,7 +34,7 @@ pub trait SharedReader {
 
 /// Read operations on file based or cloud sums files.
 #[async_trait::async_trait]
-pub trait ObjectRead: ObjectMeta {
+pub trait ObjectSums: DynClone {
     /// Get an existing sums file for this object.
     async fn sums_file(&mut self) -> Result<Option<SumsFile>>;
 
@@ -40,4 +43,31 @@ pub trait ObjectRead: ObjectMeta {
 
     /// Get the file size of the target file.
     async fn file_size(&mut self) -> Result<Option<u64>>;
+
+    /// Write data to the configured location.
+    async fn write_sums_file(&self, sums_file: &SumsFile) -> Result<()>;
+
+    /// Get the location of the object.
+    fn location(&self) -> String;
+}
+
+/// Build object sums from object URLs.
+#[derive(Debug, Default)]
+pub struct ObjectSumsBuilder;
+
+impl ObjectSumsBuilder {
+    pub async fn build(self, url: String) -> Result<Box<dyn ObjectSums + Send>> {
+        match Provider::try_from(url.as_str())? {
+            Provider::File { file } => {
+                Ok(Box::new(FileBuilder::default().with_file(file).build()?))
+            }
+            Provider::S3 { bucket, key } => Ok(Box::new(
+                S3Builder::default()
+                    .with_key(key)
+                    .with_bucket(bucket)
+                    .with_client(default_s3_client().await?)
+                    .build()?,
+            )),
+        }
+    }
 }

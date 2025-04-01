@@ -2,7 +2,7 @@
 //!
 
 use crate::error::Result;
-use crate::io::reader::SharedReader;
+use crate::io::sums::SharedReader;
 use async_stream::stream;
 use futures_util::Stream;
 use std::pin::Pin;

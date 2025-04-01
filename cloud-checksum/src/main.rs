@@ -1,6 +1,6 @@
 use cloud_checksum::checksum::Ctx;
 use cloud_checksum::error::Result;
-use cloud_checksum::io::reader::channel::ChannelReader;
+use cloud_checksum::io::sums::channel::ChannelReader;
 use cloud_checksum::task::check::{CheckObjects, CheckOutput, CheckTaskBuilder, GroupBy};
 use cloud_checksum::task::copy::{CopyInfo, CopyTaskBuilder};
 use cloud_checksum::task::generate::{GenerateTaskBuilder, SumCtxPairs};

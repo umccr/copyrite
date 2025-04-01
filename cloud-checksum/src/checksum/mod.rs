@@ -128,8 +128,8 @@ impl FromStr for Ctx {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::io::reader::channel::test::channel_reader;
-    use crate::io::reader::SharedReader;
+    use crate::io::sums::channel::test::channel_reader;
+    use crate::io::sums::SharedReader;
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
     use anyhow::Result;
     use tokio::fs::File;

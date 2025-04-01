@@ -2,12 +2,43 @@
 //!
 
 use crate::checksum::file::SumsFile;
+use crate::error::Error::ParseError;
 use crate::error::Result;
-use crate::io::reader::ObjectRead;
-use crate::io::ObjectMeta;
+use crate::io::sums::ObjectSums;
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt};
+
+/// Build a file based sums object.
+#[derive(Debug, Default)]
+pub struct FileBuilder {
+    file: Option<String>,
+}
+
+impl FileBuilder {
+    /// Set the file location.
+    pub fn with_file(mut self, file: String) -> Self {
+        self.file = Some(file);
+        self
+    }
+
+    fn get_components(self) -> Result<String> {
+        Ok(self
+            .file
+            .ok_or_else(|| ParseError("file is required for `FileBuilder`".to_string()))?)
+    }
+
+    /// Build using the file name.
+    pub fn build(self) -> Result<File> {
+        Ok(self.get_components()?.into())
+    }
+}
+
+impl From<String> for File {
+    fn from(file: String) -> Self {
+        Self::new(file)
+    }
+}
 
 /// A file object.
 #[derive(Debug, Clone)]
@@ -50,16 +81,17 @@ impl File {
             .ok()
             .map(|metadata| metadata.len()))
     }
-}
 
-impl ObjectMeta for File {
-    fn location(&self) -> String {
-        self.file.to_string()
+    /// Write the sums file to the configured location.
+    pub async fn write_sums(&self, sums_file: &SumsFile) -> Result<()> {
+        let path = SumsFile::format_sums_file(&self.file);
+        fs::write(&path, sums_file.to_json_string()?).await?;
+        Ok(())
     }
 }
 
 #[async_trait::async_trait]
-impl ObjectRead for File {
+impl ObjectSums for File {
     async fn sums_file(&mut self) -> Result<Option<SumsFile>> {
         self.get_existing_sums().await
     }
@@ -70,5 +102,13 @@ impl ObjectRead for File {
 
     async fn file_size(&mut self) -> Result<Option<u64>> {
         self.size().await
+    }
+
+    async fn write_sums_file(&self, sums_file: &SumsFile) -> Result<()> {
+        self.write_sums(sums_file).await
+    }
+
+    fn location(&self) -> String {
+        self.file.to_string()
     }
 }

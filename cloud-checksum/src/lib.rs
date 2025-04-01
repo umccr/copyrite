@@ -44,10 +44,9 @@ impl Commands {
             // it's an error if not verifying the data.
             if generate.checksum.is_empty()
                 && !generate.verify
-                && !generate
-                    .input
-                    .iter()
-                    .all(|input| matches!(Provider::try_from(input.as_str()), Ok(Provider::S3 { .. })))
+                && !generate.input.iter().all(|input| {
+                    matches!(Provider::try_from(input.as_str()), Ok(Provider::S3 { .. }))
+                })
             {
                 return Err(ParseError(
                     "some checksums must be specified if using file based objects and not verify existing sums".to_string(),
@@ -142,7 +141,7 @@ pub struct Copy {
     #[arg(short, long, env)]
     pub no_copy_meta: bool,
     /// The threshold at which a file uses multipart uploads when copying to S3. This can be
-    /// specified with a size unit, e.g. 8mib. By default, a multipart copy will occur when the 
+    /// specified with a size unit, e.g. 8mib. By default, a multipart copy will occur when the
     /// source file was uploaded using multipart, in order to match sums. This can be used to
     /// override that.
     #[arg(short, long, env, value_parser = |s: &str| parse_size(s))]

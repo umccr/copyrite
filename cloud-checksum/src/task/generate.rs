@@ -5,10 +5,8 @@ use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
 use crate::error::Error::GenerateError;
 use crate::error::{Error, Result};
-use crate::io::reader::channel::ChannelReader;
-use crate::io::reader::SharedReader;
-use crate::io::writer::ObjectWrite;
-use crate::io::IoBuilder;
+use crate::io::sums::channel::ChannelReader;
+use crate::io::sums::{ObjectSums, ObjectSumsBuilder, SharedReader};
 use crate::task::check::CheckObjects;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use futures_util::future::join_all;
@@ -79,15 +77,12 @@ impl GenerateTaskBuilder {
 
     /// Build a generate task.
     pub async fn build(mut self) -> Result<GenerateTask> {
-        let mut object_read = IoBuilder
-            .build_read(self.input_file_name.to_string())
-            .await?;
-        let object_write = IoBuilder
-            .build_write(self.input_file_name.to_string())
+        let mut sums = ObjectSumsBuilder
+            .build(self.input_file_name.to_string())
             .await?;
 
         let existing_output = if !self.input_file_name.is_empty() {
-            object_read.sums_file().await?
+            sums.sums_file().await?
         } else {
             None
         };
@@ -103,11 +98,11 @@ impl GenerateTaskBuilder {
         let reader: Box<dyn SharedReader + Send> = if let Some(reader) = self.reader {
             reader
         } else {
-            let file_size = object_read.file_size().await?;
+            let file_size = sums.file_size().await?;
             self.ctxs
                 .iter_mut()
                 .for_each(|ctx| ctx.set_file_size(file_size));
-            let reader = object_read.reader().await?;
+            let reader = sums.reader().await?;
 
             let reader = ChannelReader::new(reader, self.capacity);
             Box::new(reader)
@@ -119,7 +114,7 @@ impl GenerateTaskBuilder {
             existing_output,
             reader: Some(reader),
             write: self.write,
-            object_write,
+            object_sums: sums,
         };
 
         let task = task.add_tasks(HashSet::from_iter(self.ctxs))?;
@@ -142,7 +137,7 @@ pub struct GenerateTask {
     existing_output: Option<SumsFile>,
     reader: Option<Box<dyn SharedReader + Send>>,
     write: bool,
-    object_write: Box<dyn ObjectWrite + Send>,
+    object_sums: Box<dyn ObjectSums + Send>,
 }
 
 impl GenerateTask {
@@ -261,7 +256,7 @@ impl GenerateTask {
         }
 
         if self.write {
-            self.object_write.write_sums_file(&output).await?;
+            self.object_sums.write_sums_file(&output).await?;
         }
 
         Ok(output)
@@ -331,7 +326,7 @@ impl SumCtxPairs {
                     file_ctx.set_file_size(file.size);
 
                     let first = state.into_iter().next();
-                    first.map(|state| SumCtxPair::new(state.0 .0.location(), file_ctx.clone()))
+                    first.map(|state| SumCtxPair::new(state.0.location(), file_ctx.clone()))
                 })
                 .collect();
 
@@ -357,8 +352,8 @@ pub(crate) mod test {
         EXPECTED_SHA256_SUM,
     };
     use crate::checksum::standard::StandardCtx;
-    use crate::io::file::FileBuilder;
-    use crate::io::reader::channel::test::channel_reader;
+    use crate::io::sums::channel::test::channel_reader;
+    use crate::io::sums::file::FileBuilder;
     use crate::task::check::test::write_test_files_not_comparable;
     use crate::task::check::{CheckTaskBuilder, GroupBy};
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
@@ -516,7 +511,7 @@ pub(crate) mod test {
         );
         FileBuilder::default()
             .with_file(name.to_string())
-            .build_writer()?
+            .build()?
             .write_sums(&existing)
             .await?;
 
