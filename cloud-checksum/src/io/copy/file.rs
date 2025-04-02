@@ -5,7 +5,6 @@ use crate::error::Result;
 use crate::io::copy::{CopyContent, ObjectCopy};
 use crate::io::Provider;
 use tokio::fs::copy;
-use tokio::io::AsyncRead;
 use tokio::{fs, io};
 
 /// Build a file based sums object.
@@ -30,20 +29,17 @@ impl File {
     }
 
     /// Read the source into memory.
-    pub async fn read(&self, source: String) -> Result<impl AsyncRead> {
+    pub async fn read(&self, source: String) -> Result<CopyContent> {
         let file = fs::File::open(source).await?;
-        Ok(file)
+        let size = file.metadata().await?.len();
+        Ok(CopyContent::new(Box::new(file), Some(size), None, None))
     }
 
     /// Write the data to the destination.
-    pub async fn write(
-        &self,
-        destination: String,
-        mut data: impl AsyncRead + Unpin,
-    ) -> Result<Option<u64>> {
+    pub async fn write(&self, destination: String, mut data: CopyContent) -> Result<Option<u64>> {
         let mut file = fs::File::create(destination).await?;
 
-        let total = io::copy(&mut data, &mut file).await?;
+        let total = io::copy(&mut data.data, &mut file).await?;
 
         Ok(Some(total))
     }
@@ -64,15 +60,11 @@ impl ObjectCopy for File {
 
     async fn download(&self, source: Provider) -> Result<CopyContent> {
         let source = source.into_file()?;
-        Ok(CopyContent::new(
-            Box::new(self.read(source).await?),
-            None,
-            None,
-        ))
+        self.read(source).await
     }
 
     async fn upload(&self, destination: Provider, data: CopyContent) -> Result<Option<u64>> {
         let destination = destination.into_file()?;
-        self.write(destination, data.data).await
+        self.write(destination, data).await
     }
 }

@@ -15,6 +15,7 @@ pub mod file;
 /// Content to download/upload with optional tags.
 pub struct CopyContent {
     data: Box<dyn AsyncRead + Sync + Send + Unpin>,
+    size: Option<u64>,
     tags: Option<String>,
     metadata: Option<HashMap<String, String>>,
 }
@@ -23,11 +24,13 @@ impl CopyContent {
     /// Create a new copy content struct.
     pub fn new(
         data: Box<dyn AsyncRead + Sync + Send + Unpin>,
+        size: Option<u64>,
         tags: Option<String>,
         metadata: Option<HashMap<String, String>>,
     ) -> Self {
         Self {
             data,
+            size,
             tags,
             metadata,
         }

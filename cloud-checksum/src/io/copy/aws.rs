@@ -11,15 +11,10 @@ use aws_sdk_s3::types::{MetadataDirective, TaggingDirective};
 use aws_sdk_s3::Client;
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_runtime_api::client::result::SdkError;
-use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
 use aws_smithy_types::error::metadata::ProvideErrorMetadata;
-use bytes::Bytes;
-use futures_util::StreamExt;
-use http_body::Frame;
-use http_body_util::StreamBody;
 use std::collections::HashMap;
-use tokio_util::codec::{BytesCodec, FramedRead};
+use tokio::io::AsyncReadExt;
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
@@ -153,6 +148,8 @@ impl S3 {
             .send()
             .await?;
 
+        let size = result.content_length.map(u64::try_from).transpose()?;
+
         let tags = if self.metadata_mode.is_copy() {
             let tags = self
                 .client
@@ -180,6 +177,7 @@ impl S3 {
 
         Ok(CopyContent::new(
             Box::new(result.body.into_async_read()),
+            size,
             tags,
             metadata,
         ))
@@ -190,14 +188,15 @@ impl S3 {
         &self,
         key: String,
         bucket: String,
-        content: CopyContent,
+        mut content: CopyContent,
     ) -> Result<Option<u64>> {
-        let data = content.data;
-        let stream = StreamBody::new(
-            FramedRead::new(data, BytesCodec::new())
-                .map(|chunk| chunk.map(|chunk| Frame::data(Bytes::from(chunk)))),
-        );
-        let body = SdkBody::from_body_1_x(stream);
+        let mut buf = if let Some(capacity) = content.size {
+            Vec::with_capacity(usize::try_from(capacity)?)
+        } else {
+            Vec::new()
+        };
+
+        content.data.read_to_end(&mut buf).await?;
 
         let output = self
             .client
@@ -206,7 +205,7 @@ impl S3 {
             .set_metadata(content.metadata)
             .bucket(bucket)
             .key(key)
-            .body(ByteStream::new(body))
+            .body(ByteStream::from(buf))
             .send()
             .await;
 
@@ -215,7 +214,7 @@ impl S3 {
             return Ok(None);
         }
 
-        Ok(output?.size.map(u64::try_from).transpose()?)
+        Ok(content.size)
     }
 }
 

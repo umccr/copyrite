@@ -50,7 +50,7 @@ impl Default for TestFileBuilder {
     fn default() -> Self {
         Self {
             directory: DIRECTORY.parse().expect("expected valid directory"),
-            rng: StdRng::from_entropy(),
+            rng: StdRng::from_os_rng(),
             file_size: TEST_FILE_SIZE,
             file_name: TEST_FILE_NAME.to_string(),
             overwrite: false,
