@@ -803,6 +803,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "base64 0.22.1",
+ "bytes",
  "clap",
  "crc32c",
  "crc32fast",
@@ -810,6 +811,8 @@ dependencies = [
  "dyn-clone",
  "futures-util",
  "hex",
+ "http-body 1.0.1",
+ "http-body-util",
  "humantime",
  "md-5",
  "parse-size",
@@ -821,6 +824,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.12",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

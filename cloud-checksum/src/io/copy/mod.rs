@@ -1,12 +1,11 @@
 //! Functionality related to copying.
 //!
 
-use crate::checksum::file::SumsFile;
 use crate::error::Result;
 use crate::io::copy::aws::S3Builder;
 use crate::io::copy::file::FileBuilder;
-use crate::io::sums::ObjectSums;
 use crate::io::{default_s3_client, Provider};
+use tokio::io::AsyncRead;
 
 pub mod aws;
 pub mod file;
@@ -20,6 +19,16 @@ pub trait ObjectCopy {
         provider_source: Provider,
         provider_destination: Provider,
     ) -> Result<Option<u64>>;
+
+    /// Download the object to memory.
+    async fn download(&self, source: Provider) -> Result<Box<dyn AsyncRead + Sync + Send + Unpin>>;
+
+    /// Upload the object to the destination.
+    async fn upload(
+        &self,
+        destination: Provider,
+        data: Box<dyn AsyncRead + Sync + Send + Unpin>,
+    ) -> Result<Option<u64>>;
 }
 
 /// Build object copy from object URLs.
@@ -30,7 +39,7 @@ impl ObjectCopyBuilder {
     pub async fn build(self, url: String) -> Result<Box<dyn ObjectCopy + Send>> {
         let provider = Provider::try_from(url.as_str())?;
         if provider.is_file() {
-            Ok(Box::new(FileBuilder::default().build()))
+            Ok(Box::new(FileBuilder.build()))
         } else {
             Ok(Box::new(
                 S3Builder::default()

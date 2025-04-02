@@ -17,6 +17,10 @@ futures-util = "0.3"
 async-stream = "0.3"
 async-trait = "0.1"
 dyn-clone = "1.0"
+tokio-util = "0.7"
+http-body-util = "0.1"
+http-body = "1"
+bytes = "1"
 
 # Checksums
 md-5 = "0.10"

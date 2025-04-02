@@ -7,6 +7,14 @@ use crate::error::Result;
 use crate::io::copy::ObjectCopy;
 use crate::io::Provider;
 use aws_sdk_s3::Client;
+use aws_smithy_types::body::SdkBody;
+use aws_smithy_types::byte_stream::ByteStream;
+use bytes::Bytes;
+use futures_util::StreamExt;
+use http_body::Frame;
+use http_body_util::StreamBody;
+use tokio::io::AsyncRead;
+use tokio_util::codec::{BytesCodec, FramedRead};
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
@@ -28,7 +36,7 @@ impl S3Builder {
             )
         };
 
-        Ok(self.client.ok_or_else(error_fn)?)
+        self.client.ok_or_else(error_fn)
     }
 
     /// Build using the client, bucket and key.
@@ -75,13 +83,51 @@ impl S3 {
 
         self.client
             .copy_object()
-            .copy_source(&format!("{}/{}", bucket, key))
+            .copy_source(format!("{}/{}", bucket, key))
             .key(SumsFile::format_target_file(&destination_key))
             .bucket(destination_bucket)
             .send()
             .await?;
 
         Ok(size.map(u64::try_from).transpose()?)
+    }
+
+    /// Get the object from S3.
+    pub async fn get_object(&self, key: String, bucket: String) -> Result<impl AsyncRead> {
+        Ok(self
+            .client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await?
+            .body
+            .into_async_read())
+    }
+
+    /// Put the object to S3.
+    pub async fn put_object(
+        &self,
+        key: String,
+        bucket: String,
+        data: impl AsyncRead + Send + Sync + 'static,
+    ) -> Result<Option<u64>> {
+        let stream = StreamBody::new(
+            FramedRead::new(data, BytesCodec::new())
+                .map(|chunk| chunk.map(|chunk| Frame::data(Bytes::from(chunk)))),
+        );
+        let body = SdkBody::from_body_1_x(stream);
+
+        let output = self
+            .client
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(ByteStream::new(body))
+            .send()
+            .await?;
+
+        Ok(output.size.map(u64::try_from).transpose()?)
     }
 }
 
@@ -97,5 +143,19 @@ impl ObjectCopy for S3 {
 
         self.copy_object_single(key, bucket, destination_key, destination_bucket)
             .await
+    }
+
+    async fn download(&self, source: Provider) -> Result<Box<dyn AsyncRead + Sync + Send + Unpin>> {
+        let (bucket, key) = source.into_s3()?;
+        Ok(Box::new(self.get_object(key, bucket).await?))
+    }
+
+    async fn upload(
+        &self,
+        destination: Provider,
+        data: Box<dyn AsyncRead + Sync + Send + Unpin>,
+    ) -> Result<Option<u64>> {
+        let (bucket, key) = destination.into_s3()?;
+        self.put_object(key, bucket, data).await
     }
 }

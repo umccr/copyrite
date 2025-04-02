@@ -56,7 +56,7 @@ impl CopyTaskBuilder {
         {
             Mode::ServerSide
         } else {
-            todo!()
+            Mode::DownloadUpload
         };
 
         let source_copy = ObjectCopyBuilder.build(self.source).await?;
@@ -65,8 +65,8 @@ impl CopyTaskBuilder {
         let copy_task = CopyTask {
             source,
             destination,
-            multipart_threshold: self.multipart_threshold,
-            part_size: self.part_size,
+            // multipart_threshold: self.multipart_threshold,
+            // part_size: self.part_size,
             source_copy,
             destination_copy,
             mode,
@@ -93,14 +93,15 @@ impl CopyInfo {
 #[derive(Debug)]
 pub enum Mode {
     ServerSide,
+    DownloadUpload,
 }
 
 /// Execute the copy task.
 pub struct CopyTask {
     source: Provider,
     destination: Provider,
-    multipart_threshold: Option<u64>,
-    part_size: Option<u64>,
+    // multipart_threshold: Option<u64>,
+    // part_size: Option<u64>,
     source_copy: Box<dyn ObjectCopy + Send>,
     destination_copy: Box<dyn ObjectCopy + Send>,
     mode: Mode,
@@ -114,6 +115,10 @@ impl CopyTask {
                 self.source_copy
                     .copy_object(self.source, self.destination)
                     .await?
+            }
+            Mode::DownloadUpload => {
+                let data = self.source_copy.download(self.source).await?;
+                self.destination_copy.upload(self.destination, data).await?
             }
         };
 

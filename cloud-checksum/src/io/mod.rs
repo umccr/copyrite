@@ -6,7 +6,6 @@ use crate::error::{Error, Result};
 use aws_config::load_defaults;
 use aws_sdk_s3::Client;
 use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
-use dyn_clone::DynClone;
 
 pub mod copy;
 pub mod sums;

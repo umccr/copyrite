@@ -85,9 +85,7 @@ async fn main() -> Result<()> {
         Subcommands::Copy(Copy {
             source,
             destination,
-            no_copy_meta,
-            multipart_threshold,
-            part_size,
+            ..
         }) => {
             let result = copy(source, destination).await?;
             println!("{}", result.to_json_string()?);

@@ -83,7 +83,7 @@ pub enum GroupBy {
 }
 
 /// Representation of file state to implement equality and hashing.
-pub struct State(pub(crate) (Box<dyn ObjectSums + Send>));
+pub struct State(pub(crate) Box<dyn ObjectSums + Send>);
 
 impl Hash for State {
     fn hash<H: Hasher>(&self, state: &mut H) {

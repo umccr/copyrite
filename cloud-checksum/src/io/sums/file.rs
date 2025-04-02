@@ -23,9 +23,8 @@ impl FileBuilder {
     }
 
     fn get_components(self) -> Result<String> {
-        Ok(self
-            .file
-            .ok_or_else(|| ParseError("file is required for `FileBuilder`".to_string()))?)
+        self.file
+            .ok_or_else(|| ParseError("file is required for `FileBuilder`".to_string()))
     }
 
     /// Build using the file name.
