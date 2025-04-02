@@ -125,6 +125,30 @@ pub struct Check {
     pub group_by: GroupBy,
 }
 
+/// The tag mode to use when copying files.
+#[derive(Debug, Clone, ValueEnum, Copy, Default)]
+pub enum MetadataCopy {
+    #[default]
+    /// Copy all tags or metadata and fail if it could not be copied.
+    Copy,
+    /// Do not copy any tags or metadata.
+    Supress,
+    /// Attempt to copy tags or metadata but do not fail if it could not be copied.
+    BestEffort,
+}
+
+impl MetadataCopy {
+    /// Is this a copy metadata operation.
+    pub fn is_copy(&self) -> bool {
+        matches!(self, MetadataCopy::Copy | MetadataCopy::BestEffort)
+    }
+
+    /// Is this a best-effort copy metadata operation.
+    pub fn is_best_effort(&self) -> bool {
+        matches!(self, MetadataCopy::BestEffort)
+    }
+}
+
 /// The copy subcommand components.
 #[derive(Debug, Args)]
 pub struct Copy {
@@ -136,10 +160,10 @@ pub struct Copy {
     /// be a directory.
     #[arg(required = true)]
     pub destination: String,
-    /// Do not copy any tags or metadata when copying the files. By default, all tags and metadata
-    /// are copied, such as S3 tags.
-    #[arg(short, long, env)]
-    pub no_copy_meta: bool,
+    /// Controls how tags and metadata are copied. By default, this will copy all tags and metadata
+    /// and fail if the tags could not be copied.
+    #[arg(long, env, default_value = "copy")]
+    pub metadata_mode: MetadataCopy,
     /// The threshold at which a file uses multipart uploads when copying to S3. This can be
     /// specified with a size unit, e.g. 8mib. By default, a multipart copy will occur when the
     /// source file was uploaded using multipart, in order to match sums. This can be used to
@@ -216,10 +240,10 @@ pub struct Optimization {
     /// The capacity of the sender channel for the channel reader. This controls the
     /// number of elements that can be stored in the reader channel for waiting for checksum
     /// processes to catch up.
-    #[arg(global = true, short = 'p', long, env, default_value_t = 100)]
+    #[arg(global = true, long, env, default_value_t = 100)]
     pub channel_capacity: usize,
     /// The chunk size of the channel reader in bytes. This controls how many bytes are read
     /// by the reader before they are passed into the channel.
-    #[arg(global = true, short = 's', long, env, default_value_t = 1048576)]
+    #[arg(global = true, long, env, default_value_t = 1048576)]
     pub reader_chunk_size: usize,
 }

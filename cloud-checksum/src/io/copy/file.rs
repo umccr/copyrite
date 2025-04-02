@@ -2,7 +2,7 @@
 //!
 
 use crate::error::Result;
-use crate::io::copy::ObjectCopy;
+use crate::io::copy::{CopyContent, ObjectCopy};
 use crate::io::Provider;
 use tokio::fs::copy;
 use tokio::io::AsyncRead;
@@ -62,17 +62,17 @@ impl ObjectCopy for File {
         Ok(Some(self.copy(source, destination).await?))
     }
 
-    async fn download(&self, source: Provider) -> Result<Box<dyn AsyncRead + Sync + Send + Unpin>> {
+    async fn download(&self, source: Provider) -> Result<CopyContent> {
         let source = source.into_file()?;
-        Ok(Box::new(self.read(source).await?))
+        Ok(CopyContent::new(
+            Box::new(self.read(source).await?),
+            None,
+            None,
+        ))
     }
 
-    async fn upload(
-        &self,
-        destination: Provider,
-        data: Box<dyn AsyncRead + Sync + Send + Unpin>,
-    ) -> Result<Option<u64>> {
+    async fn upload(&self, destination: Provider, data: CopyContent) -> Result<Option<u64>> {
         let destination = destination.into_file()?;
-        self.write(destination, data).await
+        self.write(destination, data.data).await
     }
 }

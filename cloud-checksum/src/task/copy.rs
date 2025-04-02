@@ -5,6 +5,7 @@ use crate::error::Error::CopyError;
 use crate::error::Result;
 use crate::io::copy::{ObjectCopy, ObjectCopyBuilder};
 use crate::io::Provider;
+use crate::MetadataCopy;
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
 
@@ -13,8 +14,9 @@ use serde_json::to_string;
 pub struct CopyTaskBuilder {
     source: String,
     destination: String,
-    multipart_threshold: Option<u64>,
-    part_size: Option<u64>,
+    // multipart_threshold: Option<u64>,
+    // part_size: Option<u64>,
+    metadata_mode: MetadataCopy,
 }
 
 impl CopyTaskBuilder {
@@ -30,17 +32,23 @@ impl CopyTaskBuilder {
         self
     }
 
-    /// Set the multipart threshold.
-    pub fn with_multipart_threshold(mut self, multipart_threshold: u64) -> Self {
-        self.multipart_threshold = Some(multipart_threshold);
+    /// Set the metadata mode.
+    pub fn with_metadata_mode(mut self, metadata_mode: MetadataCopy) -> Self {
+        self.metadata_mode = metadata_mode;
         self
     }
 
-    /// Set the part size.
-    pub fn with_part_size(mut self, part_size: u64) -> Self {
-        self.part_size = Some(part_size);
-        self
-    }
+    // /// Set the multipart threshold.
+    // pub fn with_multipart_threshold(mut self, multipart_threshold: u64) -> Self {
+    //     self.multipart_threshold = Some(multipart_threshold);
+    //     self
+    // }
+    //
+    // /// Set the part size.
+    // pub fn with_part_size(mut self, part_size: u64) -> Self {
+    //     self.part_size = Some(part_size);
+    //     self
+    // }
 
     /// Build a generate task.
     pub async fn build(self) -> Result<CopyTask> {
@@ -51,16 +59,22 @@ impl CopyTaskBuilder {
         let source = Provider::try_from(self.source.as_str())?;
         let destination = Provider::try_from(self.destination.as_str())?;
 
-        let mode = if (source.is_file() && destination.is_file())
+        let copy_mode = if (source.is_file() && destination.is_file())
             || (source.is_s3() && destination.is_s3())
         {
-            Mode::ServerSide
+            CopyMode::ServerSide
         } else {
-            Mode::DownloadUpload
+            CopyMode::DownloadUpload
         };
 
-        let source_copy = ObjectCopyBuilder.build(self.source).await?;
-        let destination_copy = ObjectCopyBuilder.build(self.destination).await?;
+        let source_copy = ObjectCopyBuilder::default()
+            .with_copy_metadata(self.metadata_mode)
+            .build(self.source)
+            .await?;
+        let destination_copy = ObjectCopyBuilder::default()
+            .with_copy_metadata(self.metadata_mode)
+            .build(self.destination)
+            .await?;
 
         let copy_task = CopyTask {
             source,
@@ -69,7 +83,7 @@ impl CopyTaskBuilder {
             // part_size: self.part_size,
             source_copy,
             destination_copy,
-            mode,
+            copy_mode,
         };
 
         Ok(copy_task)
@@ -91,7 +105,7 @@ impl CopyInfo {
 
 /// Mode to execute copy task in.
 #[derive(Debug)]
-pub enum Mode {
+pub enum CopyMode {
     ServerSide,
     DownloadUpload,
 }
@@ -104,24 +118,61 @@ pub struct CopyTask {
     // part_size: Option<u64>,
     source_copy: Box<dyn ObjectCopy + Send>,
     destination_copy: Box<dyn ObjectCopy + Send>,
-    mode: Mode,
+    copy_mode: CopyMode,
 }
 
 impl CopyTask {
     /// Runs the copy task and return the output.
     pub async fn run(self) -> Result<CopyInfo> {
-        let total = match self.mode {
-            Mode::ServerSide => {
+        let total = match self.copy_mode {
+            CopyMode::ServerSide => {
                 self.source_copy
                     .copy_object(self.source, self.destination)
                     .await?
             }
-            Mode::DownloadUpload => {
+            CopyMode::DownloadUpload => {
                 let data = self.source_copy.download(self.source).await?;
                 self.destination_copy.upload(self.destination, data).await?
             }
         };
 
         Ok(CopyInfo { total_bytes: total })
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test {
+    use super::*;
+    use anyhow::Result;
+    use tempfile::tempdir;
+    use tokio::fs::File;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn test_copy() -> Result<()> {
+        let tmp = tempdir()?;
+        let source = tmp.path().join("source");
+        let destination = tmp.path().join("destination");
+
+        let mut file = File::create(&source).await?;
+        file.write_all("test".as_bytes()).await?;
+
+        let copy = CopyTaskBuilder::default()
+            .with_source(source.to_string_lossy().to_string())
+            .with_destination(destination.to_string_lossy().to_string())
+            .build()
+            .await?
+            .run()
+            .await?;
+
+        assert_eq!(copy.total_bytes, Some(4));
+
+        let mut file = File::open(destination).await?;
+        let mut contents = vec![];
+        file.read_to_end(&mut contents).await?;
+
+        assert_eq!(contents, b"test");
+
+        Ok(())
     }
 }
