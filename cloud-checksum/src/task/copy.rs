@@ -5,7 +5,7 @@ use crate::error::Error::CopyError;
 use crate::error::Result;
 use crate::io::copy::{ObjectCopy, ObjectCopyBuilder};
 use crate::io::Provider;
-use crate::MetadataCopy;
+use crate::{CopyMode, MetadataCopy};
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
 
@@ -17,6 +17,7 @@ pub struct CopyTaskBuilder {
     // multipart_threshold: Option<u64>,
     // part_size: Option<u64>,
     metadata_mode: MetadataCopy,
+    copy_mode: CopyMode,
 }
 
 impl CopyTaskBuilder {
@@ -35,6 +36,12 @@ impl CopyTaskBuilder {
     /// Set the metadata mode.
     pub fn with_metadata_mode(mut self, metadata_mode: MetadataCopy) -> Self {
         self.metadata_mode = metadata_mode;
+        self
+    }
+
+    /// Set the copy mode.
+    pub fn with_copy_mode(mut self, copy_mode: CopyMode) -> Self {
+        self.copy_mode = copy_mode;
         self
     }
 
@@ -62,7 +69,11 @@ impl CopyTaskBuilder {
         let copy_mode = if (source.is_file() && destination.is_file())
             || (source.is_s3() && destination.is_s3())
         {
-            CopyMode::ServerSide
+            if self.copy_mode.is_download_upload() {
+                CopyMode::DownloadUpload
+            } else {
+                CopyMode::ServerSide
+            }
         } else {
             CopyMode::DownloadUpload
         };
@@ -101,13 +112,6 @@ impl CopyInfo {
     pub fn to_json_string(&self) -> Result<String> {
         Ok(to_string(&self)?)
     }
-}
-
-/// Mode to execute copy task in.
-#[derive(Debug)]
-pub enum CopyMode {
-    ServerSide,
-    DownloadUpload,
 }
 
 /// Execute the copy task.

@@ -149,6 +149,24 @@ impl MetadataCopy {
     }
 }
 
+/// Mode to execute copy task in.
+#[derive(Debug, Clone, ValueEnum, Copy, Default)]
+pub enum CopyMode {
+    /// Always use server-side copy operations if they are available. This may still download and
+    /// upload if it is not possible to server-side copy.
+    #[default]
+    ServerSide,
+    /// Download the object first and then upload it to the destination.
+    DownloadUpload,
+}
+
+impl CopyMode {
+    /// Is this a download-upload copy operation.
+    pub fn is_download_upload(&self) -> bool {
+        matches!(self, CopyMode::DownloadUpload)
+    }
+}
+
 /// The copy subcommand components.
 #[derive(Debug, Args)]
 pub struct Copy {
@@ -164,6 +182,8 @@ pub struct Copy {
     /// and fail if the tags could not be copied.
     #[arg(long, env, default_value = "copy")]
     pub metadata_mode: MetadataCopy,
+    #[arg(long, env, default_value = "server-side")]
+    pub copy_mode: CopyMode,
     /// The threshold at which a file uses multipart uploads when copying to S3. This can be
     /// specified with a size unit, e.g. 8mib. By default, a multipart copy will occur when the
     /// source file was uploaded using multipart, in order to match sums. This can be used to
