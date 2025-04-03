@@ -37,14 +37,34 @@ impl CopyContent {
     }
 }
 
+pub struct Range {
+    start: u64,
+    end: u64,
+}
+
+impl Range {
+    pub fn to_string(&self) -> Option<String> {
+        Some(format!("bytes={}-{}", self.start, self.end.checked_sub(1)?))
+    }
+}
+
 /// Write operations on file based or cloud files.
 #[async_trait::async_trait]
 pub trait ObjectCopy {
-    /// Copy the object to a new location using a single part.
+    /// Copy the whole object to a new location.
     async fn copy_object(
         &self,
         provider_source: Provider,
         provider_destination: Provider,
+    ) -> Result<Option<u64>>;
+
+    /// Copy the object part to a new location.
+    async fn copy_object_part(
+        &mut self,
+        provider_source: Provider,
+        provider_destination: Provider,
+        part_number: Option<u64>,
+        range: Range,
     ) -> Result<Option<u64>>;
 
     /// Download the object to memory.

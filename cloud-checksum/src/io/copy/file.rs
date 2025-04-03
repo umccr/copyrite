@@ -1,8 +1,9 @@
 //! File-based sums file logic.
 //!
 
+use crate::checksum::file::SumsFile;
 use crate::error::Result;
-use crate::io::copy::{CopyContent, ObjectCopy};
+use crate::io::copy::{CopyContent, ObjectCopy, Range};
 use crate::io::Provider;
 use tokio::fs::copy;
 use tokio::{fs, io};
@@ -19,7 +20,7 @@ impl FileBuilder {
 }
 
 /// A file object.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct File;
 
 impl File {
@@ -52,19 +53,35 @@ impl ObjectCopy for File {
         provider_source: Provider,
         provider_destination: Provider,
     ) -> Result<Option<u64>> {
-        let source = provider_source.into_file()?;
-        let destination = provider_destination.into_file()?;
+        let source = SumsFile::format_target_file(&provider_source.into_file()?);
+        let destination = SumsFile::format_target_file(&provider_destination.into_file()?);
 
         Ok(Some(self.copy(source, destination).await?))
     }
 
+    async fn copy_object_part(
+        &mut self,
+        provider_source: Provider,
+        provider_destination: Provider,
+        _part_number: Option<u64>,
+        _range: Range,
+    ) -> Result<Option<u64>> {
+        // There's not much point in copying parts of files already on disk, just let the filesystem do it.
+        self.copy_object(provider_source, provider_destination)
+            .await
+    }
+
     async fn download(&self, source: Provider) -> Result<CopyContent> {
         let source = source.into_file()?;
+        let source = SumsFile::format_target_file(&source);
+
         self.read(source).await
     }
 
     async fn upload(&self, destination: Provider, data: CopyContent) -> Result<Option<u64>> {
         let destination = destination.into_file()?;
+        let destination = SumsFile::format_target_file(&destination);
+
         self.write(destination, data).await
     }
 }

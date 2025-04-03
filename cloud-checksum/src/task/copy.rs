@@ -14,8 +14,8 @@ use serde_json::to_string;
 pub struct CopyTaskBuilder {
     source: String,
     destination: String,
-    // multipart_threshold: Option<u64>,
-    // part_size: Option<u64>,
+    multipart_threshold: Option<u64>,
+    part_size: Option<u64>,
     metadata_mode: MetadataCopy,
     copy_mode: CopyMode,
 }
@@ -45,17 +45,17 @@ impl CopyTaskBuilder {
         self
     }
 
-    // /// Set the multipart threshold.
-    // pub fn with_multipart_threshold(mut self, multipart_threshold: u64) -> Self {
-    //     self.multipart_threshold = Some(multipart_threshold);
-    //     self
-    // }
-    //
-    // /// Set the part size.
-    // pub fn with_part_size(mut self, part_size: u64) -> Self {
-    //     self.part_size = Some(part_size);
-    //     self
-    // }
+    /// Set the multipart threshold.
+    pub fn with_multipart_threshold(mut self, multipart_threshold: Option<u64>) -> Self {
+        self.multipart_threshold = multipart_threshold;
+        self
+    }
+
+    /// Set the part size.
+    pub fn with_part_size(mut self, part_size: Option<u64>) -> Self {
+        self.part_size = part_size;
+        self
+    }
 
     /// Build a generate task.
     pub async fn build(self) -> Result<CopyTask> {
@@ -90,11 +90,12 @@ impl CopyTaskBuilder {
         let copy_task = CopyTask {
             source,
             destination,
-            // multipart_threshold: self.multipart_threshold,
-            // part_size: self.part_size,
+            _multipart_threshold: self.multipart_threshold,
+            _part_size: self.part_size,
             source_copy,
             destination_copy,
             copy_mode,
+            use_multipart: false,
         };
 
         Ok(copy_task)
@@ -118,25 +119,32 @@ impl CopyInfo {
 pub struct CopyTask {
     source: Provider,
     destination: Provider,
-    // multipart_threshold: Option<u64>,
-    // part_size: Option<u64>,
+    _multipart_threshold: Option<u64>,
+    _part_size: Option<u64>,
     source_copy: Box<dyn ObjectCopy + Send>,
     destination_copy: Box<dyn ObjectCopy + Send>,
     copy_mode: CopyMode,
+    use_multipart: bool,
 }
 
 impl CopyTask {
     /// Runs the copy task and return the output.
     pub async fn run(self) -> Result<CopyInfo> {
-        let total = match self.copy_mode {
-            CopyMode::ServerSide => {
+        let total = match (self.copy_mode, self.use_multipart) {
+            (CopyMode::ServerSide, false) => {
                 self.source_copy
                     .copy_object(self.source, self.destination)
                     .await?
             }
-            CopyMode::DownloadUpload => {
+            (CopyMode::ServerSide, true) => {
+                todo!()
+            }
+            (CopyMode::DownloadUpload, false) => {
                 let data = self.source_copy.download(self.source).await?;
                 self.destination_copy.upload(self.destination, data).await?
+            }
+            (CopyMode::DownloadUpload, true) => {
+                todo!()
             }
         };
 

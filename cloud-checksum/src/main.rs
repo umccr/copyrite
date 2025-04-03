@@ -87,9 +87,18 @@ async fn main() -> Result<()> {
             destination,
             metadata_mode,
             copy_mode,
-            ..
+            multipart_threshold,
+            part_size,
         }) => {
-            let result = copy(source, destination, metadata_mode, copy_mode).await?;
+            let result = copy(
+                source,
+                destination,
+                metadata_mode,
+                copy_mode,
+                multipart_threshold,
+                part_size,
+            )
+            .await?;
             println!("{}", result.to_json_string()?);
         }
     };
@@ -102,11 +111,15 @@ async fn copy(
     destination: String,
     metadata_mode: MetadataCopy,
     copy_mode: CopyMode,
+    multipart_threshold: Option<u64>,
+    part_size: Option<u64>,
 ) -> Result<CopyInfo> {
     CopyTaskBuilder::default()
         .with_source(source)
         .with_destination(destination)
         .with_metadata_mode(metadata_mode)
+        .with_multipart_threshold(multipart_threshold)
+        .with_part_size(part_size)
         .with_copy_mode(copy_mode)
         .build()
         .await?

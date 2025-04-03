@@ -2,9 +2,9 @@
 //!
 
 use crate::checksum::file::SumsFile;
-use crate::error::Error::ParseError;
+use crate::error::Error::{AwsError, ParseError};
 use crate::error::Result;
-use crate::io::copy::{CopyContent, ObjectCopy};
+use crate::io::copy::{CopyContent, ObjectCopy, Range};
 use crate::io::Provider;
 use crate::MetadataCopy;
 use aws_sdk_s3::types::{MetadataDirective, TaggingDirective};
@@ -63,6 +63,7 @@ impl From<(Client, MetadataCopy)> for S3 {
 pub struct S3 {
     client: Client,
     metadata_mode: MetadataCopy,
+    multipart_upload: HashMap<(String, String), String>,
 }
 
 impl S3 {
@@ -71,9 +72,11 @@ impl S3 {
         Self {
             client,
             metadata_mode,
+            multipart_upload: HashMap::new(),
         }
     }
 
+    /// Check if the error is an access denied error.
     fn is_access_denied<T: ProvideErrorMetadata>(err: &SdkError<T, HttpResponse>) -> bool {
         if let Some(err) = err.as_service_error() {
             if err
@@ -87,6 +90,47 @@ impl S3 {
         false
     }
 
+    /// Create a new multipart upload, or return an existing one if it is in progress for the
+    /// bucket and key.
+    pub async fn get_multipart_upload(
+        &mut self,
+        key: String,
+        bucket: String,
+        tagging: Option<String>,
+        metadata: Option<HashMap<String, String>>,
+    ) -> Result<String> {
+        let entry = (bucket, key);
+        if self.multipart_upload.contains_key(&entry) {
+            return Ok(self.multipart_upload[&entry].clone());
+        }
+
+        let upload = self
+            .client
+            .create_multipart_upload()
+            .set_tagging(tagging)
+            .set_metadata(metadata)
+            .bucket(&entry.0)
+            .key(&entry.1)
+            .send()
+            .await?;
+
+        Ok(self
+            .multipart_upload
+            .entry(entry)
+            .or_insert(
+                upload
+                    .upload_id
+                    .ok_or_else(|| AwsError("missing upload id".to_string()))?,
+            )
+            .to_string())
+    }
+
+    /// Reset the cached multipart upload.
+    pub fn reset_multipart_upload(&mut self, key: String, bucket: String) {
+        let entry = (bucket, key);
+        self.multipart_upload.remove(&entry);
+    }
+
     /// Copy the object using the `CopyObject` operation.
     pub async fn copy_object_single(
         &self,
@@ -95,7 +139,6 @@ impl S3 {
         destination_key: String,
         destination_bucket: String,
     ) -> Result<Option<u64>> {
-        let key = SumsFile::format_target_file(&key);
         let size = self
             .client
             .head_object()
@@ -105,17 +148,8 @@ impl S3 {
             .await?
             .content_length;
 
-        let (tagging, tagging_set) = if self.metadata_mode.is_copy() {
-            (TaggingDirective::Copy, None)
-        } else {
-            (TaggingDirective::Replace, Some("".to_string()))
-        };
-
-        let (metadata, metadata_set) = if self.metadata_mode.is_copy() {
-            (MetadataDirective::Copy, None)
-        } else {
-            (MetadataDirective::Replace, Some(HashMap::new()))
-        };
+        let (tagging, tagging_set) = self.tagging_directive();
+        let (metadata, metadata_set) = self.metadata_directive();
 
         let result = self
             .client
@@ -124,7 +158,7 @@ impl S3 {
             .set_tagging(tagging_set)
             .metadata_directive(metadata)
             .set_metadata(metadata_set)
-            .copy_source(format!("{}/{}", bucket, key))
+            .copy_source(Self::copy_source(&key, &bucket))
             .key(SumsFile::format_target_file(&destination_key))
             .bucket(destination_bucket)
             .send()
@@ -136,6 +170,107 @@ impl S3 {
         }
 
         Ok(size.map(u64::try_from).transpose()?)
+    }
+
+    /// Get the copy source.
+    fn copy_source(key: &str, bucket: &str) -> String {
+        format!("{}/{}", bucket, key)
+    }
+
+    /// Extract the metadata directive and metadata to be set.
+    fn metadata_directive(&self) -> (MetadataDirective, Option<HashMap<String, String>>) {
+        let (metadata, metadata_set) = if self.metadata_mode.is_copy() {
+            (MetadataDirective::Copy, None)
+        } else {
+            (MetadataDirective::Replace, Some(HashMap::new()))
+        };
+        (metadata, metadata_set)
+    }
+
+    /// Extract the tagging directive and tags to be set.
+    fn tagging_directive(&self) -> (TaggingDirective, Option<String>) {
+        let (tagging, tagging_set) = if self.metadata_mode.is_copy() {
+            (TaggingDirective::Copy, None)
+        } else {
+            (TaggingDirective::Replace, Some("".to_string()))
+        };
+        (tagging, tagging_set)
+    }
+
+    /// Get the url-encoded tagging for the object.
+    async fn get_tagging(&self, key: &str, bucket: &str) -> Result<Option<String>> {
+        let tags = self
+            .client
+            .get_object_tagging()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await?;
+        let tags = tags
+            .tag_set
+            .into_iter()
+            .map(|tag| format!("{}={}", tag.key(), tag.value()))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        Ok(Some(tags))
+    }
+
+    /// Copy the object using multiple parts.
+    pub async fn copy_object_multipart(
+        &mut self,
+        key: String,
+        bucket: String,
+        destination_key: String,
+        destination_bucket: String,
+        part_number: Option<u64>,
+        range: Range,
+    ) -> Result<Option<u64>> {
+        let head = self
+            .client
+            .head_object()
+            .bucket(&bucket)
+            .key(&key)
+            .send()
+            .await?;
+        let tagging = self.get_tagging(&key, &bucket).await?;
+
+        let upload_id = self
+            .get_multipart_upload(
+                destination_key.to_string(),
+                destination_bucket.to_string(),
+                tagging,
+                head.metadata,
+            )
+            .await?;
+
+        if let Some(part_number) = part_number {
+            self.client
+                .upload_part_copy()
+                .upload_id(&upload_id)
+                .part_number(i32::try_from(part_number)?)
+                .key(destination_key)
+                .bucket(destination_bucket)
+                .copy_source(Self::copy_source(&key, &bucket))
+                .copy_source_range(
+                    range
+                        .to_string()
+                        .ok_or_else(|| AwsError("invalid range".to_string()))?,
+                )
+                .send()
+                .await?;
+        } else {
+            self.client
+                .complete_multipart_upload()
+                .bucket(&bucket)
+                .key(&key)
+                .upload_id(upload_id)
+                .send()
+                .await?;
+            self.reset_multipart_upload(key, bucket);
+        }
+
+        Ok(head.content_length.map(u64::try_from).transpose()?)
     }
 
     /// Get the object from S3.
@@ -151,20 +286,7 @@ impl S3 {
         let size = result.content_length.map(u64::try_from).transpose()?;
 
         let tags = if self.metadata_mode.is_copy() {
-            let tags = self
-                .client
-                .get_object_tagging()
-                .bucket(bucket)
-                .key(key)
-                .send()
-                .await?;
-            let tags = tags
-                .tag_set
-                .into_iter()
-                .map(|tag| format!("{}={}", tag.key(), tag.value()))
-                .collect::<Vec<_>>()
-                .join("&");
-            Some(tags)
+            self.get_tagging(&key, &bucket).await?
         } else {
             None
         };
@@ -228,17 +350,48 @@ impl ObjectCopy for S3 {
         let (bucket, key) = provider_source.into_s3()?;
         let (destination_bucket, destination_key) = provider_destination.into_s3()?;
 
+        let key = SumsFile::format_target_file(&key);
+        let destination_key = SumsFile::format_target_file(&destination_key);
+
         self.copy_object_single(key, bucket, destination_key, destination_bucket)
             .await
     }
 
+    async fn copy_object_part(
+        &mut self,
+        provider_source: Provider,
+        provider_destination: Provider,
+        part_number: Option<u64>,
+        range: Range,
+    ) -> Result<Option<u64>> {
+        let (bucket, key) = provider_source.into_s3()?;
+        let (destination_bucket, destination_key) = provider_destination.into_s3()?;
+
+        let key = SumsFile::format_target_file(&key);
+        let destination_key = SumsFile::format_target_file(&destination_key);
+
+        self.copy_object_multipart(
+            key,
+            bucket,
+            destination_key,
+            destination_bucket,
+            part_number,
+            range,
+        )
+        .await
+    }
+
     async fn download(&self, source: Provider) -> Result<CopyContent> {
         let (bucket, key) = source.into_s3()?;
+        let key = SumsFile::format_target_file(&key);
+
         Ok(self.get_object(key, bucket).await?)
     }
 
     async fn upload(&self, destination: Provider, data: CopyContent) -> Result<Option<u64>> {
         let (bucket, key) = destination.into_s3()?;
+        let key = SumsFile::format_target_file(&key);
+
         self.put_object(key, bucket, data).await
     }
 }
