@@ -129,19 +129,21 @@ pub struct CopyTask {
 
 impl CopyTask {
     /// Runs the copy task and return the output.
-    pub async fn run(self) -> Result<CopyInfo> {
+    pub async fn run(mut self) -> Result<CopyInfo> {
         let total = match (self.copy_mode, self.use_multipart) {
             (CopyMode::ServerSide, false) => {
                 self.source_copy
-                    .copy_object(self.source, self.destination)
+                    .copy_object(self.source, self.destination, None)
                     .await?
             }
             (CopyMode::ServerSide, true) => {
                 todo!()
             }
             (CopyMode::DownloadUpload, false) => {
-                let data = self.source_copy.download(self.source).await?;
-                self.destination_copy.upload(self.destination, data).await?
+                let data = self.source_copy.download(self.source, None).await?;
+                self.destination_copy
+                    .upload(self.destination, data, None)
+                    .await?
             }
             (CopyMode::DownloadUpload, true) => {
                 todo!()

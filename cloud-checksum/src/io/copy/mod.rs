@@ -37,13 +37,14 @@ impl CopyContent {
     }
 }
 
-pub struct Range {
+pub struct MultiPartOptions {
+    part_number: Option<u64>,
     start: u64,
     end: u64,
 }
 
-impl Range {
-    pub fn to_string(&self) -> Option<String> {
+impl MultiPartOptions {
+    pub fn format_range(&self) -> Option<String> {
         Some(format!("bytes={}-{}", self.start, self.end.checked_sub(1)?))
     }
 }
@@ -51,27 +52,28 @@ impl Range {
 /// Write operations on file based or cloud files.
 #[async_trait::async_trait]
 pub trait ObjectCopy {
-    /// Copy the whole object to a new location.
+    /// Copy the object to a new location with optional multipart copies.
     async fn copy_object(
-        &self,
-        provider_source: Provider,
-        provider_destination: Provider,
-    ) -> Result<Option<u64>>;
-
-    /// Copy the object part to a new location.
-    async fn copy_object_part(
         &mut self,
         provider_source: Provider,
         provider_destination: Provider,
-        part_number: Option<u64>,
-        range: Range,
+        multi_part: Option<MultiPartOptions>,
     ) -> Result<Option<u64>>;
 
     /// Download the object to memory.
-    async fn download(&self, source: Provider) -> Result<CopyContent>;
+    async fn download(
+        &mut self,
+        source: Provider,
+        multi_part: Option<MultiPartOptions>,
+    ) -> Result<CopyContent>;
 
     /// Upload the object to the destination.
-    async fn upload(&self, destination: Provider, data: CopyContent) -> Result<Option<u64>>;
+    async fn upload(
+        &mut self,
+        destination: Provider,
+        data: CopyContent,
+        multi_part: Option<MultiPartOptions>,
+    ) -> Result<Option<u64>>;
 }
 
 /// Build object copy from object URLs.

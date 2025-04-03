@@ -4,7 +4,7 @@
 use crate::checksum::file::SumsFile;
 use crate::error::Error::{AwsError, ParseError};
 use crate::error::Result;
-use crate::io::copy::{CopyContent, ObjectCopy, Range};
+use crate::io::copy::{CopyContent, MultiPartOptions, ObjectCopy};
 use crate::io::Provider;
 use crate::MetadataCopy;
 use aws_sdk_s3::types::{MetadataDirective, TaggingDirective};
@@ -223,8 +223,7 @@ impl S3 {
         bucket: String,
         destination_key: String,
         destination_bucket: String,
-        part_number: Option<u64>,
-        range: Range,
+        multi_part: MultiPartOptions,
     ) -> Result<Option<u64>> {
         let head = self
             .client
@@ -244,7 +243,7 @@ impl S3 {
             )
             .await?;
 
-        if let Some(part_number) = part_number {
+        if let Some(part_number) = multi_part.part_number {
             self.client
                 .upload_part_copy()
                 .upload_id(&upload_id)
@@ -253,8 +252,8 @@ impl S3 {
                 .bucket(destination_bucket)
                 .copy_source(Self::copy_source(&key, &bucket))
                 .copy_source_range(
-                    range
-                        .to_string()
+                    multi_part
+                        .format_range()
                         .ok_or_else(|| AwsError("invalid range".to_string()))?,
                 )
                 .send()
@@ -274,12 +273,24 @@ impl S3 {
     }
 
     /// Get the object from S3.
-    pub async fn get_object(&self, key: String, bucket: String) -> Result<CopyContent> {
+    pub async fn get_object(
+        &self,
+        key: String,
+        bucket: String,
+        multi_part: Option<MultiPartOptions>,
+    ) -> Result<CopyContent> {
         let result = self
             .client
             .get_object()
             .bucket(&bucket)
             .key(&key)
+            .set_part_number(
+                multi_part
+                    .as_ref()
+                    .and_then(|multi_part| multi_part.part_number.map(i32::try_from))
+                    .transpose()?,
+            )
+            .set_range(multi_part.and_then(|multi_part| multi_part.format_range()))
             .send()
             .await?;
 
@@ -312,13 +323,7 @@ impl S3 {
         bucket: String,
         mut content: CopyContent,
     ) -> Result<Option<u64>> {
-        let mut buf = if let Some(capacity) = content.size {
-            Vec::with_capacity(usize::try_from(capacity)?)
-        } else {
-            Vec::new()
-        };
-
-        content.data.read_to_end(&mut buf).await?;
+        let buf = Self::read_content(&mut content).await?;
 
         let output = self
             .client
@@ -338,31 +343,84 @@ impl S3 {
 
         Ok(content.size)
     }
+
+    /// Read the copy content into a buffer.
+    async fn read_content(content: &mut CopyContent) -> Result<Vec<u8>> {
+        let mut buf = if let Some(capacity) = content.size {
+            Vec::with_capacity(usize::try_from(capacity)?)
+        } else {
+            Vec::new()
+        };
+
+        content.data.read_to_end(&mut buf).await?;
+
+        Ok(buf)
+    }
+
+    /// Upload objects using multi part uploads.
+    pub async fn put_object_multipart(
+        &mut self,
+        key: String,
+        bucket: String,
+        mut content: CopyContent,
+        multi_part: MultiPartOptions,
+    ) -> Result<Option<u64>> {
+        let buf = Self::read_content(&mut content).await?;
+
+        let upload_id = self
+            .get_multipart_upload(
+                key.to_string(),
+                bucket.to_string(),
+                content.tags,
+                content.metadata,
+            )
+            .await?;
+
+        if let Some(part_number) = multi_part.part_number {
+            self.client
+                .upload_part()
+                .upload_id(&upload_id)
+                .part_number(i32::try_from(part_number)?)
+                .key(&key)
+                .bucket(&bucket)
+                .body(ByteStream::from(buf))
+                .send()
+                .await?;
+        } else {
+            self.complete_multipart_upload(key, bucket, upload_id)
+                .await?;
+        }
+
+        Ok(content.size)
+    }
+
+    /// Complete a multipart upload.
+    async fn complete_multipart_upload(
+        &mut self,
+        key: String,
+        bucket: String,
+        upload_id: String,
+    ) -> Result<()> {
+        self.client
+            .complete_multipart_upload()
+            .bucket(&bucket)
+            .key(&key)
+            .upload_id(upload_id)
+            .send()
+            .await?;
+        self.reset_multipart_upload(key, bucket);
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
 impl ObjectCopy for S3 {
     async fn copy_object(
-        &self,
-        provider_source: Provider,
-        provider_destination: Provider,
-    ) -> Result<Option<u64>> {
-        let (bucket, key) = provider_source.into_s3()?;
-        let (destination_bucket, destination_key) = provider_destination.into_s3()?;
-
-        let key = SumsFile::format_target_file(&key);
-        let destination_key = SumsFile::format_target_file(&destination_key);
-
-        self.copy_object_single(key, bucket, destination_key, destination_bucket)
-            .await
-    }
-
-    async fn copy_object_part(
         &mut self,
         provider_source: Provider,
         provider_destination: Provider,
-        part_number: Option<u64>,
-        range: Range,
+        multi_part: Option<MultiPartOptions>,
     ) -> Result<Option<u64>> {
         let (bucket, key) = provider_source.into_s3()?;
         let (destination_bucket, destination_key) = provider_destination.into_s3()?;
@@ -370,28 +428,40 @@ impl ObjectCopy for S3 {
         let key = SumsFile::format_target_file(&key);
         let destination_key = SumsFile::format_target_file(&destination_key);
 
-        self.copy_object_multipart(
-            key,
-            bucket,
-            destination_key,
-            destination_bucket,
-            part_number,
-            range,
-        )
-        .await
+        if let Some(multi_part) = multi_part {
+            self.copy_object_multipart(key, bucket, destination_key, destination_bucket, multi_part)
+                .await
+        } else {
+            self.copy_object_single(key, bucket, destination_key, destination_bucket)
+                .await
+        }
     }
 
-    async fn download(&self, source: Provider) -> Result<CopyContent> {
+    async fn download(
+        &mut self,
+        source: Provider,
+        multi_part: Option<MultiPartOptions>,
+    ) -> Result<CopyContent> {
         let (bucket, key) = source.into_s3()?;
         let key = SumsFile::format_target_file(&key);
 
-        Ok(self.get_object(key, bucket).await?)
+        Ok(self.get_object(key, bucket, multi_part).await?)
     }
 
-    async fn upload(&self, destination: Provider, data: CopyContent) -> Result<Option<u64>> {
+    async fn upload(
+        &mut self,
+        destination: Provider,
+        data: CopyContent,
+        multi_part: Option<MultiPartOptions>,
+    ) -> Result<Option<u64>> {
         let (bucket, key) = destination.into_s3()?;
         let key = SumsFile::format_target_file(&key);
 
-        self.put_object(key, bucket, data).await
+        if let Some(multi_part) = multi_part {
+            self.put_object_multipart(key, bucket, data, multi_part)
+                .await
+        } else {
+            self.put_object(key, bucket, data).await
+        }
     }
 }
