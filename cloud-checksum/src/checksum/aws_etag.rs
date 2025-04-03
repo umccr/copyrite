@@ -5,11 +5,65 @@
 use crate::checksum::standard::StandardCtx;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
+use phf::phf_map;
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::sync::Arc;
+
+/// Defines the "best" order for part sizes that should be preferenced when copying/generating
+/// new checksums. This list takes into account defaults that are likely to show up in the AWS CLI
+/// and SDKs.
+pub static PART_SIZE_ORDERING: phf::Map<u64, u64> = phf_map! {
+    // AWS CLI/boto3 uses 8MiB as the default:
+    // https://github.com/aws/aws-cli/blob/b9459db122d9f596a4570b6b5ecca44311b48fc2/awscli/customizations/s3/transferconfig.py#L21
+    // https://github.com/boto/boto3/blob/0442d32d2d2cbc5efbe158f6336993d1ee89b36b/boto3/s3/transfer.py#L243
+    // Java V2 uses 8MiB:
+    // https://github.com/aws/aws-sdk-java-v2/blob/5463dd3d403450e167408895c152c62884da65bd/services/s3/src/main/java/software/amazon/awssdk/services/s3/internal/multipart/MultipartConfigurationResolver.java#L28
+    8388608_u64 => 0,
+    // C++ SDK uses 5MiB:
+    // https://github.com/aws/aws-sdk-cpp/blob/93f60cc8aad399a3977287485c19c24d15723b78/src/aws-cpp-sdk-transfer/include/aws/transfer/TransferManager.h#L35
+    // Go seems to also default to 5MiB:
+    // https://github.com/aws/aws-sdk-go-v2/blob/6fa167adb5d1a2618a2f9bbe8f2b885c0d7e2893/feature/s3/transfermanager/options.go#L12-L15
+    // So does JavaScript:
+    // https://github.com/aws/aws-sdk-js-v3/blob/11baa79dff0d9e8fddce873f5306613286990ded/lib/lib-storage/src/Upload.ts#L42
+    // And .NET:
+    // https://github.com/aws/aws-sdk-net/blob/0f72ad1c90f471505c0013c92ec5e9e567239527/sdk/src/Services/S3/Custom/Util/S3Constants.cs#L35
+    // PHP:
+    // https://github.com/aws/aws-sdk-php/blob/713bdb1ff0c2eb519932c111fc450f6b5462b69f/src/S3/MultipartUploader.php#L19
+    5242880_u64 => 1,
+    // Console uses 16mib:
+    16777216_u64 => 2,
+    // Ruby SDK uses 50MiB:
+    // https://github.com/aws/aws-sdk-ruby/blob/2c8a0686794e8d03da504fcb25984f7fae93f5b3/gems/aws-sdk-s3/lib/aws-sdk-s3/object_multipart_copier.rb#L31
+    52428800_u64 => 3,
+    // Java V1 SDK uses 100MiB and 16mib:
+    // https://github.com/aws/aws-sdk-java/blob/bdca0550fc15769618a51338f5f2f84bc603a1cf/aws-java-sdk-s3/src/main/java/com/amazonaws/services/s3/transfer/TransferManagerConfiguration.java#L32-L46
+    // But it also does some calculations based on the total size:
+    // https://github.com/aws/aws-sdk-java/blob/bdca0550fc15769618a51338f5f2f84bc603a1cf/aws-java-sdk-s3/src/main/java/com/amazonaws/services/s3/transfer/internal/TransferManagerUtils.java#L119-L125
+    104857600_u64 => 4,
+    // s3cmd uses 15mib:
+    // https://github.com/s3tools/s3cmd/blob/8cb9b23992714b5ec22c1e514a50996e25aa333b/S3/Config.py#L196
+    15728640_u64 => 5,
+    // Some other options that a user might enter:
+    // 10 mib
+    10485760_u64 => 6,
+    // 500 mib
+    524288000_u64 => 7,
+    // 1000 mib
+    1048576000_u64 => 8,
+    // 2000 mib
+    2097152000_u64 => 9,
+    // 5000 mib
+    5242880000_u64 => 10,
+    // 1 gib
+    1073741824_u64 => 11,
+    // 2 gib
+    2147483648_u64 => 12,
+    // 5 gib
+    5368709120_u64 => 13,
+};
 
 /// Calculate checksums using an AWS ETag style.
 #[derive(Debug, Clone)]
@@ -28,7 +82,26 @@ pub struct AWSETagCtx {
 
 impl Ord for AWSETagCtx {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.to_string().cmp(&other.to_string())
+        let parts = self.get_part_sizes();
+        let other_parts = other.get_part_sizes();
+
+        // Always preference smaller/simpler part sizes over larger part sizes.
+        if parts.len() != other_parts.len() {
+            return (parts.len(), &self.ctx).cmp(&(other_parts.len(), &other.ctx));
+        }
+
+        // If there is only one part size, use the preferred part size ordering
+        if parts.len() == 1 && other_parts.len() == 1 {
+            let pos = PART_SIZE_ORDERING.get(&parts[0]);
+            let pos_other = PART_SIZE_ORDERING.get(&other_parts[0]);
+
+            if let (Some(pos), Some(pos_other)) = (pos, pos_other) {
+                return (pos, &self.ctx).cmp(&(pos_other, &other.ctx));
+            }
+        }
+
+        // Otherwise just compare normally using the full part size slice.
+        (parts, &self.ctx).cmp(&(other_parts, &other.ctx))
     }
 }
 
@@ -42,13 +115,14 @@ impl Eq for AWSETagCtx {}
 
 impl PartialEq for AWSETagCtx {
     fn eq(&self, other: &Self) -> bool {
-        self.to_string() == other.to_string()
+        (self.get_part_sizes(), &self.ctx).eq(&(other.get_part_sizes(), &other.ctx))
     }
 }
 
 impl Hash for AWSETagCtx {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.to_string().hash(state);
+        self.get_part_sizes().hash(state);
+        self.ctx.hash(state);
     }
 }
 
@@ -325,9 +399,8 @@ impl AWSETagCtx {
         format!("{}b", part_size)
     }
 
-    /// Format the parts into a string based on the part mode. This will panic if the file size
-    /// was not set and `finalize` was not called.
-    pub fn format_parts(&self) -> String {
+    /// Get the part sizes from the part mode.
+    pub fn get_part_sizes(&self) -> Vec<u64> {
         match self.part_mode {
             PartMode::PartNumber(part_number) => {
                 if self.file_size.is_none() && self.n_checksums == 0 {
@@ -336,16 +409,22 @@ impl AWSETagCtx {
 
                 // Get the file size if it exists or default to the total bytes.
                 let file_size = self.file_size.unwrap_or(self.total_bytes);
-                let part_size = Self::part_number_to_size(part_number, file_size).to_string();
+                let part_size = Self::part_number_to_size(part_number, file_size);
 
-                Self::format_part_size(part_size)
+                vec![part_size]
             }
-            PartMode::PartSizes(ref part_sizes) => part_sizes
-                .iter()
-                .map(Self::format_part_size)
-                .collect::<Vec<_>>()
-                .join("-"),
+            PartMode::PartSizes(ref part_sizes) => part_sizes.to_vec(),
         }
+    }
+
+    /// Format the parts into a string based on the part mode. This will panic if the file size
+    /// was not set and `finalize` was not called.
+    pub fn format_parts(&self) -> String {
+        self.get_part_sizes()
+            .iter()
+            .map(Self::format_part_size)
+            .collect::<Vec<_>>()
+            .join("-")
     }
 
     /// Convert a part number to a part size using the file size.
@@ -390,6 +469,7 @@ pub(crate) mod test {
     use crate::checksum::standard::StandardCtx;
     use crate::checksum::test::test_checksum;
     use anyhow::Result;
+    use std::str::FromStr;
 
     pub(crate) fn expected_md5_1gib() -> &'static str {
         "6c434b38867bbd608ba2f06e92ed4e43-1073741824b"
@@ -405,6 +485,22 @@ pub(crate) mod test {
 
     pub(crate) fn expected_sha256_100mib() -> &'static str {
         "a9ed6c4b6aadf887f90a3d483b5c5b79bc08075af2a1718e3e15c63b9904ebf7-104857600b"
+    }
+
+    #[test]
+    fn test_ordering() -> Result<()> {
+        assert!(AWSETagCtx::from_str("md5-aws-8mib")? < AWSETagCtx::from_str("md5-aws-5mib")?);
+        assert!(AWSETagCtx::from_str("sha256-aws-8mib")? < AWSETagCtx::from_str("md5-aws-5mib")?);
+
+        assert!(AWSETagCtx::from_str("md5-aws-1000b")? < AWSETagCtx::from_str("md5-aws-2000b")?);
+        assert!(AWSETagCtx::from_str("sha256-aws-1000b")? < AWSETagCtx::from_str("md5-aws-2000b")?);
+
+        assert!(AWSETagCtx::from_str("md5-aws-1000b")? < AWSETagCtx::from_str("sha256-aws-1000b")?);
+        assert!(
+            AWSETagCtx::from_str("sha256-aws-1000b")? < AWSETagCtx::from_str("md5-aws-100b-100b")?
+        );
+
+        Ok(())
     }
 
     #[test]
