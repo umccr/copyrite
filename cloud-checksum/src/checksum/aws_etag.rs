@@ -444,6 +444,18 @@ impl AWSETagCtx {
             .map(|(part_size, digest)| (*part_size, self.ctx.digest_to_string(digest)))
             .collect()
     }
+
+    /// Does this context represent a valid and preferred multipart checksum. All multipart
+    /// checksums are preferred except for those with different sized part sizes. Returns
+    /// the preferred part size.
+    pub fn is_preferred_multipart(&self) -> Option<u64> {
+        let part_sizes = self.get_part_sizes();
+        if part_sizes.len() == 1 {
+            Some(part_sizes[0])
+        } else {
+            None
+        }
+    }
 }
 
 impl FromStr for AWSETagCtx {

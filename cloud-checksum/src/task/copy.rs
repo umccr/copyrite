@@ -1,13 +1,18 @@
 //! The copy command task implementation.
 //!
 
+use crate::checksum::aws_etag::PART_SIZE_ORDERING;
+use crate::checksum::Ctx;
 use crate::error::Error::CopyError;
 use crate::error::Result;
-use crate::io::copy::{ObjectCopy, ObjectCopyBuilder};
+use crate::io::copy::{MultiPartOptions, ObjectCopy, ObjectCopyBuilder};
+use crate::io::sums::ObjectSumsBuilder;
 use crate::io::Provider;
 use crate::{CopyMode, MetadataCopy};
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
+
+pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 20 * 1024 * 1024; // 20mib
 
 /// Build a copy task.
 #[derive(Default)]
@@ -57,6 +62,106 @@ impl CopyTaskBuilder {
         self
     }
 
+    /// Determine the correct part size to use based on existing sums.
+    async fn use_multipart(
+        self,
+        source: Provider,
+        source_copy: &(dyn ObjectCopy + Send),
+        destination: Provider,
+        destination_copy: &(dyn ObjectCopy + Send),
+    ) -> Result<(Option<u64>, Option<Ctx>)> {
+        let sums = ObjectSumsBuilder
+            .build(self.source.to_string())
+            .await?
+            .sums_file()
+            .await?;
+
+        // If there are existing sums, try and determine the best part size.
+        let ctx = if let Some(sums) = sums {
+            // First, check if the original was a multipart upload and if a valid and preferred
+            // multipart checksum exists.
+            let ctx = sums.checksums.keys().find_map(|ctx| {
+                ctx.is_preferred_multipart()
+                    .map(|part_size| (part_size, ctx.clone()))
+            });
+            if let Some((part_size, ctx)) = ctx {
+                let size = source_copy.size(source.clone()).await?;
+                if let Some(size) = size {
+                    // Only use multipart if it is allowed at the destination.
+                    if self.part_size.is_none()
+                        && destination_copy.multipart(size, part_size).await?
+                    {
+                        return Ok((Some(part_size), Some(ctx)));
+                    }
+                }
+            }
+
+            // Otherwise, check if a preferred single part checksum exists.
+            let ctx = sums
+                .checksums
+                .keys()
+                .find(|ctx| ctx.is_preferred_single_part());
+            if let Some(ctx) = ctx {
+                let size = source_copy.size(source.clone()).await?;
+                if let Some(size) = size {
+                    // Only use single part uploads if it is possible based on the part size.
+                    if destination_copy.single_part(size).await? && self.part_size.is_none() {
+                        return Ok((None, Some(ctx.clone())));
+                    }
+                }
+            }
+
+            // If none of the above apply, then extract the best additional checksum to use.
+            sums.checksums.keys().next().cloned().unwrap_or_default()
+        } else {
+            Default::default()
+        };
+
+        // Otherwise if the part size is set, use that.
+        if let Some(part_size) = self.part_size {
+            let size = destination_copy.size(destination.clone()).await?;
+            if let Some(size) = size {
+                // Only use multipart if it is allowed at the destination.
+                return if destination_copy.multipart(size, part_size).await? {
+                    Ok((Some(part_size), Some(ctx)))
+                } else {
+                    Err(CopyError(
+                        "invalid part size for the object size".to_string(),
+                    ))
+                };
+            }
+        }
+
+        // If it is not set determine the best part size based on the threshold.
+        let threshold = self
+            .multipart_threshold
+            .unwrap_or(DEFAULT_MULTIPART_THRESHOLD);
+        let size = source_copy.size(source).await?;
+
+        if let Some(size) = size {
+            if size > threshold {
+                for possible_part_size in PART_SIZE_ORDERING.keys() {
+                    if destination_copy
+                        .multipart(size, *possible_part_size)
+                        .await?
+                    {
+                        return Ok((Some(*possible_part_size), Some(ctx)));
+                    }
+                }
+
+                return Err(CopyError(
+                    "failed to find a valid part size for the object size threshold".to_string(),
+                ));
+            } else if destination_copy.single_part(size).await? {
+                return Ok((None, Some(ctx.clone())));
+            }
+        }
+
+        Err(CopyError(
+            "failed to find a valid part size for the object".to_string(),
+        ))
+    }
+
     /// Build a generate task.
     pub async fn build(self) -> Result<CopyTask> {
         if self.source.is_empty() || self.destination.is_empty() {
@@ -80,22 +185,30 @@ impl CopyTaskBuilder {
 
         let source_copy = ObjectCopyBuilder::default()
             .with_copy_metadata(self.metadata_mode)
-            .build(self.source)
+            .build(self.source.clone())
             .await?;
         let destination_copy = ObjectCopyBuilder::default()
             .with_copy_metadata(self.metadata_mode)
-            .build(self.destination)
+            .build(self.destination.clone())
+            .await?;
+
+        let (part_size, ctx) = self
+            .use_multipart(
+                source.clone(),
+                source_copy.as_ref(),
+                destination.clone(),
+                destination_copy.as_ref(),
+            )
             .await?;
 
         let copy_task = CopyTask {
             source,
             destination,
-            _multipart_threshold: self.multipart_threshold,
-            _part_size: self.part_size,
+            _additional_sums: ctx,
+            part_size,
             source_copy,
             destination_copy,
             copy_mode,
-            use_multipart: false,
         };
 
         Ok(copy_task)
@@ -119,34 +232,102 @@ impl CopyInfo {
 pub struct CopyTask {
     source: Provider,
     destination: Provider,
-    _multipart_threshold: Option<u64>,
-    _part_size: Option<u64>,
+    _additional_sums: Option<Ctx>,
+    part_size: Option<u64>,
     source_copy: Box<dyn ObjectCopy + Send>,
     destination_copy: Box<dyn ObjectCopy + Send>,
     copy_mode: CopyMode,
-    use_multipart: bool,
 }
 
 impl CopyTask {
     /// Runs the copy task and return the output.
     pub async fn run(mut self) -> Result<CopyInfo> {
-        let total = match (self.copy_mode, self.use_multipart) {
-            (CopyMode::ServerSide, false) => {
+        let total = match (self.copy_mode, self.part_size) {
+            (CopyMode::ServerSide, None) => {
                 self.source_copy
-                    .copy_object(self.source, self.destination, None)
+                    .copy(self.source, self.destination, None)
                     .await?
             }
-            (CopyMode::ServerSide, true) => {
-                todo!()
+            (CopyMode::ServerSide, Some(part_size)) => {
+                let mut size = self
+                    .source_copy
+                    .size(self.source.clone())
+                    .await?
+                    .ok_or_else(|| CopyError("failed to get object size".to_string()))?;
+                let mut start = 0;
+                let mut end = part_size;
+                let mut part_number = 1;
+                let mut total = 0;
+                while size > 0 {
+                    total += self
+                        .source_copy
+                        .copy(
+                            self.source.clone(),
+                            self.destination.clone(),
+                            Some(MultiPartOptions {
+                                part_number: Some(part_number),
+                                start,
+                                end,
+                            }),
+                        )
+                        .await?
+                        .unwrap_or_default();
+
+                    part_number += 1;
+                    start += part_size;
+                    end += part_size;
+                    size -= part_size;
+                }
+
+                Some(total)
             }
-            (CopyMode::DownloadUpload, false) => {
+            (CopyMode::DownloadUpload, None) => {
                 let data = self.source_copy.download(self.source, None).await?;
                 self.destination_copy
                     .upload(self.destination, data, None)
                     .await?
             }
-            (CopyMode::DownloadUpload, true) => {
-                todo!()
+            (CopyMode::DownloadUpload, Some(part_size)) => {
+                let mut size = self
+                    .source_copy
+                    .size(self.source.clone())
+                    .await?
+                    .ok_or_else(|| CopyError("failed to get object size".to_string()))?;
+                let mut start = 0;
+                let mut end = part_size;
+                let mut part_number = 1;
+                let total = 0;
+                while size > 0 {
+                    let data = self
+                        .source_copy
+                        .download(
+                            self.source.clone(),
+                            Some(MultiPartOptions {
+                                part_number: Some(part_number),
+                                start,
+                                end,
+                            }),
+                        )
+                        .await?;
+                    self.destination_copy
+                        .upload(
+                            self.destination.clone(),
+                            data,
+                            Some(MultiPartOptions {
+                                part_number: Some(part_number),
+                                start,
+                                end,
+                            }),
+                        )
+                        .await?;
+
+                    part_number += 1;
+                    start += part_size;
+                    end += part_size;
+                    size -= part_size;
+                }
+
+                Some(total)
             }
         };
 

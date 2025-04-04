@@ -2,6 +2,7 @@
 //!
 
 use crate::checksum::file::SumsFile;
+use crate::error::Error::CopyError;
 use crate::error::Result;
 use crate::io::copy::{CopyContent, MultiPartOptions, ObjectCopy};
 use crate::io::Provider;
@@ -27,7 +28,7 @@ pub struct File;
 
 impl File {
     /// Copy the file to the destination.
-    pub async fn copy(&self, source: String, destination: String) -> Result<u64> {
+    pub async fn copy_source(&self, source: String, destination: String) -> Result<u64> {
         Ok(copy(&source, destination).await?)
     }
 
@@ -72,21 +73,34 @@ impl File {
 
         Ok(Some(total))
     }
+
+    pub async fn file_size(&self, source: String) -> Result<u64> {
+        let file = fs::File::open(source).await?;
+        let size = file.metadata().await?.len();
+
+        Ok(size)
+    }
 }
 
 #[async_trait::async_trait]
 impl ObjectCopy for File {
-    async fn copy_object(
+    async fn copy(
         &mut self,
         provider_source: Provider,
         provider_destination: Provider,
-        _multipart: Option<MultiPartOptions>,
+        multipart: Option<MultiPartOptions>,
     ) -> Result<Option<u64>> {
         let source = SumsFile::format_target_file(&provider_source.into_file()?);
         let destination = SumsFile::format_target_file(&provider_destination.into_file()?);
 
-        // There's no point copying using multiple parts on the filesystem so just ignore the option
-        Ok(Some(self.copy(source, destination).await?))
+        if multipart.is_some() {
+            return Err(CopyError(
+                "multipart not supported for file copy".to_string(),
+            ));
+        }
+
+        // There's no point copying using multiple parts on the filesystem.
+        Ok(Some(self.copy_source(source, destination).await?))
     }
 
     async fn download(
@@ -104,13 +118,33 @@ impl ObjectCopy for File {
         &mut self,
         destination: Provider,
         data: CopyContent,
-        _multipart: Option<MultiPartOptions>,
+        multipart: Option<MultiPartOptions>,
     ) -> Result<Option<u64>> {
         let destination = destination.into_file()?;
         let destination = SumsFile::format_target_file(&destination);
 
+        if multipart.is_some() {
+            return Err(CopyError(
+                "multipart not supported for file uploads".to_string(),
+            ));
+        }
+
         // It doesn't matter what the part number is for filesystem operations, just append to the
         // end of the file.
         self.write(destination, data).await
+    }
+
+    async fn single_part(&self, _object_size: u64) -> Result<bool> {
+        Ok(true)
+    }
+
+    async fn multipart(&self, _object_size: u64, _part_size: u64) -> Result<bool> {
+        Ok(true)
+    }
+
+    async fn size(&self, source: Provider) -> Result<Option<u64>> {
+        let file = source.into_file()?;
+
+        Ok(Some(self.file_size(file).await?))
     }
 }

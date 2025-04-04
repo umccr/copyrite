@@ -132,7 +132,7 @@ impl S3 {
     }
 
     /// Copy the object using the `CopyObject` operation.
-    pub async fn copy_object_single(
+    pub async fn copy_object(
         &self,
         key: String,
         bucket: String,
@@ -214,6 +214,20 @@ impl S3 {
             .join("&");
 
         Ok(Some(tags))
+    }
+
+    /// Get the size of the object.
+    pub async fn object_size(&self, key: String, bucket: String) -> Result<Option<u64>> {
+        Ok(self
+            .client
+            .head_object()
+            .bucket(&bucket)
+            .key(&key)
+            .send()
+            .await?
+            .content_length
+            .map(u64::try_from)
+            .transpose()?)
     }
 
     /// Copy the object using multiple parts.
@@ -416,7 +430,7 @@ impl S3 {
 
 #[async_trait::async_trait]
 impl ObjectCopy for S3 {
-    async fn copy_object(
+    async fn copy(
         &mut self,
         provider_source: Provider,
         provider_destination: Provider,
@@ -432,7 +446,7 @@ impl ObjectCopy for S3 {
             self.copy_object_multipart(key, bucket, destination_key, destination_bucket, multi_part)
                 .await
         } else {
-            self.copy_object_single(key, bucket, destination_key, destination_bucket)
+            self.copy_object(key, bucket, destination_key, destination_bucket)
                 .await
         }
     }
@@ -463,5 +477,19 @@ impl ObjectCopy for S3 {
         } else {
             self.put_object(key, bucket, data).await
         }
+    }
+
+    async fn single_part(&self, object_size: u64) -> Result<bool> {
+        Ok(object_size > 5368709120)
+    }
+
+    async fn multipart(&self, object_size: u64, part_size: u64) -> Result<bool> {
+        Ok(object_size.div_ceil(part_size) < 10000)
+    }
+
+    async fn size(&self, source: Provider) -> Result<Option<u64>> {
+        let (bucket, key) = source.into_s3()?;
+
+        self.object_size(key, bucket).await
     }
 }

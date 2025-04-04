@@ -26,6 +26,12 @@ pub enum Ctx {
     Regular(StandardCtx),
 }
 
+impl Default for Ctx {
+    fn default() -> Self {
+        Self::Regular(Default::default())
+    }
+}
+
 impl<'de> Deserialize<'de> for Ctx {
     /// Implement deserialize using `FromStr`.
     fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
@@ -100,6 +106,22 @@ impl Ctx {
             Ctx::Regular(_) => None,
             Ctx::AWSEtag(ctx) => Some(ctx.part_checksums()),
         }
+    }
+
+    /// Does this context represent a valid and preferred multipart checksum. All multipart
+    /// checksums are preferred except for those with different sized part sizes. Returns
+    /// the preferred part size.
+    pub fn is_preferred_multipart(&self) -> Option<u64> {
+        if let Self::AWSEtag(ctx) = self {
+            ctx.is_preferred_multipart()
+        } else {
+            None
+        }
+    }
+
+    /// Does this context represent a single part checksum, i.e. is it a regular checksum.
+    pub fn is_preferred_single_part(&self) -> bool {
+        matches!(self, Self::Regular(_))
     }
 }
 

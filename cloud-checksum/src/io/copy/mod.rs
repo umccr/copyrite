@@ -38,9 +38,9 @@ impl CopyContent {
 }
 
 pub struct MultiPartOptions {
-    part_number: Option<u64>,
-    start: u64,
-    end: u64,
+    pub(crate) part_number: Option<u64>,
+    pub(crate) start: u64,
+    pub(crate) end: u64,
 }
 
 impl MultiPartOptions {
@@ -53,7 +53,7 @@ impl MultiPartOptions {
 #[async_trait::async_trait]
 pub trait ObjectCopy {
     /// Copy the object to a new location with optional multipart copies.
-    async fn copy_object(
+    async fn copy(
         &mut self,
         provider_source: Provider,
         provider_destination: Provider,
@@ -74,6 +74,15 @@ pub trait ObjectCopy {
         data: CopyContent,
         multi_part: Option<MultiPartOptions>,
     ) -> Result<Option<u64>>;
+
+    /// Is a single part operation possible.
+    async fn single_part(&self, object_size: u64) -> Result<bool>;
+
+    /// Is a multipart operation possible.
+    async fn multipart(&self, object_size: u64, part_size: u64) -> Result<bool>;
+
+    /// Get the size of the object.
+    async fn size(&self, source: Provider) -> Result<Option<u64>>;
 }
 
 /// Build object copy from object URLs.

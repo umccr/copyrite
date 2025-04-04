@@ -20,10 +20,10 @@ use std::sync::Arc;
 pub enum StandardCtx {
     // Note, options remove a clone later on, but it might be
     // better to Box the state for clarity.
-    /// Calculate a CRC32.
-    CRC32(Option<crc32fast::Hasher>, Endianness),
     /// Calculate a CRC32C.
     CRC32C(u32, Endianness),
+    /// Calculate a CRC32.
+    CRC32(Option<crc32fast::Hasher>, Endianness),
     /// Calculate the MD5 checksum.
     MD5(Option<md5::Md5>),
     /// Calculate the SHA1 checksum.
@@ -58,6 +58,12 @@ impl Hash for StandardCtx {
     fn hash<H: Hasher>(&self, state: &mut H) {
         discriminant(self).hash(state);
         self.endianness().hash(state);
+    }
+}
+
+impl Default for StandardCtx {
+    fn default() -> Self {
+        Self::CRC32C(0, Endianness::BigEndian)
     }
 }
 
