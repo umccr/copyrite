@@ -28,7 +28,7 @@ impl State {
     /// Build from a name.
     pub async fn try_from(name: String) -> Result<Self> {
         Ok(Self {
-            object_sums: ObjectSumsBuilder
+            object_sums: ObjectSumsBuilder::default()
                 .build(SumsFile::format_target_file(&name))
                 .await?,
             name,

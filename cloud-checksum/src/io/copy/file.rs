@@ -134,12 +134,20 @@ impl ObjectCopy for File {
         self.write(destination, data).await
     }
 
-    async fn single_part(&self, _object_size: u64) -> Result<bool> {
-        Ok(true)
+    fn max_part_size(&self) -> u64 {
+        u64::MAX
     }
 
-    async fn multipart(&self, _object_size: u64, _part_size: u64) -> Result<bool> {
-        Ok(true)
+    fn max_parts(&self) -> u64 {
+        u64::MAX
+    }
+
+    fn single_part_limit(&self) -> u64 {
+        u64::MAX
+    }
+
+    fn min_part_size(&self) -> u64 {
+        u64::MIN
     }
 
     async fn size(&self, source: Provider) -> Result<Option<u64>> {

@@ -5,7 +5,7 @@
 use crate::checksum::standard::StandardCtx;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
-use phf::phf_map;
+use phf::phf_ordered_map;
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// Defines the "best" order for part sizes that should be preferenced when copying/generating
 /// new checksums. This list takes into account defaults that are likely to show up in the AWS CLI
 /// and SDKs.
-pub static PART_SIZE_ORDERING: phf::Map<u64, u64> = phf_map! {
+pub static PART_SIZE_ORDERING: phf::OrderedMap<u64, u64> = phf_ordered_map! {
     // AWS CLI/boto3 uses 8MiB as the default:
     // https://github.com/aws/aws-cli/blob/b9459db122d9f596a4570b6b5ecca44311b48fc2/awscli/customizations/s3/transferconfig.py#L21
     // https://github.com/boto/boto3/blob/0442d32d2d2cbc5efbe158f6336993d1ee89b36b/boto3/s3/transfer.py#L243
@@ -51,18 +51,24 @@ pub static PART_SIZE_ORDERING: phf::Map<u64, u64> = phf_map! {
     10485760_u64 => 6,
     // 500 mib
     524288000_u64 => 7,
-    // 1000 mib
-    1048576000_u64 => 8,
-    // 2000 mib
-    2097152000_u64 => 9,
-    // 5000 mib
-    5242880000_u64 => 10,
     // 1 gib
-    1073741824_u64 => 11,
+    1073741824_u64 => 8,
     // 2 gib
-    2147483648_u64 => 12,
+    2147483648_u64 => 9,
     // 5 gib
-    5368709120_u64 => 13,
+    5368709120_u64 => 10,
+    // 1000 mib
+    1048576000_u64 => 11,
+    // 2000 mib
+    2097152000_u64 => 12,
+    // 5000 mib
+    5242880000_u64 => 13,
+    // 1 gb
+    1000000000_u64 => 14,
+    // 2 gb
+    2000000000_u64 => 15,
+    // 5 gb
+    5000000000_u64 => 16,
 };
 
 /// Calculate checksums using an AWS ETag style.

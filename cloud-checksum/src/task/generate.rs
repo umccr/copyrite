@@ -77,7 +77,7 @@ impl GenerateTaskBuilder {
 
     /// Build a generate task.
     pub async fn build(mut self) -> Result<GenerateTask> {
-        let mut sums = ObjectSumsBuilder
+        let mut sums = ObjectSumsBuilder::default()
             .build(self.input_file_name.to_string())
             .await?;
 

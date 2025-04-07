@@ -753,6 +753,16 @@ pub(crate) mod test {
     }
 
     fn mock_multi_part_etag_only() -> Client {
+        let get_object_attributes = mock_multi_part_etag_only_rule();
+
+        mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            get_object_attributes.as_slice()
+        )
+    }
+
+    pub(crate) fn mock_multi_part_etag_only_rule() -> Vec<Rule> {
         let get_object_attributes = mock!(Client::get_object_attributes)
             .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
             .then_output(|| {
@@ -767,18 +777,14 @@ pub(crate) mod test {
                     .build()
             });
 
-        mock_client!(
-            aws_sdk_s3,
-            RuleMode::Sequential,
-            &[
-                &get_object_attributes,
-                &head_object_rule(214748365),
-                &head_object_rule(214748365),
-                &head_object_rule(214748365),
-                &head_object_rule(214748365),
-                &head_object_rule(214748364),
-            ]
-        )
+        vec![
+            get_object_attributes,
+            head_object_rule(214748365),
+            head_object_rule(214748365),
+            head_object_rule(214748365),
+            head_object_rule(214748365),
+            head_object_rule(214748364),
+        ]
     }
 
     fn mock_single_part_with_sha256() -> Client {
@@ -800,15 +806,19 @@ pub(crate) mod test {
     }
 
     fn mock_single_part_etag_only() -> Client {
-        let get_object_attributes = mock!(Client::get_object_attributes)
-            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+        let get_object_attributes = mock_single_part_etag_only_rule();
+
+        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes])
+    }
+
+    pub(crate) fn mock_single_part_etag_only_rule() -> Rule {
+        mock!(Client::get_object_attributes)
+            .match_requests(move |req| req.bucket() == Some("bucket") && req.key() == Some("key"))
             .then_output(|| {
                 GetObjectAttributesOutput::builder()
                     .e_tag(EXPECTED_MD5_SUM)
                     .object_size(TEST_FILE_SIZE as i64)
                     .build()
-            });
-
-        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes])
+            })
     }
 }

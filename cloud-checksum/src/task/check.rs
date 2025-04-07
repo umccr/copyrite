@@ -49,7 +49,7 @@ impl CheckTaskBuilder {
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
         let objects = join_all(self.files.into_iter().map(|file| async move {
-            let mut sums = ObjectSumsBuilder.build(file.to_string()).await?;
+            let mut sums = ObjectSumsBuilder::default().build(file.to_string()).await?;
 
             let file_size = sums.file_size().await?;
             let existing = sums

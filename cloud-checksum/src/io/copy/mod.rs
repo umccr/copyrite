@@ -6,6 +6,7 @@ use crate::io::copy::aws::S3Builder;
 use crate::io::copy::file::FileBuilder;
 use crate::io::{default_s3_client, Provider};
 use crate::MetadataCopy;
+use aws_sdk_s3::Client;
 use std::collections::HashMap;
 use tokio::io::AsyncRead;
 
@@ -75,11 +76,17 @@ pub trait ObjectCopy {
         multi_part: Option<MultiPartOptions>,
     ) -> Result<Option<u64>>;
 
-    /// Is a single part operation possible.
-    async fn single_part(&self, object_size: u64) -> Result<bool>;
+    /// The maximum part size for multipart copy.
+    fn max_part_size(&self) -> u64;
 
-    /// Is a multipart operation possible.
-    async fn multipart(&self, object_size: u64, part_size: u64) -> Result<bool>;
+    /// The maximum single part copy size.
+    fn single_part_limit(&self) -> u64;
+
+    /// The maximum number of parts for multipart copies.
+    fn max_parts(&self) -> u64;
+
+    /// The minimum part size for multipart copies.
+    fn min_part_size(&self) -> u64;
 
     /// Get the size of the object.
     async fn size(&self, source: Provider) -> Result<Option<u64>>;
@@ -89,6 +96,7 @@ pub trait ObjectCopy {
 #[derive(Debug, Default)]
 pub struct ObjectCopyBuilder {
     metadata_mode: MetadataCopy,
+    client: Option<Client>,
 }
 
 impl ObjectCopyBuilder {
@@ -97,10 +105,14 @@ impl ObjectCopyBuilder {
         if provider.is_file() {
             Ok(Box::new(FileBuilder.build()))
         } else {
+            let client = match self.client {
+                Some(client) => client,
+                None => default_s3_client().await?,
+            };
             Ok(Box::new(
                 S3Builder::default()
                     .with_copy_metadata(self.metadata_mode)
-                    .with_client(default_s3_client().await?)
+                    .with_client(client)
                     .build()?,
             ))
         }
@@ -109,6 +121,12 @@ impl ObjectCopyBuilder {
     /// Set the copy metadata option.
     pub fn with_copy_metadata(mut self, metadata_mode: MetadataCopy) -> Self {
         self.metadata_mode = metadata_mode;
+        self
+    }
+
+    /// Set the S3 client if this is an s3 provider.
+    pub fn set_client(mut self, client: Option<Client>) -> Self {
+        self.client = client;
         self
     }
 }

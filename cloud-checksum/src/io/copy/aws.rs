@@ -479,12 +479,21 @@ impl ObjectCopy for S3 {
         }
     }
 
-    async fn single_part(&self, object_size: u64) -> Result<bool> {
-        Ok(object_size > 5368709120)
+    fn max_part_size(&self) -> u64 {
+        5368709120
     }
 
-    async fn multipart(&self, object_size: u64, part_size: u64) -> Result<bool> {
-        Ok(object_size.div_ceil(part_size) < 10000)
+    fn max_parts(&self) -> u64 {
+        10000
+    }
+
+    fn single_part_limit(&self) -> u64 {
+        // AWS docs refer to MB as MiB
+        5368709120
+    }
+
+    fn min_part_size(&self) -> u64 {
+        5242880
     }
 
     async fn size(&self, source: Provider) -> Result<Option<u64>> {
