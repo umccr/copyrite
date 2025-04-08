@@ -7,7 +7,9 @@ use crate::error::Result;
 use crate::io::copy::{CopyContent, MultiPartOptions, ObjectCopy};
 use crate::io::Provider;
 use crate::MetadataCopy;
-use aws_sdk_s3::types::{MetadataDirective, TaggingDirective};
+use aws_sdk_s3::types::{
+    CompletedMultipartUpload, CompletedPart, MetadataDirective, TaggingDirective,
+};
 use aws_sdk_s3::Client;
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_runtime_api::client::result::SdkError;
@@ -64,6 +66,7 @@ pub struct S3 {
     client: Client,
     metadata_mode: MetadataCopy,
     multipart_upload: HashMap<(String, String), String>,
+    completed_parts: HashMap<String, Vec<CompletedPart>>,
 }
 
 impl S3 {
@@ -73,6 +76,7 @@ impl S3 {
             client,
             metadata_mode,
             multipart_upload: HashMap::new(),
+            completed_parts: HashMap::new(),
         }
     }
 
@@ -258,7 +262,8 @@ impl S3 {
             .await?;
 
         if let Some(part_number) = multi_part.part_number {
-            self.client
+            let part = self
+                .client
                 .upload_part_copy()
                 .upload_id(&upload_id)
                 .part_number(i32::try_from(part_number)?)
@@ -271,16 +276,25 @@ impl S3 {
                         .ok_or_else(|| AwsError("invalid range".to_string()))?,
                 )
                 .send()
-                .await?;
+                .await?
+                .copy_part_result
+                .ok_or_else(|| AwsError("missing copy part result".to_string()))?;
+
+            let parts = self.completed_parts.entry(upload_id).or_default();
+            parts.push(
+                CompletedPart::builder()
+                    .set_checksum_crc32(part.checksum_crc32)
+                    .set_checksum_crc32_c(part.checksum_crc32_c)
+                    .set_checksum_sha1(part.checksum_sha1)
+                    .set_checksum_sha256(part.checksum_sha256)
+                    .set_checksum_crc64_nvme(part.checksum_crc64_nvme)
+                    .set_e_tag(part.e_tag)
+                    .set_part_number(Some(i32::try_from(part_number)?))
+                    .build(),
+            );
         } else {
-            self.client
-                .complete_multipart_upload()
-                .bucket(&bucket)
-                .key(&key)
-                .upload_id(upload_id)
-                .send()
+            self.complete_multipart_upload(destination_key, destination_bucket, upload_id)
                 .await?;
-            self.reset_multipart_upload(key, bucket);
         }
 
         Ok(head.content_length.map(u64::try_from).transpose()?)
@@ -391,15 +405,30 @@ impl S3 {
             .await?;
 
         if let Some(part_number) = multi_part.part_number {
-            self.client
+            let part = self
+                .client
                 .upload_part()
                 .upload_id(&upload_id)
+                .set_checksum_algorithm(None)
                 .part_number(i32::try_from(part_number)?)
                 .key(&key)
                 .bucket(&bucket)
                 .body(ByteStream::from(buf))
                 .send()
                 .await?;
+
+            let parts = self.completed_parts.entry(upload_id).or_default();
+            parts.push(
+                CompletedPart::builder()
+                    // .set_checksum_crc32(part.checksum_crc32)
+                    // .set_checksum_crc32_c(part.checksum_crc32_c)
+                    // .set_checksum_sha1(part.checksum_sha1)
+                    // .set_checksum_sha256(part.checksum_sha256)
+                    // .set_checksum_crc64_nvme(part.checksum_crc64_nvme)
+                    .set_e_tag(part.e_tag)
+                    .set_part_number(Some(i32::try_from(part_number)?))
+                    .build(),
+            );
         } else {
             self.complete_multipart_upload(key, bucket, upload_id)
                 .await?;
@@ -419,6 +448,16 @@ impl S3 {
             .complete_multipart_upload()
             .bucket(&bucket)
             .key(&key)
+            .multipart_upload(
+                CompletedMultipartUpload::builder()
+                    .set_parts(Some(
+                        self.completed_parts
+                            .remove_entry(&upload_id)
+                            .ok_or_else(|| AwsError("missing completed parts".to_string()))?
+                            .1,
+                    ))
+                    .build(),
+            )
             .upload_id(upload_id)
             .send()
             .await?;

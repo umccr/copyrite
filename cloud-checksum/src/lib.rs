@@ -195,6 +195,10 @@ pub struct Copy {
     /// how the source was uploaded. This can be used to override that.
     #[arg(short, long, env, value_parser = |s: &str| parse_size(s))]
     pub part_size: Option<u64>,
+    /// The number of simultaneous copy tasks to run when using multipart copies. This controls
+    /// how many simultaneous connections are made to copy files.
+    #[arg(long, env, default_value_t = 10)]
+    pub concurrency: usize,
 }
 
 /// The subcommands for cloud-checksum.

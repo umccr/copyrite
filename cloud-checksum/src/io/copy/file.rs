@@ -23,7 +23,7 @@ impl FileBuilder {
 }
 
 /// A file object.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct File;
 
 impl File {
@@ -42,12 +42,17 @@ impl File {
         let size = file.metadata().await?.len();
 
         // Read only the specified range if multipart is being used.
-        let file: Box<dyn AsyncRead + Send + Sync + Unpin> =
+        let (file, size): (Box<dyn AsyncRead + Send + Sync + Unpin>, _) =
             if let Some(multipart) = multi_part_options {
                 file.seek(SeekFrom::Start(multipart.start)).await?;
-                Box::new(file.take(multipart.end - multipart.start))
+
+                let size = multipart
+                    .end
+                    .checked_sub(multipart.start)
+                    .ok_or_else(|| CopyError("Invalid multipart range".to_string()))?;
+                (Box::new(file.take(size)), size)
             } else {
-                Box::new(file)
+                (Box::new(file), size)
             };
 
         Ok(CopyContent::new(file, Some(size), None, None))
@@ -93,13 +98,13 @@ impl ObjectCopy for File {
         let source = SumsFile::format_target_file(&provider_source.into_file()?);
         let destination = SumsFile::format_target_file(&provider_destination.into_file()?);
 
-        if multipart.is_some() {
-            return Err(CopyError(
-                "multipart not supported for file copy".to_string(),
-            ));
-        }
+        // There's no point copying using multiple parts on the filesystem so wait until all parts
+        // are "sent" and then copy the file using the filesystem.
+        match multipart {
+            Some(multipart) if multipart.part_number.is_some() => return Ok(None),
+            _ => {}
+        };
 
-        // There's no point copying using multiple parts on the filesystem.
         Ok(Some(self.copy_source(source, destination).await?))
     }
 
@@ -118,19 +123,13 @@ impl ObjectCopy for File {
         &mut self,
         destination: Provider,
         data: CopyContent,
-        multipart: Option<MultiPartOptions>,
+        _multipart: Option<MultiPartOptions>,
     ) -> Result<Option<u64>> {
         let destination = destination.into_file()?;
         let destination = SumsFile::format_target_file(&destination);
 
-        if multipart.is_some() {
-            return Err(CopyError(
-                "multipart not supported for file uploads".to_string(),
-            ));
-        }
-
         // It doesn't matter what the part number is for filesystem operations, just append to the
-        // end of the file.
+        // end of the file as we assume correct ordering of parts.
         self.write(destination, data).await
     }
 
@@ -138,11 +137,11 @@ impl ObjectCopy for File {
         u64::MAX
     }
 
-    fn max_parts(&self) -> u64 {
+    fn single_part_limit(&self) -> u64 {
         u64::MAX
     }
 
-    fn single_part_limit(&self) -> u64 {
+    fn max_parts(&self) -> u64 {
         u64::MAX
     }
 

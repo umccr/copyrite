@@ -7,8 +7,11 @@ use crate::io::copy::file::FileBuilder;
 use crate::io::{default_s3_client, Provider};
 use crate::MetadataCopy;
 use aws_sdk_s3::Client;
+use dyn_clone::DynClone;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::io::AsyncRead;
+use tokio::sync::RwLock;
 
 pub mod aws;
 pub mod file;
@@ -38,6 +41,7 @@ impl CopyContent {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct MultiPartOptions {
     pub(crate) part_number: Option<u64>,
     pub(crate) start: u64,
@@ -52,7 +56,7 @@ impl MultiPartOptions {
 
 /// Write operations on file based or cloud files.
 #[async_trait::async_trait]
-pub trait ObjectCopy {
+pub trait ObjectCopy: DynClone {
     /// Copy the object to a new location with optional multipart copies.
     async fn copy(
         &mut self,
@@ -100,21 +104,21 @@ pub struct ObjectCopyBuilder {
 }
 
 impl ObjectCopyBuilder {
-    pub async fn build(self, url: String) -> Result<Box<dyn ObjectCopy + Send>> {
+    pub async fn build(self, url: String) -> Result<Arc<RwLock<dyn ObjectCopy + Send>>> {
         let provider = Provider::try_from(url.as_str())?;
         if provider.is_file() {
-            Ok(Box::new(FileBuilder.build()))
+            Ok(Arc::new(RwLock::new(FileBuilder.build())))
         } else {
             let client = match self.client {
                 Some(client) => client,
                 None => default_s3_client().await?,
             };
-            Ok(Box::new(
+            Ok(Arc::new(RwLock::new(
                 S3Builder::default()
                     .with_copy_metadata(self.metadata_mode)
                     .with_client(client)
                     .build()?,
-            ))
+            )))
         }
     }
 

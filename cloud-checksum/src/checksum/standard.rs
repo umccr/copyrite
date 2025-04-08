@@ -262,10 +262,10 @@ pub(crate) mod test {
     use crate::checksum::test::test_checksum;
     use anyhow::Result;
 
-    pub(crate) const EXPECTED_MD5_SUM: &str = "d93e71879054f205ede90d35c8081ca5";
-    pub(crate) const EXPECTED_SHA1_SUM: &str = "3eafdb6ad3a27167e0db70fccc40d0614307dabf";
+    pub(crate) const EXPECTED_MD5_SUM: &str = "d93e71879054f205ede90d35c8081ca5"; // pragma: allowlist secret
+    pub(crate) const EXPECTED_SHA1_SUM: &str = "3eafdb6ad3a27167e0db70fccc40d0614307dabf"; // pragma: allowlist secret
     pub(crate) const EXPECTED_SHA256_SUM: &str =
-        "29ffbd53cbe43179ab2fa62dbd958c0ec30b340ab50ce7c785e8a7a4b4771e39";
+        "29ffbd53cbe43179ab2fa62dbd958c0ec30b340ab50ce7c785e8a7a4b4771e39"; // pragma: allowlist secret
     pub(crate) const EXPECTED_CRC32_BE_SUM: &str = "3320f39e";
     pub(crate) const EXPECTED_CRC32_LE_SUM: &str = "9ef32033";
     pub(crate) const EXPECTED_CRC32C_BE_SUM: &str = "4920106a";
