@@ -11,12 +11,12 @@ use crate::io::sums::ObjectSumsBuilder;
 use crate::io::Provider;
 use crate::{CopyMode, MetadataCopy};
 use aws_sdk_s3::Client;
+use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
 
 pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 20 * 1024 * 1024; // 20mib
 
@@ -322,6 +322,9 @@ impl CopyTaskBuilder {
             .build(self.destination.clone())
             .await?;
 
+        let concurrency = self
+            .concurrency
+            .ok_or_else(|| CopyError("concurrency not set".to_string()))?;
         let settings = self
             .use_settings(
                 source.clone(),
@@ -339,7 +342,7 @@ impl CopyTaskBuilder {
             destination_copy,
             copy_mode,
             object_size: settings.object_size,
-            _tasks: vec![],
+            concurrency,
         };
 
         Ok(copy_task)
@@ -365,22 +368,23 @@ pub struct CopyTask {
     destination: Provider,
     _additional_sums: Ctx,
     part_size: Option<u64>,
-    source_copy: Arc<RwLock<dyn ObjectCopy + Send>>,
-    destination_copy: Arc<RwLock<dyn ObjectCopy + Send>>,
+    source_copy: Arc<RwLock<dyn ObjectCopy + Send + Sync>>,
+    destination_copy: Arc<RwLock<dyn ObjectCopy + Send + Sync>>,
     copy_mode: CopyMode,
     object_size: u64,
-    _tasks: Vec<JoinHandle<Result<()>>>,
+    concurrency: usize,
 }
 
 impl CopyTask {
     pub async fn run_multipart<F, Fut>(
         part_size: u64,
         object_size: u64,
+        concurrency: usize,
         copy_fn: F,
     ) -> Result<Option<u64>>
     where
-        F: Fn(MultiPartOptions) -> Fut,
-        Fut: Future<Output = Result<Option<u64>>>,
+        F: FnOnce(MultiPartOptions) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = Result<Option<u64>>> + Send,
     {
         let n_parts = object_size.div_ceil(part_size);
 
@@ -388,22 +392,33 @@ impl CopyTask {
         let mut start = 0;
         let mut end = part_size;
 
-        for part_number in 1..n_parts + 1 {
-            if end > object_size {
-                end = object_size;
+        for chunk in (1..n_parts + 1).collect::<Vec<_>>().chunks(concurrency) {
+            let mut tasks = Vec::with_capacity(concurrency);
+            for part_number in chunk {
+                if end > object_size {
+                    end = object_size;
+                }
+
+                let part_number = *part_number;
+                let owned_fn = copy_fn.clone();
+                tasks.push(tokio::spawn(async move {
+                    owned_fn(MultiPartOptions {
+                        part_number: Some(part_number),
+                        start,
+                        end,
+                    })
+                    .await
+                }));
+
+                start += part_size;
+                end += part_size;
             }
 
-            let part_total = copy_fn(MultiPartOptions {
-                part_number: Some(part_number),
-                start,
-                end,
-            })
-            .await?;
-
-            total = total.and_then(|total| part_total.map(|part_total| total + part_total));
-
-            start += part_size;
-            end += part_size;
+            for part_total in join_all(tasks).await {
+                let part_total = part_total??;
+                total =
+                    part_total.and_then(|total| part_total.map(|part_total| total + part_total));
+            }
         }
 
         // Complete the upload
@@ -428,13 +443,18 @@ impl CopyTask {
                     .await?
             }
             (CopyMode::ServerSide, Some(part_size)) => {
-                Self::run_multipart(part_size, self.object_size, |option| async {
-                    self.source_copy
-                        .write()
-                        .await
-                        .copy(self.source.clone(), self.destination.clone(), Some(option))
-                        .await
-                })
+                Self::run_multipart(
+                    part_size,
+                    self.object_size,
+                    self.concurrency,
+                    |option| async move {
+                        self.source_copy
+                            .write()
+                            .await
+                            .copy(self.source, self.destination, Some(option))
+                            .await
+                    },
+                )
                 .await?
             }
             (CopyMode::DownloadUpload, None) => {
@@ -451,19 +471,24 @@ impl CopyTask {
                     .await?
             }
             (CopyMode::DownloadUpload, Some(part_size)) => {
-                Self::run_multipart(part_size, self.object_size, |option| async {
-                    let data = self
-                        .source_copy
-                        .write()
-                        .await
-                        .download(self.source.clone(), Some(option.clone()))
-                        .await?;
-                    self.destination_copy
-                        .write()
-                        .await
-                        .upload(self.destination.clone(), data, Some(option))
-                        .await
-                })
+                Self::run_multipart(
+                    part_size,
+                    self.object_size,
+                    self.concurrency,
+                    |option| async move {
+                        let data = self
+                            .source_copy
+                            .write()
+                            .await
+                            .download(self.source, Some(option.clone()))
+                            .await?;
+                        self.destination_copy
+                            .write()
+                            .await
+                            .upload(self.destination, data, Some(option))
+                            .await
+                    },
+                )
                 .await?
             }
         };

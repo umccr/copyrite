@@ -104,7 +104,7 @@ pub struct ObjectCopyBuilder {
 }
 
 impl ObjectCopyBuilder {
-    pub async fn build(self, url: String) -> Result<Arc<RwLock<dyn ObjectCopy + Send>>> {
+    pub async fn build(self, url: String) -> Result<Arc<RwLock<dyn ObjectCopy + Send + Sync>>> {
         let provider = Provider::try_from(url.as_str())?;
         if provider.is_file() {
             Ok(Arc::new(RwLock::new(FileBuilder.build())))
