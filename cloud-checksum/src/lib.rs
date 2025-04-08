@@ -44,9 +44,7 @@ impl Commands {
             // it's an error if not verifying the data.
             if generate.checksum.is_empty()
                 && !generate.verify
-                && !generate.input.iter().all(|input| {
-                    matches!(Provider::try_from(input.as_str()), Ok(Provider::S3 { .. }))
-                })
+                && !generate.input.iter().all(|input| Provider::try_from(input.as_str()).is_ok_and(|provider| provider.is_s3()))
             {
                 return Err(ParseError(
                     "some checksums must be specified if using file based objects and not verify existing sums".to_string(),
@@ -199,6 +197,10 @@ pub struct Copy {
     /// how many simultaneous connections are made to copy files.
     #[arg(long, env, default_value_t = 10)]
     pub concurrency: usize,
+    /// Do not check the checksums of the copied files after copying. By default, all copy
+    /// operations will generate checksums for a check and then verify that the copy was correct.
+    #[arg(long, env)]
+    pub no_check: bool,
 }
 
 /// The subcommands for cloud-checksum.

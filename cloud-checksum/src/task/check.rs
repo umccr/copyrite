@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::to_string;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Build a check task.
@@ -49,6 +51,7 @@ impl CheckTaskBuilder {
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
         let objects = join_all(self.files.into_iter().map(|file| async move {
+            println!("{}", file);
             let mut sums = ObjectSumsBuilder::default().build(file.to_string()).await?;
 
             let file_size = sums.file_size().await?;
@@ -56,6 +59,8 @@ impl CheckTaskBuilder {
                 .sums_file()
                 .await?
                 .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
+            
+                println!("{:#?}", existing);
 
             Ok((existing, BTreeSet::from_iter(vec![State(sums)])))
         }))
@@ -85,6 +90,12 @@ pub enum GroupBy {
 /// Representation of file state to implement equality and hashing.
 pub struct State(pub(crate) Box<dyn ObjectSums + Send>);
 
+impl Debug for State {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("State")
+    }
+}
+
 impl Hash for State {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.location().hash(state);
@@ -112,7 +123,7 @@ impl Ord for State {
 }
 
 /// Objects processed from the check task.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct CheckObjects(pub(crate) BTreeMap<SumsFile, BTreeSet<State>>);
 
 impl Hash for CheckObjects {
@@ -122,7 +133,7 @@ impl Hash for CheckObjects {
 }
 
 /// Execute the check task.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct CheckTask {
     objects: CheckObjects,
     group_by: GroupBy,
@@ -208,11 +219,13 @@ impl CheckTask {
 
     /// Runs the check task, returning the list of matching files.
     pub async fn run(self) -> Result<CheckObjects> {
-        let update = self.update;
+        let update = self.update && matches!(self.group_by, GroupBy::Equality);
         let result = match self.group_by {
             GroupBy::Equality => Ok::<_, Error>(self.merge_same().await?.objects),
             GroupBy::Comparability => Ok(self.merge_comparable().await?.objects),
         }?;
+
+        println!("{:#?}", result);
 
         if update {
             for (file, locations) in &result.0 {
@@ -252,6 +265,16 @@ impl CheckOutput {
     /// Convert to a JSON string.
     pub fn to_json_string(&self) -> Result<String> {
         Ok(to_string(&self)?)
+    }
+
+    /// Get the grouping option.
+    pub fn group_by(&self) -> GroupBy {
+        self.group_by
+    }
+
+    /// Get the groups.
+    pub fn groups(&self) -> &[Vec<String>] {
+        self.groups.as_slice()
     }
 }
 
