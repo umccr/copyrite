@@ -64,7 +64,7 @@ impl Hash for StandardCtx {
 
 impl Default for StandardCtx {
     fn default() -> Self {
-        Self::CRC32(Default::default(), Endianness::BigEndian)
+        Self::crc32()
     }
 }
 

@@ -9,7 +9,8 @@ use crate::io::copy::{CopyContent, MultiPartOptions, ObjectCopy};
 use crate::io::Provider;
 use crate::MetadataCopy;
 use aws_sdk_s3::types::{
-    ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart, MetadataDirective, TaggingDirective,
+    ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart, MetadataDirective,
+    TaggingDirective,
 };
 use aws_sdk_s3::Client;
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
@@ -456,18 +457,21 @@ impl S3 {
         bucket: String,
         upload_id: String,
     ) -> Result<()> {
+        // Parts must be ordered.
+        let mut parts = self
+            .completed_parts
+            .remove_entry(&upload_id)
+            .ok_or_else(|| AwsError("missing completed parts".to_string()))?
+            .1;
+        parts.sort_by(|a, b| a.part_number.cmp(&b.part_number));
+
         self.client
             .complete_multipart_upload()
             .bucket(&bucket)
             .key(&key)
             .multipart_upload(
                 CompletedMultipartUpload::builder()
-                    .set_parts(Some(
-                        self.completed_parts
-                            .remove_entry(&upload_id)
-                            .ok_or_else(|| AwsError("missing completed parts".to_string()))?
-                            .1,
-                    ))
+                    .set_parts(Some(parts))
                     .build(),
             )
             .upload_id(upload_id)

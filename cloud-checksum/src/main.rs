@@ -1,7 +1,7 @@
 use cloud_checksum::checksum::Ctx;
 use cloud_checksum::error::{Error, Result};
 use cloud_checksum::io::sums::channel::ChannelReader;
-use cloud_checksum::task::check::{CheckOutput, CheckTaskBuilder, GroupBy};
+use cloud_checksum::task::check::{CheckObjects, CheckOutput, CheckTaskBuilder, GroupBy};
 use cloud_checksum::task::copy::{CopyInfo, CopyTaskBuilder};
 use cloud_checksum::task::generate::{GenerateTaskBuilder, SumCtxPairs};
 use cloud_checksum::{Check, Commands, Copy, Generate, Optimization, Subcommands};
@@ -46,6 +46,7 @@ async fn generate(generate: Generate, optimization: Optimization) -> Result<()> 
     } else {
         if generate.missing {
             let ctxs = comparable_check(generate.input.clone()).await?;
+            let ctxs = SumCtxPairs::from_comparable(ctxs)?;
             if let Some(ctxs) = ctxs {
                 for ctx in ctxs.into_inner() {
                     let (input, ctx) = ctx.into_inner();
@@ -82,16 +83,14 @@ async fn generate(generate: Generate, optimization: Optimization) -> Result<()> 
 }
 
 /// Perform a check for comparability on the input files.
-async fn comparable_check(input: Vec<String>) -> Result<Option<SumCtxPairs>> {
-    let ctxs = CheckTaskBuilder::default()
+async fn comparable_check(input: Vec<String>) -> Result<CheckObjects> {
+    CheckTaskBuilder::default()
         .with_input_files(input)
         .with_group_by(GroupBy::Comparability)
         .build()
         .await?
         .run()
-        .await?;
-
-    SumCtxPairs::from_comparable(ctxs)
+        .await
 }
 
 /// Perform the check sub command from the args.
@@ -133,13 +132,11 @@ async fn copy(copy: Copy, optimization: Optimization) -> Result<CopyInfo> {
 
         // If the inputs have no checksums to begin with, we need to generate something for
         // the check, so pick the default.
-        let checksum = if ctxs.is_none() || ctxs.is_some_and(|ctxs| ctxs.into_inner().is_empty()) {
+        let checksum = if ctxs.into_inner().is_empty() {
             vec![Ctx::default()]
         } else {
             vec![]
         };
-
-        println!("{:#?}", checksum);
 
         // First generate missing sums.
         generate(

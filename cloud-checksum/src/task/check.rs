@@ -51,7 +51,6 @@ impl CheckTaskBuilder {
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
         let objects = join_all(self.files.into_iter().map(|file| async move {
-            println!("{}", file);
             let mut sums = ObjectSumsBuilder::default().build(file.to_string()).await?;
 
             let file_size = sums.file_size().await?;
@@ -59,8 +58,6 @@ impl CheckTaskBuilder {
                 .sums_file()
                 .await?
                 .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
-
-            println!("{:#?}", existing);
 
             Ok((existing, BTreeSet::from_iter(vec![State(sums)])))
         }))
@@ -125,6 +122,13 @@ impl Ord for State {
 /// Objects processed from the check task.
 #[derive(Default, Debug)]
 pub struct CheckObjects(pub(crate) BTreeMap<SumsFile, BTreeSet<State>>);
+
+impl CheckObjects {
+    /// Get the inner value.
+    pub fn into_inner(self) -> BTreeMap<SumsFile, BTreeSet<State>> {
+        self.0
+    }
+}
 
 impl Hash for CheckObjects {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -224,8 +228,6 @@ impl CheckTask {
             GroupBy::Equality => Ok::<_, Error>(self.merge_same().await?.objects),
             GroupBy::Comparability => Ok(self.merge_comparable().await?.objects),
         }?;
-
-        println!("{:#?}", result);
 
         if update {
             for (file, locations) in &result.0 {
