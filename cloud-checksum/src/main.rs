@@ -1,3 +1,4 @@
+use cloud_checksum::checksum::Ctx;
 use cloud_checksum::error::{Error, Result};
 use cloud_checksum::io::sums::channel::ChannelReader;
 use cloud_checksum::task::check::{CheckOutput, CheckTaskBuilder, GroupBy};
@@ -5,8 +6,6 @@ use cloud_checksum::task::copy::{CopyInfo, CopyTaskBuilder};
 use cloud_checksum::task::generate::{GenerateTaskBuilder, SumCtxPairs};
 use cloud_checksum::{Check, Commands, Copy, Generate, Optimization, Subcommands};
 use tokio::io::stdin;
-use cloud_checksum::checksum::Ctx;
-use cloud_checksum::io::Provider;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -131,37 +130,43 @@ async fn copy(copy: Copy, optimization: Optimization) -> Result<CopyInfo> {
     if !copy.no_check {
         let input = vec![copy.source.to_string(), copy.destination.to_string()];
         let ctxs = comparable_check(input.clone()).await?;
-        
-        // If the inputs have no checksums to begin with, we need to generate something for 
+
+        // If the inputs have no checksums to begin with, we need to generate something for
         // the check, so pick the default.
         let checksum = if ctxs.is_none() || ctxs.is_some_and(|ctxs| ctxs.into_inner().is_empty()) {
             vec![Ctx::default()]
         } else {
             vec![]
         };
-        
+
         println!("{:#?}", checksum);
-        
+
         // First generate missing sums.
-        generate(Generate {
-            input: input.clone(),
-            checksum,
-            missing: true,
-            force_overwrite: false,
-            verify: false,
-        }, optimization).await?;
+        generate(
+            Generate {
+                input: input.clone(),
+                checksum,
+                missing: true,
+                force_overwrite: false,
+                verify: false,
+            },
+            optimization,
+        )
+        .await?;
 
         // Then perform check.
         let result = check(Check {
             input,
             update: true,
             group_by: GroupBy::Equality,
-        }).await?;
+        })
+        .await?;
 
         if result.groups().len() != 1 {
-            return Err(Error::CopyError(
-                format!("Copy check failed, the files {} and {} are not identical", copy.source, copy.destination),
-            ));
+            return Err(Error::CopyError(format!(
+                "Copy check failed, the files {} and {} are not identical",
+                copy.source, copy.destination
+            )));
         }
     }
 

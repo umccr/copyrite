@@ -2,13 +2,14 @@
 //!
 
 use crate::checksum::file::SumsFile;
+use crate::checksum::Ctx;
 use crate::error::Error::{AwsError, ParseError};
 use crate::error::Result;
 use crate::io::copy::{CopyContent, MultiPartOptions, ObjectCopy};
 use crate::io::Provider;
 use crate::MetadataCopy;
 use aws_sdk_s3::types::{
-    CompletedMultipartUpload, CompletedPart, MetadataDirective, TaggingDirective,
+    ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart, MetadataDirective, TaggingDirective,
 };
 use aws_sdk_s3::Client;
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
@@ -102,6 +103,7 @@ impl S3 {
         bucket: String,
         tagging: Option<String>,
         metadata: Option<HashMap<String, String>>,
+        additional_checksum: Option<ChecksumAlgorithm>,
     ) -> Result<String> {
         let entry = (bucket, key);
         if self.multipart_upload.contains_key(&entry) {
@@ -113,6 +115,7 @@ impl S3 {
             .create_multipart_upload()
             .set_tagging(tagging)
             .set_metadata(metadata)
+            .set_checksum_algorithm(additional_checksum)
             .bucket(&entry.0)
             .key(&entry.1)
             .send()
@@ -142,6 +145,7 @@ impl S3 {
         bucket: String,
         destination_key: String,
         destination_bucket: String,
+        additional_checksum: Option<ChecksumAlgorithm>,
     ) -> Result<Option<u64>> {
         let size = self
             .client
@@ -162,6 +166,7 @@ impl S3 {
             .set_tagging(tagging_set)
             .metadata_directive(metadata)
             .set_metadata(metadata_set)
+            .set_checksum_algorithm(additional_checksum)
             .copy_source(Self::copy_source(&key, &bucket))
             .key(SumsFile::format_target_file(&destination_key))
             .bucket(destination_bucket)
@@ -188,6 +193,7 @@ impl S3 {
         } else {
             (MetadataDirective::Replace, Some(HashMap::new()))
         };
+
         (metadata, metadata_set)
     }
 
@@ -242,6 +248,7 @@ impl S3 {
         destination_key: String,
         destination_bucket: String,
         multi_part: MultiPartOptions,
+        additional_checksum: Option<ChecksumAlgorithm>,
     ) -> Result<Option<u64>> {
         let head = self
             .client
@@ -258,6 +265,7 @@ impl S3 {
                 destination_bucket.to_string(),
                 tagging,
                 head.metadata,
+                additional_checksum,
             )
             .await?;
 
@@ -350,6 +358,7 @@ impl S3 {
         key: String,
         bucket: String,
         mut content: CopyContent,
+        additional_checksum: Option<ChecksumAlgorithm>,
     ) -> Result<Option<u64>> {
         let buf = Self::read_content(&mut content).await?;
 
@@ -358,6 +367,7 @@ impl S3 {
             .put_object()
             .set_tagging(content.tags)
             .set_metadata(content.metadata)
+            .set_checksum_algorithm(additional_checksum)
             .bucket(bucket)
             .key(key)
             .body(ByteStream::from(buf))
@@ -392,6 +402,7 @@ impl S3 {
         bucket: String,
         mut content: CopyContent,
         multi_part: MultiPartOptions,
+        additional_checksum: Option<ChecksumAlgorithm>,
     ) -> Result<Option<u64>> {
         let buf = Self::read_content(&mut content).await?;
 
@@ -401,6 +412,7 @@ impl S3 {
                 bucket.to_string(),
                 content.tags,
                 content.metadata,
+                additional_checksum.clone(),
             )
             .await?;
 
@@ -409,7 +421,7 @@ impl S3 {
                 .client
                 .upload_part()
                 .upload_id(&upload_id)
-                .set_checksum_algorithm(None)
+                .set_checksum_algorithm(additional_checksum)
                 .part_number(i32::try_from(part_number)?)
                 .key(&key)
                 .bucket(&bucket)
@@ -420,11 +432,11 @@ impl S3 {
             let parts = self.completed_parts.entry(upload_id).or_default();
             parts.push(
                 CompletedPart::builder()
-                    // .set_checksum_crc32(part.checksum_crc32)
-                    // .set_checksum_crc32_c(part.checksum_crc32_c)
-                    // .set_checksum_sha1(part.checksum_sha1)
-                    // .set_checksum_sha256(part.checksum_sha256)
-                    // .set_checksum_crc64_nvme(part.checksum_crc64_nvme)
+                    .set_checksum_crc32(part.checksum_crc32)
+                    .set_checksum_crc32_c(part.checksum_crc32_c)
+                    .set_checksum_sha1(part.checksum_sha1)
+                    .set_checksum_sha256(part.checksum_sha256)
+                    .set_checksum_crc64_nvme(part.checksum_crc64_nvme)
                     .set_e_tag(part.e_tag)
                     .set_part_number(Some(i32::try_from(part_number)?))
                     .build(),
@@ -474,6 +486,7 @@ impl ObjectCopy for S3 {
         provider_source: Provider,
         provider_destination: Provider,
         multi_part: Option<MultiPartOptions>,
+        additional_ctx: Option<Ctx>,
     ) -> Result<Option<u64>> {
         let (bucket, key) = provider_source.into_s3()?;
         let (destination_bucket, destination_key) = provider_destination.into_s3()?;
@@ -481,11 +494,19 @@ impl ObjectCopy for S3 {
         let key = SumsFile::format_target_file(&key);
         let destination_key = SumsFile::format_target_file(&destination_key);
 
+        let ctx = additional_ctx.map(ChecksumAlgorithm::from);
         if let Some(multi_part) = multi_part {
-            self.copy_object_multipart(key, bucket, destination_key, destination_bucket, multi_part)
-                .await
+            self.copy_object_multipart(
+                key,
+                bucket,
+                destination_key,
+                destination_bucket,
+                multi_part,
+                ctx,
+            )
+            .await
         } else {
-            self.copy_object(key, bucket, destination_key, destination_bucket)
+            self.copy_object(key, bucket, destination_key, destination_bucket, ctx)
                 .await
         }
     }
@@ -506,15 +527,17 @@ impl ObjectCopy for S3 {
         destination: Provider,
         data: CopyContent,
         multi_part: Option<MultiPartOptions>,
+        additional_ctx: Option<Ctx>,
     ) -> Result<Option<u64>> {
         let (bucket, key) = destination.into_s3()?;
         let key = SumsFile::format_target_file(&key);
 
+        let ctx = additional_ctx.map(ChecksumAlgorithm::from);
         if let Some(multi_part) = multi_part {
-            self.put_object_multipart(key, bucket, data, multi_part)
+            self.put_object_multipart(key, bucket, data, multi_part, ctx)
                 .await
         } else {
-            self.put_object(key, bucket, data).await
+            self.put_object(key, bucket, data, ctx).await
         }
     }
 

@@ -41,6 +41,15 @@ pub struct CopySettings {
     object_size: u64,
 }
 
+#[derive(Debug)]
+struct ObjectInfo {
+    size: u64,
+    single_part_limit: u64,
+    max_parts: u64,
+    max_part_size: u64,
+    min_part_size: u64,
+}
+
 impl CopySettings {
     /// Create new settings.
     pub fn new(part_size: Option<u64>, ctx: Ctx, object_size: u64) -> Self {
@@ -130,11 +139,8 @@ impl CopyTaskBuilder {
     fn use_settings_from_sums(
         &self,
         sums: &SumsFile,
-        size: u64,
-        single_part_limit: u64,
-        max_parts: u64,
-        max_part_size: u64,
-        min_part_size: u64,
+        info: ObjectInfo,
+        destination: Provider,
     ) -> Result<CopySettings> {
         // First, check if the original was a multipart upload and if a valid and preferred
         // multipart checksum exists, using this if it is the case.
@@ -142,31 +148,37 @@ impl CopyTaskBuilder {
             .checksums
             .keys()
             .find_map(|ctx| {
-                ctx.is_preferred_multipart()
+                ctx.is_preferred_multipart(&destination)
                     .map(|part_size| (part_size, ctx.clone()))
             })
             .take_if(|(part_size, _)| {
-                Self::is_multipart(size, *part_size, max_parts, max_part_size, min_part_size)
+                Self::is_multipart(
+                    info.size,
+                    *part_size,
+                    info.max_parts,
+                    info.max_part_size,
+                    info.min_part_size,
+                )
             });
         if let Some((part_size, ctx)) = ctx {
-            return Ok(CopySettings::new(Some(part_size), ctx, size));
+            return Ok(CopySettings::new(Some(part_size), ctx, info.size));
         }
 
         // Otherwise, check if a preferred single part checksum exists.
         let ctx = sums
             .checksums
             .keys()
-            .find(|ctx| ctx.is_preferred_single_part())
-            .take_if(|_| Self::is_single_part(size, single_part_limit));
+            .find(|ctx| ctx.is_preferred_single_part(&destination))
+            .take_if(|_| Self::is_single_part(info.size, info.single_part_limit));
         if let Some(ctx) = ctx {
-            return Ok(CopySettings::new(None, ctx.clone(), size));
+            return Ok(CopySettings::new(None, ctx.clone(), info.size));
         }
 
         // If none of the above apply, then extract the best additional checksum to use.
         Ok(CopySettings::new(
             None,
             sums.checksums.keys().next().cloned().unwrap_or_default(),
-            size,
+            info.size,
         ))
     }
 
@@ -187,6 +199,7 @@ impl CopyTaskBuilder {
     pub async fn use_settings(
         self,
         source: Provider,
+        destination: Provider,
         source_copy: &(dyn ObjectCopy + Send),
         destination_copy: &(dyn ObjectCopy + Send),
     ) -> Result<CopySettings> {
@@ -217,11 +230,14 @@ impl CopyTaskBuilder {
         let settings = if let Some(sums) = sums {
             let settings = self.use_settings_from_sums(
                 &sums,
-                size,
-                single_part_limit,
-                max_parts,
-                max_part_size,
-                min_part_size,
+                ObjectInfo {
+                    size,
+                    single_part_limit,
+                    max_parts,
+                    max_part_size,
+                    min_part_size,
+                },
+                destination,
             )?;
             if self.part_size.is_none() {
                 return Ok(settings);
@@ -328,6 +344,7 @@ impl CopyTaskBuilder {
         let settings = self
             .use_settings(
                 source.clone(),
+                destination.clone(),
                 &*source_copy.read().await,
                 &*destination_copy.read().await,
             )
@@ -336,7 +353,7 @@ impl CopyTaskBuilder {
         let copy_task = CopyTask {
             source,
             destination,
-            _additional_sums: settings.ctx,
+            additional_sums: settings.ctx,
             part_size: settings.part_size,
             source_copy,
             destination_copy,
@@ -366,7 +383,7 @@ impl CopyInfo {
 pub struct CopyTask {
     source: Provider,
     destination: Provider,
-    _additional_sums: Ctx,
+    additional_sums: Ctx,
     part_size: Option<u64>,
     source_copy: Arc<RwLock<dyn ObjectCopy + Send + Sync>>,
     destination_copy: Arc<RwLock<dyn ObjectCopy + Send + Sync>>,
@@ -439,7 +456,12 @@ impl CopyTask {
                 self.source_copy
                     .write()
                     .await
-                    .copy(self.source, self.destination, None)
+                    .copy(
+                        self.source,
+                        self.destination,
+                        None,
+                        Some(self.additional_sums),
+                    )
                     .await?
             }
             (CopyMode::ServerSide, Some(part_size)) => {
@@ -451,7 +473,12 @@ impl CopyTask {
                         self.source_copy
                             .write()
                             .await
-                            .copy(self.source, self.destination, Some(option))
+                            .copy(
+                                self.source,
+                                self.destination,
+                                Some(option),
+                                Some(self.additional_sums),
+                            )
                             .await
                     },
                 )
@@ -467,7 +494,7 @@ impl CopyTask {
                 self.destination_copy
                     .write()
                     .await
-                    .upload(self.destination, data, None)
+                    .upload(self.destination, data, None, Some(self.additional_sums))
                     .await?
             }
             (CopyMode::DownloadUpload, Some(part_size)) => {
@@ -485,7 +512,12 @@ impl CopyTask {
                         self.destination_copy
                             .write()
                             .await
-                            .upload(self.destination, data, Some(option))
+                            .upload(
+                                self.destination,
+                                data,
+                                Some(option),
+                                Some(self.additional_sums),
+                            )
                             .await
                     },
                 )

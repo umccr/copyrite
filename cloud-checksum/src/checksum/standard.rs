@@ -3,6 +3,7 @@
 
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
+use crate::io::Provider;
 use crate::{Checksum, Endianness};
 use crc32c::crc32c_append;
 use md5::Digest;
@@ -63,7 +64,7 @@ impl Hash for StandardCtx {
 
 impl Default for StandardCtx {
     fn default() -> Self {
-        Self::CRC32C(0, Endianness::BigEndian)
+        Self::CRC32(Default::default(), Endianness::BigEndian)
     }
 }
 
@@ -254,6 +255,25 @@ impl StandardCtx {
             StandardCtx::CRC32C(_, _) => 4,
             StandardCtx::QuickXor => 5,
         }
+    }
+
+    /// Is this a preferred cloud checksum for copying files.
+    pub fn is_preferred_cloud_ctx(&self, provider: &Provider) -> bool {
+        if provider.is_s3() {
+            self.is_aws_ctx()
+        } else {
+            true
+        }
+    }
+
+    /// Is this an AWS-compatible checksum context.
+    pub fn is_aws_ctx(&self) -> bool {
+        !matches!(self, StandardCtx::QuickXor)
+    }
+
+    /// Is this an AWS additional checksum that can be specified.
+    pub fn is_aws_additional_ctx(&self) -> bool {
+        !matches!(self, StandardCtx::QuickXor | StandardCtx::MD5(_))
     }
 }
 

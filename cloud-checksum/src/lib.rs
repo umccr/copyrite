@@ -44,7 +44,9 @@ impl Commands {
             // it's an error if not verifying the data.
             if generate.checksum.is_empty()
                 && !generate.verify
-                && !generate.input.iter().all(|input| Provider::try_from(input.as_str()).is_ok_and(|provider| provider.is_s3()))
+                && !generate.input.iter().all(|input| {
+                    Provider::try_from(input.as_str()).is_ok_and(|provider| provider.is_s3())
+                })
             {
                 return Err(ParseError(
                     "some checksums must be specified if using file based objects and not verify existing sums".to_string(),

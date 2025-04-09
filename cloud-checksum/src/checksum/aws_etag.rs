@@ -5,6 +5,7 @@
 use crate::checksum::standard::StandardCtx;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
+use crate::io::Provider;
 use phf::phf_ordered_map;
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
@@ -452,15 +453,20 @@ impl AWSETagCtx {
     }
 
     /// Does this context represent a valid and preferred multipart checksum. All multipart
-    /// checksums are preferred except for those with different sized part sizes. Returns
-    /// the preferred part size.
-    pub fn is_preferred_multipart(&self) -> Option<u64> {
+    /// checksums that AWS can use are preferred except for those with different sized part sizes.
+    /// Returns the preferred part size.
+    pub fn is_preferred_multipart(&self, provider: &Provider) -> Option<u64> {
         let part_sizes = self.get_part_sizes();
-        if part_sizes.len() == 1 {
+        if part_sizes.len() == 1 && self.ctx.is_preferred_cloud_ctx(provider) {
             Some(part_sizes[0])
         } else {
             None
         }
+    }
+
+    /// Get the underlying standard context.
+    pub fn ctx(self) -> StandardCtx {
+        self.ctx
     }
 }
 

@@ -59,8 +59,8 @@ impl CheckTaskBuilder {
                 .sums_file()
                 .await?
                 .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
-            
-                println!("{:#?}", existing);
+
+            println!("{:#?}", existing);
 
             Ok((existing, BTreeSet::from_iter(vec![State(sums)])))
         }))

@@ -2,6 +2,7 @@
 //!
 
 use crate::checksum::file::SumsFile;
+use crate::checksum::Ctx;
 use crate::error::Error::CopyError;
 use crate::error::Result;
 use crate::io::copy::{CopyContent, MultiPartOptions, ObjectCopy};
@@ -94,6 +95,7 @@ impl ObjectCopy for File {
         provider_source: Provider,
         provider_destination: Provider,
         multipart: Option<MultiPartOptions>,
+        _additional_ctx: Option<Ctx>,
     ) -> Result<Option<u64>> {
         let source = SumsFile::format_target_file(&provider_source.into_file()?);
         let destination = SumsFile::format_target_file(&provider_destination.into_file()?);
@@ -124,6 +126,7 @@ impl ObjectCopy for File {
         destination: Provider,
         data: CopyContent,
         _multipart: Option<MultiPartOptions>,
+        _additional_ctx: Option<Ctx>,
     ) -> Result<Option<u64>> {
         let destination = destination.into_file()?;
         let destination = SumsFile::format_target_file(&destination);

@@ -1,6 +1,7 @@
 //! Functionality related to copying.
 //!
 
+use crate::checksum::Ctx;
 use crate::error::Result;
 use crate::io::copy::aws::S3Builder;
 use crate::io::copy::file::FileBuilder;
@@ -63,6 +64,7 @@ pub trait ObjectCopy: DynClone {
         provider_source: Provider,
         provider_destination: Provider,
         multi_part: Option<MultiPartOptions>,
+        additional_ctx: Option<Ctx>,
     ) -> Result<Option<u64>>;
 
     /// Download the object to memory.
@@ -78,6 +80,7 @@ pub trait ObjectCopy: DynClone {
         destination: Provider,
         data: CopyContent,
         multi_part: Option<MultiPartOptions>,
+        additional_ctx: Option<Ctx>,
     ) -> Result<Option<u64>>;
 
     /// The maximum part size for multipart copy.
