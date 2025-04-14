@@ -17,6 +17,7 @@ pub struct CopyTaskBuilder {
     // multipart_threshold: Option<u64>,
     // part_size: Option<u64>,
     metadata_mode: MetadataCopy,
+    tag_mode: MetadataCopy,
     copy_mode: CopyMode,
 }
 
@@ -36,6 +37,12 @@ impl CopyTaskBuilder {
     /// Set the metadata mode.
     pub fn with_metadata_mode(mut self, metadata_mode: MetadataCopy) -> Self {
         self.metadata_mode = metadata_mode;
+        self
+    }
+
+    /// Set the metadata mode.
+    pub fn with_tag_mode(mut self, tag_mode: MetadataCopy) -> Self {
+        self.tag_mode = tag_mode;
         self
     }
 
@@ -80,10 +87,12 @@ impl CopyTaskBuilder {
 
         let source_copy = ObjectCopyBuilder::default()
             .with_copy_metadata(self.metadata_mode)
+            .with_copy_tags(self.tag_mode)
             .build(self.source)
             .await?;
         let destination_copy = ObjectCopyBuilder::default()
             .with_copy_metadata(self.metadata_mode)
+            .with_copy_tags(self.tag_mode)
             .build(self.destination)
             .await?;
 

@@ -58,6 +58,7 @@ pub trait ObjectCopy {
 #[derive(Debug, Default)]
 pub struct ObjectCopyBuilder {
     metadata_mode: MetadataCopy,
+    tag_mode: MetadataCopy,
 }
 
 impl ObjectCopyBuilder {
@@ -69,6 +70,7 @@ impl ObjectCopyBuilder {
             Ok(Box::new(
                 S3Builder::default()
                     .with_copy_metadata(self.metadata_mode)
+                    .with_copy_tags(self.tag_mode)
                     .with_client(default_s3_client().await?)
                     .build()?,
             ))
@@ -78,6 +80,12 @@ impl ObjectCopyBuilder {
     /// Set the copy metadata option.
     pub fn with_copy_metadata(mut self, metadata_mode: MetadataCopy) -> Self {
         self.metadata_mode = metadata_mode;
+        self
+    }
+
+    /// Set the copy metadata option.
+    pub fn with_copy_tags(mut self, tag_mode: MetadataCopy) -> Self {
+        self.tag_mode = tag_mode;
         self
     }
 }

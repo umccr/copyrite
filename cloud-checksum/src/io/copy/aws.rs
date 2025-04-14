@@ -21,6 +21,7 @@ use tokio::io::AsyncReadExt;
 pub struct S3Builder {
     client: Option<Client>,
     metadata_mode: MetadataCopy,
+    tag_mode: MetadataCopy,
 }
 
 impl S3Builder {
@@ -30,19 +31,29 @@ impl S3Builder {
         self
     }
 
-    fn get_components(self) -> Result<(Client, MetadataCopy)> {
+    fn get_components(self) -> Result<(Client, MetadataCopy, MetadataCopy)> {
         let error_fn = || {
             ParseError(
                 "client, bucket, key and destinations are required in `S3Builder`".to_string(),
             )
         };
 
-        Ok((self.client.ok_or_else(error_fn)?, self.metadata_mode))
+        Ok((
+            self.client.ok_or_else(error_fn)?,
+            self.metadata_mode,
+            self.tag_mode,
+        ))
     }
 
     /// Set the copy metadata option.
     pub fn with_copy_metadata(mut self, metadata_mode: MetadataCopy) -> Self {
         self.metadata_mode = metadata_mode;
+        self
+    }
+
+    /// Set the copy metadata option.
+    pub fn with_copy_tags(mut self, tag_mode: MetadataCopy) -> Self {
+        self.tag_mode = tag_mode;
         self
     }
 
@@ -52,9 +63,9 @@ impl S3Builder {
     }
 }
 
-impl From<(Client, MetadataCopy)> for S3 {
-    fn from((client, metadata_mode): (Client, MetadataCopy)) -> Self {
-        Self::new(client, metadata_mode)
+impl From<(Client, MetadataCopy, MetadataCopy)> for S3 {
+    fn from((client, metadata_mode, tag_mode): (Client, MetadataCopy, MetadataCopy)) -> Self {
+        Self::new(client, metadata_mode, tag_mode)
     }
 }
 
@@ -63,14 +74,16 @@ impl From<(Client, MetadataCopy)> for S3 {
 pub struct S3 {
     client: Client,
     metadata_mode: MetadataCopy,
+    tag_mode: MetadataCopy,
 }
 
 impl S3 {
     /// Create a new S3 object.
-    pub fn new(client: Client, metadata_mode: MetadataCopy) -> S3 {
+    pub fn new(client: Client, metadata_mode: MetadataCopy, tag_mode: MetadataCopy) -> S3 {
         Self {
             client,
             metadata_mode,
+            tag_mode,
         }
     }
 
@@ -105,7 +118,7 @@ impl S3 {
             .await?
             .content_length;
 
-        let (tagging, tagging_set) = if self.metadata_mode.is_copy() {
+        let (tagging, tagging_set) = if self.tag_mode.is_copy() {
             (TaggingDirective::Copy, None)
         } else {
             (TaggingDirective::Replace, Some("".to_string()))
@@ -134,6 +147,9 @@ impl S3 {
         {
             return Ok(None);
         }
+        if self.tag_mode.is_best_effort() && result.as_ref().is_err_and(Self::is_access_denied) {
+            return Ok(None);
+        }
 
         Ok(size.map(u64::try_from).transpose()?)
     }
@@ -150,7 +166,7 @@ impl S3 {
 
         let size = result.content_length.map(u64::try_from).transpose()?;
 
-        let tags = if self.metadata_mode.is_copy() {
+        let tags = if self.tag_mode.is_copy() {
             let tags = self
                 .client
                 .get_object_tagging()
@@ -211,6 +227,9 @@ impl S3 {
 
         if self.metadata_mode.is_best_effort() && output.as_ref().is_err_and(Self::is_access_denied)
         {
+            return Ok(None);
+        }
+        if self.tag_mode.is_best_effort() && output.as_ref().is_err_and(Self::is_access_denied) {
             return Ok(None);
         }
 
