@@ -5,8 +5,8 @@ use crate::checksum::aws_etag::PART_SIZE_ORDERING;
 use crate::checksum::file::SumsFile;
 use crate::checksum::Ctx;
 use crate::error::Error::CopyError;
-use crate::error::Result;
-use crate::io::copy::{MultiPartOptions, ObjectCopy, ObjectCopyBuilder};
+use crate::error::{Error, Result};
+use crate::io::copy::{CopyResult, CopyState, MultiPartOptions, ObjectCopy, ObjectCopyBuilder};
 use crate::io::sums::ObjectSumsBuilder;
 use crate::io::Provider;
 use crate::{CopyMode, MetadataCopy};
@@ -15,8 +15,6 @@ use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
 use std::future::Future;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 20 * 1024 * 1024; // 20mib
 
@@ -44,7 +42,6 @@ pub struct CopySettings {
 #[derive(Debug)]
 struct ObjectInfo {
     size: u64,
-    single_part_limit: u64,
     max_parts: u64,
     max_part_size: u64,
     min_part_size: u64,
@@ -169,7 +166,7 @@ impl CopyTaskBuilder {
             .checksums
             .keys()
             .find(|ctx| ctx.is_preferred_single_part(&destination))
-            .take_if(|_| Self::is_single_part(info.size, info.single_part_limit));
+            .take_if(|_| Self::is_single_part(info.size, info.max_part_size));
         if let Some(ctx) = ctx {
             return Ok(CopySettings::new(None, ctx.clone(), info.size));
         }
@@ -198,21 +195,16 @@ impl CopyTaskBuilder {
     ///    reaches the `multipart_threshold` or otherwise use single part copies if possible.
     pub async fn use_settings(
         self,
-        source: Provider,
         destination: Provider,
-        source_copy: &(dyn ObjectCopy + Send),
         destination_copy: &(dyn ObjectCopy + Send),
+        state: &CopyState,
     ) -> Result<CopySettings> {
-        // The size is required for multipart copies.
-        let size = source_copy
-            .size(source.clone())
-            .await?
-            .ok_or_else(|| CopyError("failed to get object size".to_string()))?;
-
+        let size = state
+            .size()
+            .ok_or_else(|| CopyError("failed to get size".to_string()))?;
         let max_part_size = destination_copy.max_part_size();
         let max_parts = destination_copy.max_parts();
         let min_part_size = destination_copy.min_part_size();
-        let single_part_limit = destination_copy.single_part_limit();
 
         // Only use the sums file if the size is not set.
         let sums = if self.part_size.is_none() {
@@ -232,7 +224,6 @@ impl CopyTaskBuilder {
                 &sums,
                 ObjectInfo {
                     size,
-                    single_part_limit,
                     max_parts,
                     max_part_size,
                     min_part_size,
@@ -297,7 +288,7 @@ impl CopyTaskBuilder {
         }
 
         // Otherwise use single part if possible.
-        if Self::is_single_part(size, single_part_limit) {
+        if Self::is_single_part(size, max_part_size) {
             return Ok(CopySettings::new(None, additional_ctx, size));
         }
 
@@ -315,9 +306,9 @@ impl CopyTaskBuilder {
         let source = Provider::try_from(self.source.as_str())?;
         let destination = Provider::try_from(self.destination.as_str())?;
 
-        let copy_mode = if (source.is_file() && destination.is_file())
-            || (source.is_s3() && destination.is_s3())
-        {
+        let is_same_provider =
+            (source.is_file() && destination.is_file()) || (source.is_s3() && destination.is_s3());
+        let copy_mode = if is_same_provider {
             if self.copy_mode.is_download_upload() {
                 CopyMode::DownloadUpload
             } else {
@@ -327,32 +318,42 @@ impl CopyTaskBuilder {
             CopyMode::DownloadUpload
         };
 
-        let source_copy = ObjectCopyBuilder::default()
-            .with_copy_metadata(self.metadata_mode)
-            .set_client(self.client.clone())
-            .build(self.source.clone())
-            .await?;
-        let destination_copy = ObjectCopyBuilder::default()
-            .with_copy_metadata(self.metadata_mode)
-            .set_client(self.client.clone())
-            .build(self.destination.clone())
-            .await?;
+        let (source_copy, destination_copy) = if is_same_provider {
+            let source = ObjectCopyBuilder::default()
+                .with_copy_metadata(self.metadata_mode)
+                .set_client(self.client.clone())
+                .set_source(Some(source))
+                .set_destination(Some(destination.clone()))
+                .build()
+                .await?;
+
+            (source.clone(), source)
+        } else {
+            (
+                ObjectCopyBuilder::default()
+                    .with_copy_metadata(self.metadata_mode)
+                    .set_client(self.client.clone())
+                    .set_source(Some(source))
+                    .build()
+                    .await?,
+                ObjectCopyBuilder::default()
+                    .with_copy_metadata(self.metadata_mode)
+                    .set_client(self.client.clone())
+                    .set_destination(Some(destination.clone()))
+                    .build()
+                    .await?,
+            )
+        };
+        let state = source_copy.initialize_state().await?;
 
         let concurrency = self
             .concurrency
             .ok_or_else(|| CopyError("concurrency not set".to_string()))?;
         let settings = self
-            .use_settings(
-                source.clone(),
-                destination.clone(),
-                &*source_copy.read().await,
-                &*destination_copy.read().await,
-            )
+            .use_settings(destination.clone(), destination_copy.as_ref(), &state)
             .await?;
 
         let copy_task = CopyTask {
-            source,
-            destination,
             additional_sums: settings.ctx,
             part_size: settings.part_size,
             source_copy,
@@ -360,6 +361,8 @@ impl CopyTaskBuilder {
             copy_mode,
             object_size: settings.object_size,
             concurrency,
+            state,
+            ordered_upload: destination.is_file(),
         };
 
         Ok(copy_task)
@@ -381,144 +384,165 @@ impl CopyInfo {
 
 /// Execute the copy task.
 pub struct CopyTask {
-    source: Provider,
-    destination: Provider,
     additional_sums: Ctx,
     part_size: Option<u64>,
-    source_copy: Arc<RwLock<dyn ObjectCopy + Send + Sync>>,
-    destination_copy: Arc<RwLock<dyn ObjectCopy + Send + Sync>>,
+    source_copy: Box<dyn ObjectCopy + Send + Sync>,
+    destination_copy: Box<dyn ObjectCopy + Send + Sync>,
     copy_mode: CopyMode,
     object_size: u64,
     concurrency: usize,
+    state: CopyState,
+    ordered_upload: bool,
 }
 
 impl CopyTask {
-    pub async fn run_multipart<F, Fut>(
+    async fn run_multipart<FnC, FutC, FnR, FutR, R>(
+        &self,
         part_size: u64,
-        object_size: u64,
-        concurrency: usize,
-        copy_fn: F,
+        download_fn: FnC,
+        upload_fn: FnR,
     ) -> Result<Option<u64>>
     where
-        F: FnOnce(MultiPartOptions) -> Fut + Clone + Send + 'static,
-        Fut: Future<Output = Result<Option<u64>>> + Send,
+        FnC: FnOnce(MultiPartOptions, CopyState) -> FutC + Clone + Send + 'static,
+        FutC: Future<Output = Result<R>> + Send,
+        FnR: FnOnce(R, MultiPartOptions, CopyState) -> FutR + Clone + Send + 'static,
+        FutR: Future<Output = Result<CopyResult>> + Send,
+        R: Send + 'static,
     {
-        let n_parts = object_size.div_ceil(part_size);
+        let n_parts = self.object_size.div_ceil(part_size);
 
-        let mut total = None;
         let mut start = 0;
         let mut end = part_size;
 
-        for chunk in (1..n_parts + 1).collect::<Vec<_>>().chunks(concurrency) {
-            let mut tasks = Vec::with_capacity(concurrency);
+        let mut parts = Vec::with_capacity(usize::try_from(n_parts)?);
+        let push_part = |parts: &mut Vec<_>, part| {
+            if let Some(part) = part {
+                parts.push(part);
+            }
+        };
+
+        let mut upload_id = None;
+        let resolve_result =
+            |upload_id: &mut Option<String>, parts: &mut Vec<_>, result: CopyResult| {
+                *upload_id = result.upload_id;
+                push_part(parts, result.part);
+            };
+
+        // First part must be run without concurrency to set the upload id for subsequent parts.
+        for chunk in [[1].as_slice()].into_iter().chain(
+            (2..n_parts + 1)
+                .collect::<Vec<_>>()
+                .chunks(self.concurrency),
+        ) {
+            let mut copy_tasks = Vec::with_capacity(self.concurrency);
+
             for part_number in chunk {
-                if end > object_size {
-                    end = object_size;
+                if end > self.object_size {
+                    end = self.object_size;
                 }
 
-                let part_number = *part_number;
-                let owned_fn = copy_fn.clone();
-                tasks.push(tokio::spawn(async move {
-                    owned_fn(MultiPartOptions {
-                        part_number: Some(part_number),
-                        start,
-                        end,
-                    })
-                    .await
+                let options = MultiPartOptions {
+                    part_number: Some(*part_number),
+                    start,
+                    end,
+                    upload_id: upload_id.clone(),
+                    parts: parts.clone(),
+                };
+
+                let state = self.state.clone();
+
+                let copy_fn = download_fn.clone();
+                copy_tasks.push(tokio::spawn(async move {
+                    (options.clone(), copy_fn(options, state).await)
                 }));
 
                 start += part_size;
                 end += part_size;
             }
 
-            for part_total in join_all(tasks).await {
-                let part_total = part_total??;
-                total =
-                    part_total.and_then(|total| part_total.map(|part_total| total + part_total));
+            if self.ordered_upload {
+                // If the uploads should be ordered, then wait for each task to finish before uploading.
+                for result in join_all(copy_tasks).await {
+                    let (options, result) = result?;
+                    resolve_result(
+                        &mut upload_id,
+                        &mut parts,
+                        upload_fn.clone()(result?, options, self.state.clone()).await?,
+                    );
+                }
+            } else {
+                // Otherwise, concurrently run the upload tasks.
+                for result in join_all(copy_tasks).await {
+                    let (options, result) = result?;
+                    let mut tasks = Vec::with_capacity(self.concurrency);
+
+                    let upload_fn = upload_fn.clone();
+                    let state = self.state.clone();
+                    tasks.push(tokio::spawn(async move {
+                        upload_fn(result?, options, state).await
+                    }));
+
+                    join_all(tasks).await.into_iter().try_for_each(|result| {
+                        let result = result??;
+                        resolve_result(&mut upload_id, &mut parts, result);
+                        Ok::<_, Error>(())
+                    })?;
+                }
             }
         }
 
         // Complete the upload
-        copy_fn(MultiPartOptions {
-            part_number: None,
-            start,
-            end,
-        })
+        download_fn(
+            MultiPartOptions {
+                part_number: None,
+                start,
+                end,
+                upload_id: upload_id.clone(),
+                parts: parts.clone(),
+            },
+            self.state.clone(),
+        )
         .await?;
 
-        Ok(total)
+        Ok(self.state.size())
     }
 
     /// Runs the copy task and return the output.
-    pub async fn run(self) -> Result<CopyInfo> {
+    pub async fn run(mut self) -> Result<CopyInfo> {
+        self.state.set_additional_ctx(self.additional_sums.clone());
+
         let total = match (self.copy_mode, self.part_size) {
             (CopyMode::ServerSide, None) => {
-                self.source_copy
-                    .write()
-                    .await
-                    .copy(
-                        self.source,
-                        self.destination,
-                        None,
-                        Some(self.additional_sums),
-                    )
-                    .await?
+                self.source_copy.copy(None, &self.state).await?;
+
+                self.state.size()
             }
             (CopyMode::ServerSide, Some(part_size)) => {
-                Self::run_multipart(
+                let source = self.source_copy.clone();
+                self.run_multipart(
                     part_size,
-                    self.object_size,
-                    self.concurrency,
-                    |option| async move {
-                        self.source_copy
-                            .write()
-                            .await
-                            .copy(
-                                self.source,
-                                self.destination,
-                                Some(option),
-                                Some(self.additional_sums),
-                            )
-                            .await
-                    },
+                    |option, state| async move { source.copy(Some(option), &state).await },
+                    |result, _, _| async move { Ok(result) },
                 )
                 .await?
             }
             (CopyMode::DownloadUpload, None) => {
-                let data = self
-                    .source_copy
-                    .write()
-                    .await
-                    .download(self.source, None)
-                    .await?;
+                let data = self.source_copy.download(None).await?;
                 self.destination_copy
-                    .write()
-                    .await
-                    .upload(self.destination, data, None, Some(self.additional_sums))
-                    .await?
+                    .upload(data, None, &self.state)
+                    .await?;
+
+                self.state.size()
             }
             (CopyMode::DownloadUpload, Some(part_size)) => {
-                Self::run_multipart(
+                let source = self.source_copy.clone();
+                let destination = self.destination_copy.clone();
+
+                self.run_multipart(
                     part_size,
-                    self.object_size,
-                    self.concurrency,
-                    |option| async move {
-                        let data = self
-                            .source_copy
-                            .write()
-                            .await
-                            .download(self.source, Some(option.clone()))
-                            .await?;
-                        self.destination_copy
-                            .write()
-                            .await
-                            .upload(
-                                self.destination,
-                                data,
-                                Some(option),
-                                Some(self.additional_sums),
-                            )
-                            .await
+                    |option, _| async move { source.download(Some(option.clone())).await },
+                    |data, options, state| async move {
+                        destination.upload(data, Some(options), &state).await
                     },
                 )
                 .await?
@@ -538,6 +562,7 @@ pub(crate) mod test {
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
     use anyhow::Result;
     use aws_sdk_s3::operation::get_object::GetObjectError;
+    use aws_sdk_s3::operation::get_object_tagging::GetObjectTaggingOutput;
     use aws_sdk_s3::operation::head_object::HeadObjectOutput;
     use aws_sdk_s3::types::error::NoSuchKey;
     use aws_sdk_s3::Client;
@@ -556,6 +581,7 @@ pub(crate) mod test {
         file.write_all("test".as_bytes()).await?;
 
         let copy = CopyTaskBuilder::default()
+            .with_concurrency(10)
             .with_source(source.to_string_lossy().to_string())
             .with_destination(destination.to_string_lossy().to_string())
             .build()
@@ -582,6 +608,7 @@ pub(crate) mod test {
         let multipart = mock_multi_part_etag_only_rule();
 
         let builder = CopyTaskBuilder::default()
+            .with_concurrency(10)
             .with_source("s3://bucket/key".to_string())
             .with_destination("s3://bucket/key2".to_string());
 
@@ -679,11 +706,19 @@ pub(crate) mod test {
                     .content_length(size as i64)
                     .build()
             });
+        let tagging = mock!(Client::get_object_tagging)
+            .match_requests(move |req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(move || {
+                GetObjectTaggingOutput::builder()
+                    .set_tag_set(Some(vec![]))
+                    .build()
+                    .unwrap()
+            });
 
         mock_client!(
             aws_sdk_s3,
             RuleMode::Sequential,
-            &[&[head_object], attributes, &[get_object]].concat()
+            &[&[head_object, tagging], attributes, &[get_object]].concat()
         )
     }
 

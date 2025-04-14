@@ -2,11 +2,9 @@
 //!
 
 use crate::checksum::file::SumsFile;
-use crate::checksum::Ctx;
 use crate::error::Error::CopyError;
 use crate::error::Result;
-use crate::io::copy::{CopyContent, MultiPartOptions, ObjectCopy};
-use crate::io::Provider;
+use crate::io::copy::{CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy};
 use std::io::SeekFrom;
 use tokio::fs::copy;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
@@ -14,36 +12,70 @@ use tokio::{fs, io};
 
 /// Build a file based sums object.
 #[derive(Debug, Default)]
-pub struct FileBuilder;
+pub struct FileBuilder {
+    source: Option<String>,
+    destination: Option<String>,
+}
 
 impl FileBuilder {
     /// Build using the file name.
     pub fn build(self) -> File {
-        File
+        self.get_components().into()
+    }
+
+    /// Set the source file.
+    pub fn with_source(mut self, source: &str) -> Self {
+        self.source = Some(SumsFile::format_target_file(source));
+        self
+    }
+
+    /// Set the destination file.
+    pub fn with_destination(mut self, destination: &str) -> Self {
+        self.destination = Some(SumsFile::format_target_file(destination));
+        self
+    }
+    fn get_components(self) -> (Option<String>, Option<String>) {
+        (self.source, self.destination)
+    }
+}
+
+impl From<(Option<String>, Option<String>)> for File {
+    fn from((source, destination): (Option<String>, Option<String>)) -> Self {
+        Self::new(source, destination)
     }
 }
 
 /// A file object.
 #[derive(Debug, Default, Clone)]
-pub struct File;
+pub struct File {
+    source: Option<String>,
+    destination: Option<String>,
+}
 
 impl File {
+    fn get_source(&self) -> Result<&str> {
+        self.source
+            .as_deref()
+            .ok_or_else(|| CopyError("missing source".to_string()))
+    }
+
+    fn get_destination(&self) -> Result<&str> {
+        self.destination
+            .as_deref()
+            .ok_or_else(|| CopyError("missing destination".to_string()))
+    }
+
     /// Copy the file to the destination.
-    pub async fn copy_source(&self, source: String, destination: String) -> Result<u64> {
-        Ok(copy(&source, destination).await?)
+    pub async fn copy_source(&self) -> Result<u64> {
+        Ok(copy(&self.get_source()?, self.get_destination()?).await?)
     }
 
     /// Read the source into memory.
-    pub async fn read(
-        &self,
-        source: String,
-        multi_part_options: Option<MultiPartOptions>,
-    ) -> Result<CopyContent> {
-        let mut file = fs::File::open(source).await?;
-        let size = file.metadata().await?.len();
+    pub async fn read(&self, multi_part_options: Option<MultiPartOptions>) -> Result<CopyContent> {
+        let mut file = fs::File::open(self.get_source()?).await?;
 
         // Read only the specified range if multipart is being used.
-        let (file, size): (Box<dyn AsyncRead + Send + Sync + Unpin>, _) =
+        let file: Box<dyn AsyncRead + Send + Sync + Unpin> =
             if let Some(multipart) = multi_part_options {
                 file.seek(SeekFrom::Start(multipart.start)).await?;
 
@@ -51,16 +83,17 @@ impl File {
                     .end
                     .checked_sub(multipart.start)
                     .ok_or_else(|| CopyError("Invalid multipart range".to_string()))?;
-                (Box::new(file.take(size)), size)
+                Box::new(file.take(size))
             } else {
-                (Box::new(file), size)
+                Box::new(file)
             };
 
-        Ok(CopyContent::new(file, Some(size), None, None))
+        Ok(CopyContent::new(file))
     }
 
     /// Write the data to the destination.
-    pub async fn write(&self, destination: String, mut data: CopyContent) -> Result<Option<u64>> {
+    pub async fn write(&self, mut data: CopyContent) -> Result<Option<u64>> {
+        let destination = self.get_destination()?;
         // Append to an existing file or create a new one.
         let mut file = if fs::try_exists(&destination)
             .await
@@ -86,61 +119,61 @@ impl File {
 
         Ok(size)
     }
+
+    /// Initialize the state for a bucket and key.
+    pub async fn initialize_state(source: &str) -> Result<CopyState> {
+        let file = fs::File::open(source).await?;
+        let size = file.metadata().await?.len();
+
+        Ok(CopyState::new(Some(size), None, None))
+    }
+
+    /// Create a new file object.
+    pub fn new(source: Option<String>, destination: Option<String>) -> Self {
+        Self {
+            source,
+            destination,
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl ObjectCopy for File {
     async fn copy(
-        &mut self,
-        provider_source: Provider,
-        provider_destination: Provider,
+        &self,
         multipart: Option<MultiPartOptions>,
-        _additional_ctx: Option<Ctx>,
-    ) -> Result<Option<u64>> {
-        let source = SumsFile::format_target_file(&provider_source.into_file()?);
-        let destination = SumsFile::format_target_file(&provider_destination.into_file()?);
-
+        _state: &CopyState,
+    ) -> Result<CopyResult> {
         // There's no point copying using multiple parts on the filesystem so wait until all parts
         // are "sent" and then copy the file using the filesystem.
         match multipart {
-            Some(multipart) if multipart.part_number.is_some() => return Ok(None),
+            Some(multipart) if multipart.part_number.is_some() => return Ok(Default::default()),
             _ => {}
         };
 
-        Ok(Some(self.copy_source(source, destination).await?))
+        self.copy_source().await?;
+
+        Ok(Default::default())
     }
 
-    async fn download(
-        &mut self,
-        source: Provider,
-        multipart: Option<MultiPartOptions>,
-    ) -> Result<CopyContent> {
-        let source = source.into_file()?;
-        let source = SumsFile::format_target_file(&source);
-
-        self.read(source, multipart).await
+    async fn download(&self, multipart: Option<MultiPartOptions>) -> Result<CopyContent> {
+        self.read(multipart).await
     }
 
     async fn upload(
-        &mut self,
-        destination: Provider,
+        &self,
         data: CopyContent,
         _multipart: Option<MultiPartOptions>,
-        _additional_ctx: Option<Ctx>,
-    ) -> Result<Option<u64>> {
-        let destination = destination.into_file()?;
-        let destination = SumsFile::format_target_file(&destination);
-
+        _state: &CopyState,
+    ) -> Result<CopyResult> {
         // It doesn't matter what the part number is for filesystem operations, just append to the
         // end of the file as we assume correct ordering of parts.
-        self.write(destination, data).await
+        self.write(data).await?;
+
+        Ok(Default::default())
     }
 
     fn max_part_size(&self) -> u64 {
-        u64::MAX
-    }
-
-    fn single_part_limit(&self) -> u64 {
         u64::MAX
     }
 
@@ -152,9 +185,9 @@ impl ObjectCopy for File {
         u64::MIN
     }
 
-    async fn size(&self, source: Provider) -> Result<Option<u64>> {
-        let file = source.into_file()?;
+    async fn initialize_state(&self) -> Result<CopyState> {
+        let source = self.get_source()?;
 
-        Ok(Some(self.file_size(file).await?))
+        Self::initialize_state(source).await
     }
 }
