@@ -55,7 +55,7 @@ pub trait ObjectSums: DynClone {
 /// Build object sums from object URLs.
 #[derive(Debug, Default)]
 pub struct ObjectSumsBuilder {
-    client: Option<Client>,
+    client: Option<Arc<Client>>,
 }
 
 impl ObjectSumsBuilder {
@@ -67,7 +67,7 @@ impl ObjectSumsBuilder {
             Provider::S3 { bucket, key } => {
                 let client = match self.client {
                     Some(client) => client,
-                    None => default_s3_client().await?,
+                    None => Arc::new(default_s3_client().await?),
                 };
                 Ok(Box::new(
                     S3Builder::default()
@@ -81,7 +81,7 @@ impl ObjectSumsBuilder {
     }
 
     /// Set the S3 client if this is an s3 provider.
-    pub fn set_client(mut self, client: Option<Client>) -> Self {
+    pub fn set_client(mut self, client: Option<Arc<Client>>) -> Self {
         self.client = client;
         self
     }

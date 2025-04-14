@@ -15,6 +15,7 @@ use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
 use std::future::Future;
+use std::sync::Arc;
 
 pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 20 * 1024 * 1024; // 20mib
 
@@ -27,7 +28,7 @@ pub struct CopyTaskBuilder {
     part_size: Option<u64>,
     metadata_mode: MetadataCopy,
     copy_mode: CopyMode,
-    client: Option<Client>,
+    client: Option<Arc<Client>>,
     concurrency: Option<usize>,
 }
 
@@ -101,7 +102,7 @@ impl CopyTaskBuilder {
     }
 
     /// Set the S3 client to use for S3 copies.
-    pub fn with_client(mut self, client: Client) -> Self {
+    pub fn with_client(mut self, client: Arc<Client>) -> Self {
         self.client = Some(client);
         self
     }
@@ -615,21 +616,21 @@ pub(crate) mod test {
         let lt_threshold = builder
             .clone()
             .with_multipart_threshold(Some(TEST_FILE_SIZE + 1))
-            .with_client(mock_size(TEST_FILE_SIZE, single_part.as_slice()));
+            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
         assert_eq!(lt_threshold.build().await?.part_size, None);
 
         // S3 to S3 will always prefer the original upload settings so even if the size is greater than the
         // threshold, it should still be single part.
         let gt_threshold = builder
             .clone()
-            .with_client(mock_size(TEST_FILE_SIZE, single_part.as_slice()));
+            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
         assert_eq!(gt_threshold.build().await?.part_size, None);
 
         // If it was originally multipart, it should prefer that even if below the threshold.
         let multipart_lt_threshold = builder
             .clone()
             .with_multipart_threshold(Some(TEST_FILE_SIZE + 1))
-            .with_client(mock_size(TEST_FILE_SIZE, multipart.as_slice()));
+            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, multipart.as_slice())));
         assert_eq!(
             multipart_lt_threshold.build().await?.part_size,
             Some(214748365)
@@ -637,7 +638,7 @@ pub(crate) mod test {
 
         let multipart_gt_threshold = builder
             .clone()
-            .with_client(mock_size(TEST_FILE_SIZE, multipart.as_slice()));
+            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, multipart.as_slice())));
         assert_eq!(
             multipart_gt_threshold.build().await?.part_size,
             Some(214748365)
@@ -647,12 +648,12 @@ pub(crate) mod test {
         let part_size_set = builder
             .clone()
             .with_part_size(Some(5242880))
-            .with_client(mock_size(TEST_FILE_SIZE, single_part.as_slice()));
+            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
         assert_eq!(part_size_set.build().await?.part_size, Some(5242880));
         let part_size_set_multipart = builder
             .clone()
             .with_part_size(Some(5242880))
-            .with_client(mock_size(TEST_FILE_SIZE, multipart.as_slice()));
+            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, multipart.as_slice())));
         assert_eq!(
             part_size_set_multipart.build().await?.part_size,
             Some(5242880)
@@ -681,13 +682,13 @@ pub(crate) mod test {
         let part_size_err_max = builder
             .clone()
             .with_part_size(Some(60000000000))
-            .with_client(mock_size(TEST_FILE_SIZE, single_part.as_slice()));
+            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
         assert!(part_size_err_max.build().await.is_err());
         // If the part size exceeds the limits, this should be an error.
         let part_size_err_min = builder
             .clone()
             .with_part_size(Some(1))
-            .with_client(mock_size(TEST_FILE_SIZE, single_part.as_slice()));
+            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
         assert!(part_size_err_min.build().await.is_err());
 
         Ok(())

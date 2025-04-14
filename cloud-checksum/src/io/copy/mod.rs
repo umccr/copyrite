@@ -11,6 +11,7 @@ use crate::MetadataCopy;
 use aws_sdk_s3::Client;
 use dyn_clone::DynClone;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::io::{empty, AsyncRead};
 
 pub mod aws;
@@ -176,7 +177,7 @@ dyn_clone::clone_trait_object!(ObjectCopy);
 #[derive(Debug, Default)]
 pub struct ObjectCopyBuilder {
     metadata_mode: MetadataCopy,
-    client: Option<Client>,
+    client: Option<Arc<Client>>,
     source: Option<Provider>,
     destination: Option<Provider>,
 }
@@ -193,7 +194,7 @@ impl ObjectCopyBuilder {
         if is_s3 {
             let client = match self.client {
                 Some(client) => client,
-                None => default_s3_client().await?,
+                None => Arc::new(default_s3_client().await?),
             };
             let source = self.source.map(|source| source.into_s3()).transpose()?;
             let destination = self
@@ -251,7 +252,7 @@ impl ObjectCopyBuilder {
     }
 
     /// Set the S3 client if this is an s3 provider.
-    pub fn set_client(mut self, client: Option<Client>) -> Self {
+    pub fn set_client(mut self, client: Option<Arc<Client>>) -> Self {
         self.client = client;
         self
     }

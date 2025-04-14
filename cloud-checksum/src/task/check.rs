@@ -4,6 +4,7 @@
 use crate::checksum::file::SumsFile;
 use crate::error::{Error, Result};
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder};
+use aws_sdk_s3::Client;
 use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
 /// Build a check task.
 #[derive(Debug, Default)]
@@ -20,6 +22,7 @@ pub struct CheckTaskBuilder {
     files: Vec<String>,
     group_by: GroupBy,
     update: bool,
+    client: Option<Arc<Client>>,
 }
 
 impl CheckTaskBuilder {
@@ -47,19 +50,32 @@ impl CheckTaskBuilder {
         self
     }
 
+    /// Set the S3 client to use.
+    pub fn with_client(mut self, client: Arc<Client>) -> Self {
+        self.client = Some(client);
+        self
+    }
+
     /// Build a check task.
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
-        let objects = join_all(self.files.into_iter().map(|file| async move {
-            let mut sums = ObjectSumsBuilder::default().build(file.to_string()).await?;
+        let objects = join_all(self.files.into_iter().map(|file| {
+            let client = self.client.clone();
 
-            let file_size = sums.file_size().await?;
-            let existing = sums
-                .sums_file()
-                .await?
-                .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
+            async move {
+                let mut sums = ObjectSumsBuilder::default()
+                    .set_client(client)
+                    .build(file.to_string())
+                    .await?;
 
-            Ok((existing, BTreeSet::from_iter(vec![State(sums)])))
+                let file_size = sums.file_size().await?;
+                let existing = sums
+                    .sums_file()
+                    .await?
+                    .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
+
+                Ok((existing, BTreeSet::from_iter(vec![State(sums)])))
+            }
         }))
         .await
         .into_iter()

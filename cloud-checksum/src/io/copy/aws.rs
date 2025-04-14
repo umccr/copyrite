@@ -19,12 +19,13 @@ use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_types::byte_stream::ByteStream;
 use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
 pub struct S3Builder {
-    client: Option<Client>,
+    client: Option<Arc<Client>>,
     metadata_mode: MetadataCopy,
     source: Option<BucketKey>,
     destination: Option<BucketKey>,
@@ -32,7 +33,7 @@ pub struct S3Builder {
 
 impl S3Builder {
     /// Set the client.
-    pub fn with_client(mut self, client: Client) -> Self {
+    pub fn with_client(mut self, client: Arc<Client>) -> Self {
         self.client = Some(client);
         self
     }
@@ -55,9 +56,14 @@ impl S3Builder {
         self
     }
 
-    fn get_components(
-        self,
-    ) -> Result<(Client, MetadataCopy, Option<BucketKey>, Option<BucketKey>)> {
+    /// Set the copy metadata option.
+    pub fn with_copy_metadata(mut self, metadata_mode: MetadataCopy) -> Self {
+        self.metadata_mode = metadata_mode;
+        self
+    }
+
+    /// Build using the client, bucket and key.
+    pub fn build(self) -> Result<S3> {
         let error_fn = || {
             ParseError(
                 "client, bucket, key and destinations are required in `S3Builder`".to_string(),
@@ -69,25 +75,22 @@ impl S3Builder {
             self.metadata_mode,
             self.source,
             self.destination,
-        ))
-    }
-
-    /// Set the copy metadata option.
-    pub fn with_copy_metadata(mut self, metadata_mode: MetadataCopy) -> Self {
-        self.metadata_mode = metadata_mode;
-        self
-    }
-
-    /// Build using the client, bucket and key.
-    pub fn build(self) -> Result<S3> {
-        Ok(self.get_components()?.into())
+        )
+            .into())
     }
 }
 
-impl From<(Client, MetadataCopy, Option<BucketKey>, Option<BucketKey>)> for S3 {
+impl
+    From<(
+        Arc<Client>,
+        MetadataCopy,
+        Option<BucketKey>,
+        Option<BucketKey>,
+    )> for S3
+{
     fn from(
         (client, metadata_mode, source, destination): (
-            Client,
+            Arc<Client>,
             MetadataCopy,
             Option<BucketKey>,
             Option<BucketKey>,
@@ -159,7 +162,7 @@ pub struct BucketKey {
 /// An S3 object and AWS-related existing sums.
 #[derive(Debug, Clone)]
 pub struct S3 {
-    client: Client,
+    client: Arc<Client>,
     metadata_mode: MetadataCopy,
     source: Option<BucketKey>,
     destination: Option<BucketKey>,
@@ -208,7 +211,7 @@ impl S3 {
 
     /// Create a new S3 object.
     pub fn new(
-        client: Client,
+        client: Arc<Client>,
         metadata_mode: MetadataCopy,
         source: Option<BucketKey>,
         destination: Option<BucketKey>,
