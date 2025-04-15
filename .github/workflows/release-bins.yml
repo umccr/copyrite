@@ -35,5 +35,5 @@ jobs:
         with:
           bin: cloud-checksum
           tar: none
-          target: cloud-checksum-${{ matrix.target }}
+          target: ${{ matrix.target }}
           token: ${{ secrets.GITHUB_TOKEN }}
