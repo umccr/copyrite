@@ -34,6 +34,6 @@ jobs:
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: cloud-checksum
-          tar: none
+#          tar: none
           target: ${{ matrix.target }}
           token: ${{ secrets.GITHUB_TOKEN }}
