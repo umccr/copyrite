@@ -6,8 +6,8 @@ use crate::error::Error::{AwsError, CopyError, ParseError};
 use crate::error::{Error, Result};
 use crate::io::copy::{CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part};
 use crate::MetadataCopy;
-use aws_sdk_s3::operation::get_object_tagging::GetObjectTaggingOutput;
-use aws_sdk_s3::operation::head_object::HeadObjectOutput;
+use aws_sdk_s3::operation::get_object_tagging::{GetObjectTaggingError, GetObjectTaggingOutput};
+use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
 use aws_sdk_s3::operation::upload_part::UploadPartOutput;
 use aws_sdk_s3::types::{
     ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart, CopyPartResult, MetadataDirective,
@@ -19,6 +19,7 @@ use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_types::byte_stream::ByteStream;
 use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use std::collections::HashMap;
+use std::result;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
@@ -27,6 +28,7 @@ use tokio::io::AsyncReadExt;
 pub struct S3Builder {
     client: Option<Arc<Client>>,
     metadata_mode: MetadataCopy,
+    tag_mode: MetadataCopy,
     source: Option<BucketKey>,
     destination: Option<BucketKey>,
 }
@@ -62,6 +64,12 @@ impl S3Builder {
         self
     }
 
+    /// Set the copy metadata option.
+    pub fn with_copy_tags(mut self, tag_mode: MetadataCopy) -> Self {
+        self.tag_mode = tag_mode;
+        self
+    }
+
     /// Build using the client, bucket and key.
     pub fn build(self) -> Result<S3> {
         let error_fn = || {
@@ -73,6 +81,7 @@ impl S3Builder {
         Ok((
             self.client.ok_or_else(error_fn)?,
             self.metadata_mode,
+            self.tag_mode,
             self.source,
             self.destination,
         )
@@ -84,19 +93,21 @@ impl
     From<(
         Arc<Client>,
         MetadataCopy,
+        MetadataCopy,
         Option<BucketKey>,
         Option<BucketKey>,
     )> for S3
 {
     fn from(
-        (client, metadata_mode, source, destination): (
+        (client, metadata_mode, tag_mode, source, destination): (
             Arc<Client>,
+            MetadataCopy,
             MetadataCopy,
             Option<BucketKey>,
             Option<BucketKey>,
         ),
     ) -> Self {
-        Self::new(client, metadata_mode, source, destination)
+        Self::new(client, metadata_mode, tag_mode, source, destination)
     }
 }
 
@@ -164,6 +175,7 @@ pub struct BucketKey {
 pub struct S3 {
     client: Arc<Client>,
     metadata_mode: MetadataCopy,
+    tag_mode: MetadataCopy,
     source: Option<BucketKey>,
     destination: Option<BucketKey>,
 }
@@ -172,53 +184,69 @@ impl S3 {
     /// Initialize the state for a bucket and key.
     pub async fn initialize_state(&self, key: String, bucket: String) -> Result<CopyState> {
         let head = self.head_object(&key, &bucket).await?;
-        let tags = self.tagging(&key, &bucket).await?;
+        let tags = self.tagging(&key, &bucket).await;
+
+        // Getting tags could fail, that's okay if using best-effort mode.
+        let tags =
+            if self.tag_mode.is_best_effort() && tags.as_ref().is_err_and(Self::is_access_denied) {
+                None
+            } else {
+                Some(
+                    tags?
+                        .tag_set
+                        .iter()
+                        .map(|tag| format!("{}={}", tag.key(), tag.value()))
+                        .collect::<Vec<_>>()
+                        .join("&"),
+                )
+            };
 
         let size = head.content_length.map(u64::try_from).transpose()?;
-        let tags = Some(
-            tags.tag_set
-                .iter()
-                .map(|tag| format!("{}={}", tag.key(), tag.value()))
-                .collect::<Vec<_>>()
-                .join("&"),
-        );
         let metadata = head.metadata;
 
         Ok(CopyState::new(size, tags, metadata))
     }
 
     /// Get the head object output.
-    pub async fn head_object(&self, key: &str, bucket: &str) -> Result<HeadObjectOutput> {
-        Ok(self
-            .client
+    pub async fn head_object(
+        &self,
+        key: &str,
+        bucket: &str,
+    ) -> result::Result<HeadObjectOutput, SdkError<HeadObjectError, HttpResponse>> {
+        self.client
             .head_object()
             .bucket(bucket)
             .key(key)
             .send()
-            .await?)
+            .await
     }
 
     /// Get the object tagging.
-    pub async fn tagging(&self, key: &str, bucket: &str) -> Result<GetObjectTaggingOutput> {
-        Ok(self
-            .client
+    pub async fn tagging(
+        &self,
+        key: &str,
+        bucket: &str,
+    ) -> result::Result<GetObjectTaggingOutput, SdkError<GetObjectTaggingError, HttpResponse>> {
+        self.client
             .get_object_tagging()
             .bucket(bucket)
             .key(key)
             .send()
-            .await?)
+            .await
     }
 
     /// Create a new S3 object.
     pub fn new(
         client: Arc<Client>,
         metadata_mode: MetadataCopy,
+        tag_mode: MetadataCopy,
         source: Option<BucketKey>,
         destination: Option<BucketKey>,
     ) -> S3 {
         Self {
             client,
             metadata_mode,
+            tag_mode,
             source,
             destination,
         }
@@ -227,10 +255,7 @@ impl S3 {
     /// Check if the error is an access denied error.
     fn is_access_denied<T: ProvideErrorMetadata>(err: &SdkError<T, HttpResponse>) -> bool {
         if let Some(err) = err.as_service_error() {
-            if err
-                .code()
-                .is_some_and(|code| code == "AccessDenied" || code == "InvalidSecurity")
-            {
+            if err.code().is_some_and(|code| code == "AccessDenied") {
                 return true;
             }
         }
@@ -247,16 +272,32 @@ impl S3 {
         metadata: Option<HashMap<String, String>>,
         additional_checksum: Option<ChecksumAlgorithm>,
     ) -> Result<String> {
-        let upload = self
-            .client
-            .create_multipart_upload()
-            .set_tagging(tagging)
-            .set_metadata(metadata)
-            .set_checksum_algorithm(additional_checksum)
-            .bucket(bucket)
-            .key(key)
-            .send()
-            .await?;
+        let do_upload = |tagging, metadata, additional_checksum| async {
+            self.client
+                .create_multipart_upload()
+                .set_tagging(tagging)
+                .set_metadata(metadata)
+                .set_checksum_algorithm(additional_checksum)
+                .bucket(bucket)
+                .key(key)
+                .send()
+                .await
+        };
+
+        let result = do_upload(
+            tagging.clone(),
+            metadata.clone(),
+            additional_checksum.clone(),
+        )
+        .await;
+        // Retry if this is a best effort copy and the error was access denied.
+        let upload = if self.tag_mode.is_best_effort()
+            && result.as_ref().is_err_and(Self::is_access_denied)
+        {
+            do_upload(None, metadata, additional_checksum).await?
+        } else {
+            result?
+        };
 
         upload
             .upload_id
@@ -286,24 +327,41 @@ impl S3 {
         let destination = self.get_destination()?;
 
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
+        let do_copy = |tagging, tagging_set, metadata, metadata_set, additional_checksum| async {
+            self.client
+                .copy_object()
+                .tagging_directive(tagging)
+                .set_tagging(tagging_set)
+                .metadata_directive(metadata)
+                .set_metadata(metadata_set)
+                .set_checksum_algorithm(additional_checksum)
+                .copy_source(Self::copy_source(&source.key, &source.bucket))
+                .key(&destination.key)
+                .bucket(&destination.bucket)
+                .send()
+                .await
+        };
 
-        let result = self
-            .client
-            .copy_object()
-            .tagging_directive(tagging)
-            .set_tagging(tagging_set)
-            .metadata_directive(metadata)
-            .set_metadata(metadata_set)
-            .set_checksum_algorithm(additional_checksum)
-            .copy_source(Self::copy_source(&source.key, &source.bucket))
-            .key(&destination.key)
-            .bucket(&destination.bucket)
-            .send()
-            .await;
-
-        if self.metadata_mode.is_best_effort() && result.as_ref().is_err_and(Self::is_access_denied)
-        {
-            return Ok(None);
+        let result = do_copy(
+            tagging,
+            tagging_set,
+            metadata.clone(),
+            metadata_set.clone(),
+            additional_checksum.clone(),
+        )
+        .await;
+        // Retry if this is a best effort copy and the error was access denied.
+        if self.tag_mode.is_best_effort() && result.as_ref().is_err_and(Self::is_access_denied) {
+            do_copy(
+                TaggingDirective::Replace,
+                Some("".to_string()),
+                metadata,
+                metadata_set.clone(),
+                additional_checksum,
+            )
+            .await?;
+        } else {
+            result?;
         }
 
         Ok(size)
@@ -432,21 +490,31 @@ impl S3 {
         let buf = Self::read_content(&mut content).await?;
 
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
-        let output = self
-            .client
-            .put_object()
-            .set_tagging(state.tags())
-            .set_metadata(state.metadata())
-            .set_checksum_algorithm(additional_checksum)
-            .bucket(&destination.bucket)
-            .key(&destination.key)
-            .body(ByteStream::from(buf))
-            .send()
-            .await;
+        let do_put = |tags, metadata, additional_checksum, buf| async {
+            self.client
+                .put_object()
+                .set_tagging(tags)
+                .set_metadata(metadata)
+                .set_checksum_algorithm(additional_checksum)
+                .bucket(&destination.bucket)
+                .key(&destination.key)
+                .body(ByteStream::from(buf))
+                .send()
+                .await
+        };
 
-        if self.metadata_mode.is_best_effort() && output.as_ref().is_err_and(Self::is_access_denied)
-        {
-            return Ok(None);
+        let result = do_put(
+            state.tags(),
+            state.metadata(),
+            additional_checksum.clone(),
+            buf.clone(),
+        )
+        .await;
+        // Retry if this is a best effort copy and the error was access denied.
+        if self.tag_mode.is_best_effort() && result.as_ref().is_err_and(Self::is_access_denied) {
+            do_put(None, state.metadata(), additional_checksum, buf).await?;
+        } else {
+            result?;
         }
 
         Ok(state.size())

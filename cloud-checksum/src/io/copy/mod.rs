@@ -177,6 +177,7 @@ dyn_clone::clone_trait_object!(ObjectCopy);
 #[derive(Debug, Default)]
 pub struct ObjectCopyBuilder {
     metadata_mode: MetadataCopy,
+    tag_mode: MetadataCopy,
     client: Option<Arc<Client>>,
     source: Option<Provider>,
     destination: Option<Provider>,
@@ -204,6 +205,7 @@ impl ObjectCopyBuilder {
 
             let mut builder = S3Builder::default()
                 .with_copy_metadata(self.metadata_mode)
+                .with_copy_tags(self.tag_mode)
                 .with_client(client);
 
             if let Some((bucket, key)) = source {
@@ -254,6 +256,12 @@ impl ObjectCopyBuilder {
     /// Set the S3 client if this is an s3 provider.
     pub fn set_client(mut self, client: Option<Arc<Client>>) -> Self {
         self.client = client;
+        self
+    }
+
+    /// Set the copy metadata option.
+    pub fn with_copy_tags(mut self, tag_mode: MetadataCopy) -> Self {
+        self.tag_mode = tag_mode;
         self
     }
 }

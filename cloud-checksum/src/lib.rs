@@ -198,8 +198,12 @@ pub struct Copy {
     /// be a directory.
     #[arg(required = true)]
     pub destination: String,
-    /// Controls how tags and metadata are copied. By default, this will copy all tags and metadata
-    /// and fail if the tags could not be copied.
+    /// Controls how tags are copied. By default, this will copy all tags and fail if the tags
+    /// could not be copied.
+    #[arg(long, env, default_value = "copy")]
+    pub tag_mode: MetadataCopy,
+    /// Controls how metadata is copied. By default, this will copy all metadata and fail if the
+    /// METADATA could not be copied.
     #[arg(long, env, default_value = "copy")]
     pub metadata_mode: MetadataCopy,
     #[arg(long, env, default_value = "server-side")]
