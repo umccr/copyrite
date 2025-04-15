@@ -1,0 +1,268 @@
+//! AWS checksums and functionality.
+//!
+
+use crate::checksum::file::SumsFile;
+use crate::error::Error::ParseError;
+use crate::error::Result;
+use crate::io::copy::{CopyContent, ObjectCopy};
+use crate::io::Provider;
+use crate::MetadataCopy;
+use aws_sdk_s3::types::{MetadataDirective, TaggingDirective};
+use aws_sdk_s3::Client;
+use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
+use aws_smithy_runtime_api::client::result::SdkError;
+use aws_smithy_types::byte_stream::ByteStream;
+use aws_smithy_types::error::metadata::ProvideErrorMetadata;
+use std::collections::HashMap;
+use tokio::io::AsyncReadExt;
+
+/// Build an S3 sums object.
+#[derive(Debug, Default)]
+pub struct S3Builder {
+    client: Option<Client>,
+    metadata_mode: MetadataCopy,
+    tag_mode: MetadataCopy,
+}
+
+impl S3Builder {
+    /// Set the client.
+    pub fn with_client(mut self, client: Client) -> Self {
+        self.client = Some(client);
+        self
+    }
+
+    fn get_components(self) -> Result<(Client, MetadataCopy, MetadataCopy)> {
+        let error_fn = || {
+            ParseError(
+                "client, bucket, key and destinations are required in `S3Builder`".to_string(),
+            )
+        };
+
+        Ok((
+            self.client.ok_or_else(error_fn)?,
+            self.metadata_mode,
+            self.tag_mode,
+        ))
+    }
+
+    /// Set the copy metadata option.
+    pub fn with_copy_metadata(mut self, metadata_mode: MetadataCopy) -> Self {
+        self.metadata_mode = metadata_mode;
+        self
+    }
+
+    /// Set the copy metadata option.
+    pub fn with_copy_tags(mut self, tag_mode: MetadataCopy) -> Self {
+        self.tag_mode = tag_mode;
+        self
+    }
+
+    /// Build using the client, bucket and key.
+    pub fn build(self) -> Result<S3> {
+        Ok(self.get_components()?.into())
+    }
+}
+
+impl From<(Client, MetadataCopy, MetadataCopy)> for S3 {
+    fn from((client, metadata_mode, tag_mode): (Client, MetadataCopy, MetadataCopy)) -> Self {
+        Self::new(client, metadata_mode, tag_mode)
+    }
+}
+
+/// An S3 object and AWS-related existing sums.
+#[derive(Debug, Clone)]
+pub struct S3 {
+    client: Client,
+    metadata_mode: MetadataCopy,
+    tag_mode: MetadataCopy,
+}
+
+impl S3 {
+    /// Create a new S3 object.
+    pub fn new(client: Client, metadata_mode: MetadataCopy, tag_mode: MetadataCopy) -> S3 {
+        Self {
+            client,
+            metadata_mode,
+            tag_mode,
+        }
+    }
+
+    fn is_access_denied<T: ProvideErrorMetadata>(err: &SdkError<T, HttpResponse>) -> bool {
+        if let Some(err) = err.as_service_error() {
+            if err.code().is_some_and(|code| code == "AccessDenied") {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Copy the object using the `CopyObject` operation.
+    pub async fn copy_object_single(
+        &self,
+        key: String,
+        bucket: String,
+        destination_key: String,
+        destination_bucket: String,
+    ) -> Result<Option<u64>> {
+        let key = SumsFile::format_target_file(&key);
+        let size = self
+            .client
+            .head_object()
+            .bucket(bucket.to_string())
+            .key(key.to_string())
+            .send()
+            .await?
+            .content_length;
+
+        let (tagging, tagging_set) = if self.tag_mode.is_copy() {
+            (TaggingDirective::Copy, None)
+        } else {
+            (TaggingDirective::Replace, Some("".to_string()))
+        };
+
+        let (metadata, metadata_set) = if self.metadata_mode.is_copy() {
+            (MetadataDirective::Copy, None)
+        } else {
+            (MetadataDirective::Replace, Some(HashMap::new()))
+        };
+
+        let do_copy = |tagging, tagging_set, metadata, metadata_set| async {
+            self.client
+                .copy_object()
+                .tagging_directive(tagging)
+                .set_tagging(tagging_set)
+                .metadata_directive(metadata)
+                .set_metadata(metadata_set)
+                .copy_source(format!("{}/{}", bucket, key))
+                .key(SumsFile::format_target_file(&destination_key))
+                .bucket(destination_bucket.to_string())
+                .send()
+                .await
+        };
+
+        let result = do_copy(tagging, tagging_set, metadata.clone(), metadata_set.clone()).await;
+        // Retry if this is a best effort copy and the error was access denied.
+        if self.tag_mode.is_best_effort() && result.as_ref().is_err_and(Self::is_access_denied) {
+            do_copy(
+                TaggingDirective::Replace,
+                Some("".to_string()),
+                metadata,
+                metadata_set.clone(),
+            )
+            .await?;
+        } else {
+            result?;
+        }
+
+        Ok(size.map(u64::try_from).transpose()?)
+    }
+
+    /// Get the object from S3.
+    pub async fn get_object(&self, key: String, bucket: String) -> Result<CopyContent> {
+        let result = self
+            .client
+            .get_object()
+            .bucket(&bucket)
+            .key(&key)
+            .send()
+            .await?;
+
+        let size = result.content_length.map(u64::try_from).transpose()?;
+
+        let tags = if self.tag_mode.is_copy() {
+            let tags = self
+                .client
+                .get_object_tagging()
+                .bucket(bucket)
+                .key(key)
+                .send()
+                .await?;
+            let tags = tags
+                .tag_set
+                .into_iter()
+                .map(|tag| format!("{}={}", tag.key(), tag.value()))
+                .collect::<Vec<_>>()
+                .join("&");
+            Some(tags)
+        } else {
+            None
+        };
+
+        let metadata = if self.metadata_mode.is_copy() {
+            result.metadata
+        } else {
+            None
+        };
+
+        Ok(CopyContent::new(
+            Box::new(result.body.into_async_read()),
+            size,
+            tags,
+            metadata,
+        ))
+    }
+
+    /// Put the object to S3.
+    pub async fn put_object(
+        &self,
+        key: String,
+        bucket: String,
+        mut content: CopyContent,
+    ) -> Result<Option<u64>> {
+        let mut buf = if let Some(capacity) = content.size {
+            Vec::with_capacity(usize::try_from(capacity)?)
+        } else {
+            Vec::new()
+        };
+
+        content.data.read_to_end(&mut buf).await?;
+
+        let do_put = |tags, metadata, buf| async {
+            self.client
+                .put_object()
+                .set_tagging(tags)
+                .set_metadata(metadata)
+                .bucket(&bucket)
+                .key(&key)
+                .body(ByteStream::from(buf))
+                .send()
+                .await
+        };
+
+        let result = do_put(content.tags, content.metadata.clone(), buf.clone()).await;
+        // Retry if this is a best effort copy and the error was access denied.
+        if self.tag_mode.is_best_effort() && result.as_ref().is_err_and(Self::is_access_denied) {
+            do_put(None, content.metadata, buf).await?;
+        } else {
+            result?;
+        }
+
+        Ok(content.size)
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectCopy for S3 {
+    async fn copy_object(
+        &self,
+        provider_source: Provider,
+        provider_destination: Provider,
+    ) -> Result<Option<u64>> {
+        let (bucket, key) = provider_source.into_s3()?;
+        let (destination_bucket, destination_key) = provider_destination.into_s3()?;
+
+        self.copy_object_single(key, bucket, destination_key, destination_bucket)
+            .await
+    }
+
+    async fn download(&self, source: Provider) -> Result<CopyContent> {
+        let (bucket, key) = source.into_s3()?;
+        Ok(self.get_object(key, bucket).await?)
+    }
+
+    async fn upload(&self, destination: Provider, data: CopyContent) -> Result<Option<u64>> {
+        let (bucket, key) = destination.into_s3()?;
+        self.put_object(key, bucket, data).await
+    }
+}

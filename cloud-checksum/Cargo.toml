@@ -9,7 +9,7 @@ authors.workspace = true
 [dependencies]
 clap = { version = "4", features = ["derive", "env", "cargo"] }
 thiserror = "2"
-rand = "0.8"
+rand = "0.9"
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "test-util", "io-util", "io-std", "fs"] }

@@ -36,6 +36,20 @@ cargo run -p cloud-checksum -- generate --checksum md5-aws-8,md5-aws-8mib s3://b
 cargo run -p cloud-checksum -- check s3://bucket/key1 s3://bucket/key2
 ```
 
+Copy files, this supports S3 and local files for source and destination:
+
+```sh
+# Server-side copy in S3.
+cargo run -p cloud-checksum -- copy s3://bucket/key1 s3://bucket/key2
+# Local to local
+cargo run -p cloud-checksum -- copy local_file1 local_file2
+
+# S3 to local
+cargo run -p cloud-checksum -- copy s3://bucket/key1 local_file
+# Local to S3
+cargo run -p cloud-checksum -- copy local_file s3://bucket/key1
+```
+
 ## Design
 
 This tool aims to be as efficient and performant as possible when calculating checksums. This means that it only

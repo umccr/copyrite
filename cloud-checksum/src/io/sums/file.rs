@@ -4,7 +4,7 @@
 use crate::checksum::file::SumsFile;
 use crate::error::Error::ParseError;
 use crate::error::Result;
-use crate::reader::ObjectSums;
+use crate::io::sums::ObjectSums;
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -22,19 +22,20 @@ impl FileBuilder {
         self
     }
 
-    /// Build using the file name.
-    pub fn build(self) -> Result<File> {
-        let file = Self::parse_url(
-            &self
-                .file
-                .ok_or_else(|| ParseError("file is required for `FileBuilder`".to_string()))?,
-        );
-        Ok(File::new(file))
+    fn get_components(self) -> Result<String> {
+        self.file
+            .ok_or_else(|| ParseError("file is required for `FileBuilder`".to_string()))
     }
 
-    /// Parse from a string a file name which can optionally be prefixed with `file://`
-    pub fn parse_url(s: &str) -> String {
-        s.strip_prefix("file://").unwrap_or(s).to_string()
+    /// Build using the file name.
+    pub fn build(self) -> Result<File> {
+        Ok(self.get_components()?.into())
+    }
+}
+
+impl From<String> for File {
+    fn from(file: String) -> Self {
+        Self::new(file)
     }
 }
 

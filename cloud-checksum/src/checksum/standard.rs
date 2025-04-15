@@ -14,20 +14,22 @@ use std::mem::discriminant;
 use std::str::FromStr;
 use std::sync::Arc;
 
-/// The checksum calculator.
+/// The checksum calculator. This also defines the ordering of which checksums are preferred
+/// for generating/copying data.
 #[derive(Debug, Clone)]
 pub enum StandardCtx {
     // Note, options remove a clone later on, but it might be
-    // better Box the state for clarity.
+    // better to Box the state for clarity.
+    /// Calculate a CRC32.
+    CRC32(Option<crc32fast::Hasher>, Endianness),
+    /// Calculate a CRC32C.
+    CRC32C(u32, Endianness),
     /// Calculate the MD5 checksum.
     MD5(Option<md5::Md5>),
     /// Calculate the SHA1 checksum.
     SHA1(Option<sha1::Sha1>),
     /// Calculate the SHA256 checksum.
     SHA256(Option<sha2::Sha256>),
-    /// Calculate a CRC32.
-    CRC32(Option<crc32fast::Hasher>, Endianness),
-    CRC32C(u32, Endianness),
     /// Calculate the QuickXor checksum.
     QuickXor,
 }

@@ -5,8 +5,8 @@ use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
 use crate::error::Error::GenerateError;
 use crate::error::{Error, Result};
-use crate::reader::channel::ChannelReader;
-use crate::reader::{ObjectSums, ObjectSumsBuilder, SharedReader};
+use crate::io::sums::channel::ChannelReader;
+use crate::io::sums::{ObjectSums, ObjectSumsBuilder, SharedReader};
 use crate::task::check::CheckObjects;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use futures_util::future::join_all;
@@ -77,12 +77,12 @@ impl GenerateTaskBuilder {
 
     /// Build a generate task.
     pub async fn build(mut self) -> Result<GenerateTask> {
-        let mut object_sums = ObjectSumsBuilder
+        let mut sums = ObjectSumsBuilder
             .build(self.input_file_name.to_string())
             .await?;
 
         let existing_output = if !self.input_file_name.is_empty() {
-            object_sums.sums_file().await?
+            sums.sums_file().await?
         } else {
             None
         };
@@ -98,11 +98,11 @@ impl GenerateTaskBuilder {
         let reader: Box<dyn SharedReader + Send> = if let Some(reader) = self.reader {
             reader
         } else {
-            let file_size = object_sums.file_size().await?;
+            let file_size = sums.file_size().await?;
             self.ctxs
                 .iter_mut()
                 .for_each(|ctx| ctx.set_file_size(file_size));
-            let reader = object_sums.reader().await?;
+            let reader = sums.reader().await?;
 
             let reader = ChannelReader::new(reader, self.capacity);
             Box::new(reader)
@@ -114,7 +114,7 @@ impl GenerateTaskBuilder {
             existing_output,
             reader: Some(reader),
             write: self.write,
-            object_sums,
+            object_sums: sums,
         };
 
         let task = task.add_tasks(HashSet::from_iter(self.ctxs))?;
@@ -145,7 +145,7 @@ impl GenerateTask {
     pub fn add_reader_task(mut self) -> Result<Self> {
         let mut reader = self.reader.take().expect("reader already taken");
         self.tasks.push(tokio::spawn(async move {
-            Ok(ReadTask(reader.read_task().await?))
+            Ok(ReadTask(reader.read_chunks().await?))
         }));
         Ok(self)
     }
@@ -352,8 +352,8 @@ pub(crate) mod test {
         EXPECTED_SHA256_SUM,
     };
     use crate::checksum::standard::StandardCtx;
-    use crate::reader::channel::test::channel_reader;
-    use crate::reader::file::FileBuilder;
+    use crate::io::sums::channel::test::channel_reader;
+    use crate::io::sums::file::FileBuilder;
     use crate::task::check::test::write_test_files_not_comparable;
     use crate::task::check::{CheckTaskBuilder, GroupBy};
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};

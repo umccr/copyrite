@@ -3,7 +3,7 @@
 
 use crate::checksum::file::SumsFile;
 use crate::error::{Error, Result};
-use crate::reader::{ObjectSums, ObjectSumsBuilder};
+use crate::io::sums::{ObjectSums, ObjectSumsBuilder};
 use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -49,14 +49,15 @@ impl CheckTaskBuilder {
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
         let objects = join_all(self.files.into_iter().map(|file| async move {
-            let mut object_sums = ObjectSumsBuilder.build(file.to_string()).await?;
-            let file_size = object_sums.file_size().await?;
-            let existing = object_sums
+            let mut sums = ObjectSumsBuilder.build(file.to_string()).await?;
+
+            let file_size = sums.file_size().await?;
+            let existing = sums
                 .sums_file()
                 .await?
                 .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
 
-            Ok((existing, BTreeSet::from_iter(vec![State(object_sums)])))
+            Ok((existing, BTreeSet::from_iter(vec![State(sums)])))
         }))
         .await
         .into_iter()
@@ -259,7 +260,7 @@ pub(crate) mod test {
     use super::*;
     use crate::checksum::file::Checksum;
     use crate::error::Error;
-    use crate::reader::file::FileBuilder;
+    use crate::io::sums::file::FileBuilder;
     use crate::test::TEST_FILE_SIZE;
     use anyhow::Result;
     use std::collections::BTreeMap;

@@ -474,16 +474,6 @@ pub(crate) mod test {
         Ok(())
     }
 
-    fn assert_update_part_sizes(part_sizes: Vec<u64>, file_size: u64, expected: Vec<u64>) {
-        let mut ctx = AWSETagCtx::new(
-            StandardCtx::md5(),
-            PartMode::PartSizes(part_sizes),
-            Some(file_size),
-        );
-        ctx.update_part_sizes();
-        assert_eq!(ctx.part_mode, PartMode::PartSizes(expected));
-    }
-
     #[tokio::test]
     async fn test_aws_etag_single_part() -> Result<()> {
         test_checksum("md5-aws-1gib", expected_md5_1gib()).await?;
@@ -509,5 +499,15 @@ pub(crate) mod test {
     async fn test_aws_etag_part_number() -> Result<()> {
         test_checksum("md5-aws-10", expected_md5_10()).await?;
         test_checksum("aws-etag-10", expected_md5_10()).await
+    }
+
+    fn assert_update_part_sizes(part_sizes: Vec<u64>, file_size: u64, expected: Vec<u64>) {
+        let mut ctx = AWSETagCtx::new(
+            StandardCtx::md5(),
+            PartMode::PartSizes(part_sizes),
+            Some(file_size),
+        );
+        ctx.update_part_sizes();
+        assert_eq!(ctx.part_mode, PartMode::PartSizes(expected));
     }
 }

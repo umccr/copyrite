@@ -3,8 +3,9 @@
 
 use crate::checksum::file::SumsFile;
 use crate::error::Result;
-use crate::reader::aws::S3Builder;
-use crate::reader::file::FileBuilder;
+use crate::io::sums::aws::S3Builder;
+use crate::io::sums::file::FileBuilder;
+use crate::io::{default_s3_client, Provider};
 use dyn_clone::DynClone;
 use futures_util::Stream;
 use std::pin::Pin;
@@ -24,14 +25,14 @@ pub type ReaderStream = Pin<Box<dyn Stream<Item = Result<Arc<[u8]>>> + Send>>;
 pub trait SharedReader {
     /// Start the IO-based read task, which reads chunks of data from a reader
     /// until the end.
-    async fn read_task(&mut self) -> Result<u64>;
+    async fn read_chunks(&mut self) -> Result<u64>;
 
     /// Convert the shared reader into a stream of the resulting bytes of reading
     /// the chunks.
     fn as_stream(&mut self) -> ReaderStream;
 }
 
-/// Operations on file based or cloud sums files.
+/// Read operations on file based or cloud sums files.
 #[async_trait::async_trait]
 pub trait ObjectSums: DynClone {
     /// Get an existing sums file for this object.
@@ -56,16 +57,17 @@ pub struct ObjectSumsBuilder;
 
 impl ObjectSumsBuilder {
     pub async fn build(self, url: String) -> Result<Box<dyn ObjectSums + Send>> {
-        if S3Builder::is_s3(&url) {
-            Ok(Box::new(
+        match Provider::try_from(url.as_str())? {
+            Provider::File { file } => {
+                Ok(Box::new(FileBuilder::default().with_file(file).build()?))
+            }
+            Provider::S3 { bucket, key } => Ok(Box::new(
                 S3Builder::default()
-                    .with_default_client()
-                    .await
-                    .parse_from_url(url)
+                    .with_key(key)
+                    .with_bucket(bucket)
+                    .with_client(default_s3_client().await?)
                     .build()?,
-            ))
-        } else {
-            Ok(Box::new(FileBuilder::default().with_file(url).build()?))
+            )),
         }
     }
 }

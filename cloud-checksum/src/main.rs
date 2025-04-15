@@ -1,9 +1,10 @@
 use cloud_checksum::checksum::Ctx;
 use cloud_checksum::error::Result;
-use cloud_checksum::reader::channel::ChannelReader;
+use cloud_checksum::io::sums::channel::ChannelReader;
 use cloud_checksum::task::check::{CheckObjects, CheckOutput, CheckTaskBuilder, GroupBy};
+use cloud_checksum::task::copy::{CopyInfo, CopyTaskBuilder};
 use cloud_checksum::task::generate::{GenerateTaskBuilder, SumCtxPairs};
-use cloud_checksum::{Commands, Subcommands};
+use cloud_checksum::{Check, Commands, Copy, CopyMode, Generate, MetadataCopy, Subcommands};
 use tokio::io::stdin;
 
 #[tokio::main]
@@ -11,13 +12,13 @@ async fn main() -> Result<()> {
     let args = Commands::parse_args()?;
 
     match args.commands {
-        Subcommands::Generate {
+        Subcommands::Generate(Generate {
             input,
             checksum,
             missing: generate_missing,
             force_overwrite,
             verify,
-        } => {
+        }) => {
             if input[0] == "-" {
                 let reader = ChannelReader::new(stdin(), args.optimization.channel_capacity);
 
@@ -71,19 +72,46 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Subcommands::Check {
+        Subcommands::Check(Check {
             input,
             update,
             group_by,
-        } => {
+        }) => {
             let files = check(input, group_by, update).await?;
             let output = CheckOutput::from((files, group_by));
 
             println!("{}", output.to_json_string()?);
         }
+        Subcommands::Copy(Copy {
+            source,
+            destination,
+            metadata_mode,
+            copy_mode,
+            ..
+        }) => {
+            let result = copy(source, destination, metadata_mode, copy_mode).await?;
+            println!("{}", result.to_json_string()?);
+        }
     };
 
     Ok(())
+}
+
+async fn copy(
+    source: String,
+    destination: String,
+    metadata_mode: MetadataCopy,
+    copy_mode: CopyMode,
+) -> Result<CopyInfo> {
+    CopyTaskBuilder::default()
+        .with_source(source)
+        .with_destination(destination)
+        .with_metadata_mode(metadata_mode)
+        .with_copy_mode(copy_mode)
+        .build()
+        .await?
+        .run()
+        .await
 }
 
 async fn check(input: Vec<String>, group_by: GroupBy, update: bool) -> Result<CheckObjects> {

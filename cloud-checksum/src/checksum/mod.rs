@@ -17,11 +17,13 @@ use std::result;
 use std::str::FromStr;
 use std::sync::Arc;
 
-/// The checksum calculator.
+/// The checksum context. This enum also determines the best order of checksums,
+/// which is useful for copy operations. AWS etag checksums are preferred over
+/// regular checksums.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum Ctx {
-    Regular(StandardCtx),
     AWSEtag(AWSETagCtx),
+    Regular(StandardCtx),
 }
 
 impl<'de> Deserialize<'de> for Ctx {
@@ -126,8 +128,8 @@ impl FromStr for Ctx {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::reader::channel::test::channel_reader;
-    use crate::reader::SharedReader;
+    use crate::io::sums::channel::test::channel_reader;
+    use crate::io::sums::SharedReader;
     use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
     use anyhow::Result;
     use tokio::fs::File;
@@ -141,7 +143,7 @@ pub(crate) mod test {
         checksum.set_file_size(Some(TEST_FILE_SIZE));
 
         let stream = reader.as_stream();
-        let task = tokio::spawn(async move { reader.read_task().await });
+        let task = tokio::spawn(async move { reader.read_chunks().await });
 
         let (digest, _) = join!(checksum.generate(stream), task);
 

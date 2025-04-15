@@ -8,8 +8,8 @@ use crate::checksum::standard::StandardCtx;
 use crate::checksum::Ctx;
 use crate::error::Error::{AwsError, ParseError};
 use crate::error::{Error, Result};
-use crate::reader::ObjectSums;
-use aws_config::{load_defaults, BehaviorVersion};
+use crate::io::sums::ObjectSums;
+use crate::io::Provider;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::get_object_attributes::GetObjectAttributesOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
@@ -27,18 +27,9 @@ pub struct S3Builder {
     client: Option<Client>,
     bucket: Option<String>,
     key: Option<String>,
-    url: Option<String>,
 }
 
 impl S3Builder {
-    /// Set the client by loading AWS environment variables.
-    pub async fn with_default_client(mut self) -> Self {
-        let config = load_defaults(BehaviorVersion::latest()).await;
-        self.client = Some(Client::new(&config));
-
-        self
-    }
-
     /// Set the client.
     pub fn with_client(mut self, client: Client) -> Self {
         self.client = Some(client);
@@ -57,54 +48,26 @@ impl S3Builder {
         self
     }
 
-    /// Set the bucket and key from an S3 url, e.g.`s3://bucket/key`.
-    pub fn parse_from_url(mut self, url: String) -> Self {
-        self.url = Some(url);
-        self
-    }
-
-    /// Build using the client, bucket and key.
-    pub fn build(mut self) -> Result<S3> {
-        if let Some(url) = self.url {
-            let (bucket, key) = Self::parse_url(&url)?;
-            self.bucket = Some(bucket);
-            self.key = Some(key);
-        }
-
+    fn get_components(self) -> Result<(Client, String, String)> {
         let error_fn =
             || ParseError("client, bucket and key are required in `S3Builder`".to_string());
 
-        Ok(S3::new(
+        Ok((
             self.client.ok_or_else(error_fn)?,
             self.bucket.ok_or_else(error_fn)?,
             self.key.ok_or_else(error_fn)?,
         ))
     }
 
-    /// Is this an S3 url.
-    pub fn is_s3(s: &str) -> bool {
-        s.starts_with("s3://")
+    /// Build using the client, bucket and key.
+    pub fn build(self) -> Result<S3> {
+        Ok(self.get_components()?.into())
     }
+}
 
-    /// Parse from an S3 url, e.g.`s3://bucket/key`.
-    pub fn parse_url(s: &str) -> Result<(String, String)> {
-        let Some(s) = s.strip_prefix("s3://") else {
-            return Err(ParseError(format!("{} is not an S3 url", s)));
-        };
-
-        let split = s.split_once("/");
-        let Some((bucket, key)) = split else {
-            return Err(ParseError(format!("failed to parse {}", s)));
-        };
-
-        if bucket.is_empty() {
-            return Err(ParseError(format!("{} is missing a bucket", s)));
-        }
-        if key.is_empty() {
-            return Err(ParseError(format!("{} is missing a key", s)));
-        }
-
-        Ok((bucket.to_string(), key.to_string()))
+impl From<(Client, String, String)> for S3 {
+    fn from((client, bucket, key): (Client, String, String)) -> Self {
+        Self::new(client, bucket, key)
     }
 }
 
@@ -478,7 +441,7 @@ impl ObjectSums for S3 {
     }
 
     fn location(&self) -> String {
-        format!("s3://{}/{}", self.bucket, self.key)
+        Provider::format_s3(&self.bucket, &self.key)
     }
 }
 
@@ -486,7 +449,6 @@ impl ObjectSums for S3 {
 pub(crate) mod test {
     use super::*;
     use crate::checksum::standard::test::EXPECTED_MD5_SUM;
-    use crate::error::Result;
     use crate::task::generate::test::generate_for;
     use crate::test::{TEST_FILE_NAME, TEST_FILE_SIZE};
     use aws_sdk_s3::types;
@@ -510,30 +472,11 @@ pub(crate) mod test {
     const EXPECTED_SHA256_PART_3_4_CONCAT: &str = "pWWT3JcI0KGHFujswlkNCTl1JfsSRpbmHyMcYIbjBQA=";
 
     #[tokio::test]
-    pub async fn test_parse_url() -> Result<()> {
-        let s3 = expected_s3("s3://bucket/key").await?;
-        assert_eq!(s3.into_inner(), ("bucket".to_string(), "key".to_string()));
-
-        let s3 = expected_s3("s3://bucket/key/").await?;
-        assert_eq!(s3.into_inner(), ("bucket".to_string(), "key/".to_string()));
-
-        let s3 = expected_s3("file://bucket/key").await;
-        assert!(s3.is_err());
-
-        let s3 = expected_s3("s3://bucket/").await;
-        assert!(s3.is_err());
-
-        let s3 = expected_s3("s3://").await;
-        assert!(s3.is_err());
-
-        Ok(())
-    }
-
-    #[tokio::test]
     pub async fn test_multi_part_with_sha256_different_part_sizes() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_multi_part_with_sha256_different_part_sizes())
-            .parse_from_url("s3://bucket/key".to_string())
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
@@ -558,7 +501,8 @@ pub(crate) mod test {
     pub async fn test_multi_part_etag_only_different_part_sizes() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_multi_part_etag_only_different_part_sizes())
-            .parse_from_url("s3://bucket/key".to_string())
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
@@ -580,7 +524,8 @@ pub(crate) mod test {
     pub async fn test_multi_part_with_sha256() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_multi_part_with_sha256())
-            .parse_from_url("s3://bucket/key".to_string())
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
@@ -604,7 +549,8 @@ pub(crate) mod test {
     pub async fn test_multi_part_etag_only() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_multi_part_etag_only())
-            .parse_from_url("s3://bucket/key".to_string())
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
@@ -621,7 +567,8 @@ pub(crate) mod test {
     pub async fn test_single_part_with_sha256() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_single_part_with_sha256())
-            .parse_from_url("s3://bucket/key".to_string())
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
@@ -638,7 +585,8 @@ pub(crate) mod test {
     pub async fn test_single_part_etag_only() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
             .with_client(mock_single_part_etag_only())
-            .parse_from_url("s3://bucket/key".to_string())
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
             .build()?;
 
         let sums = s3.sums_from_metadata().await?.split();
@@ -862,13 +810,5 @@ pub(crate) mod test {
             });
 
         mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes])
-    }
-
-    async fn expected_s3(url: &str) -> Result<S3> {
-        S3Builder::default()
-            .parse_from_url(url.to_string())
-            .with_default_client()
-            .await
-            .build()
     }
 }

@@ -1,4 +1,4 @@
-use cloud_checksum::reader::channel::ChannelReader;
+use cloud_checksum::io::sums::channel::ChannelReader;
 use cloud_checksum::task::generate::GenerateTaskBuilder;
 use cloud_checksum::test::TestFileBuilder;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
