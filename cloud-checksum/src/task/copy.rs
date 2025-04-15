@@ -17,7 +17,7 @@ use serde_json::to_string;
 use std::future::Future;
 use std::sync::Arc;
 
-pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 20 * 1024 * 1024; // 20mib
+pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 8 * 1024 * 1024; // 8mib
 
 /// Build a copy task.
 #[derive(Default, Clone)]
