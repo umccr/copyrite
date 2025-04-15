@@ -89,10 +89,7 @@ impl S3 {
 
     fn is_access_denied<T: ProvideErrorMetadata>(err: &SdkError<T, HttpResponse>) -> bool {
         if let Some(err) = err.as_service_error() {
-            if err
-                .code()
-                .is_some_and(|code| code == "AccessDenied" || code == "InvalidSecurity")
-            {
+            if err.code().is_some_and(|code| code == "AccessDenied") {
                 return true;
             }
         }
@@ -130,25 +127,32 @@ impl S3 {
             (MetadataDirective::Replace, Some(HashMap::new()))
         };
 
-        let result = self
-            .client
-            .copy_object()
-            .tagging_directive(tagging)
-            .set_tagging(tagging_set)
-            .metadata_directive(metadata)
-            .set_metadata(metadata_set)
-            .copy_source(format!("{}/{}", bucket, key))
-            .key(SumsFile::format_target_file(&destination_key))
-            .bucket(destination_bucket)
-            .send()
-            .await;
+        let do_copy = |tagging, tagging_set, metadata, metadata_set| async {
+            self.client
+                .copy_object()
+                .tagging_directive(tagging)
+                .set_tagging(tagging_set)
+                .metadata_directive(metadata)
+                .set_metadata(metadata_set)
+                .copy_source(format!("{}/{}", bucket, key))
+                .key(SumsFile::format_target_file(&destination_key))
+                .bucket(destination_bucket.to_string())
+                .send()
+                .await
+        };
 
-        if self.metadata_mode.is_best_effort() && result.as_ref().is_err_and(Self::is_access_denied)
-        {
-            return Ok(None);
-        }
+        let result = do_copy(tagging, tagging_set, metadata.clone(), metadata_set.clone()).await;
+        // Retry if this is a best effort copy and the error was access denied.
         if self.tag_mode.is_best_effort() && result.as_ref().is_err_and(Self::is_access_denied) {
-            return Ok(None);
+            do_copy(
+                TaggingDirective::Replace,
+                Some("".to_string()),
+                metadata,
+                metadata_set.clone(),
+            )
+            .await?;
+        } else {
+            result?;
         }
 
         Ok(size.map(u64::try_from).transpose()?)
@@ -214,23 +218,24 @@ impl S3 {
 
         content.data.read_to_end(&mut buf).await?;
 
-        let output = self
-            .client
-            .put_object()
-            .set_tagging(content.tags)
-            .set_metadata(content.metadata)
-            .bucket(bucket)
-            .key(key)
-            .body(ByteStream::from(buf))
-            .send()
-            .await;
+        let do_put = |tags, metadata, buf| async {
+            self.client
+                .put_object()
+                .set_tagging(tags)
+                .set_metadata(metadata)
+                .bucket(&bucket)
+                .key(&key)
+                .body(ByteStream::from(buf))
+                .send()
+                .await
+        };
 
-        if self.metadata_mode.is_best_effort() && output.as_ref().is_err_and(Self::is_access_denied)
-        {
-            return Ok(None);
-        }
-        if self.tag_mode.is_best_effort() && output.as_ref().is_err_and(Self::is_access_denied) {
-            return Ok(None);
+        let result = do_put(content.tags, content.metadata.clone(), buf.clone()).await;
+        // Retry if this is a best effort copy and the error was access denied.
+        if self.tag_mode.is_best_effort() && result.as_ref().is_err_and(Self::is_access_denied) {
+            do_put(None, content.metadata, buf).await?;
+        } else {
+            result?;
         }
 
         Ok(content.size)
