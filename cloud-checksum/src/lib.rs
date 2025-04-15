@@ -160,7 +160,7 @@ pub enum MetadataCopy {
 impl MetadataCopy {
     /// Is this a copy metadata operation.
     pub fn is_copy(&self) -> bool {
-        matches!(self, MetadataCopy::Copy | MetadataCopy::BestEffort)
+        matches!(self, MetadataCopy::Copy)
     }
 
     /// Is this a best-effort copy metadata operation.

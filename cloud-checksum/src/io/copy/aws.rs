@@ -374,18 +374,19 @@ impl S3 {
 
     /// Extract the metadata directive and metadata to be set.
     fn metadata_directive(&self) -> (MetadataDirective, Option<HashMap<String, String>>) {
-        let (metadata, metadata_set) = if self.metadata_mode.is_copy() {
-            (MetadataDirective::Copy, None)
-        } else {
-            (MetadataDirective::Replace, Some(HashMap::new()))
-        };
+        let (metadata, metadata_set) =
+            if self.metadata_mode.is_copy() || self.metadata_mode.is_best_effort() {
+                (MetadataDirective::Copy, None)
+            } else {
+                (MetadataDirective::Replace, Some(HashMap::new()))
+            };
 
         (metadata, metadata_set)
     }
 
     /// Extract the tagging directive and tags to be set.
     fn tagging_directive(&self) -> (TaggingDirective, Option<String>) {
-        let (tagging, tagging_set) = if self.metadata_mode.is_copy() {
+        let (tagging, tagging_set) = if self.tag_mode.is_copy() || self.tag_mode.is_best_effort() {
             (TaggingDirective::Copy, None)
         } else {
             (TaggingDirective::Replace, Some("".to_string()))
