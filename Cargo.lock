@@ -897,6 +897,7 @@ dependencies = [
  "clap",
  "crc32c",
  "crc32fast",
+ "crc64fast-nvme",
  "criterion",
  "dyn-clone",
  "envy",
