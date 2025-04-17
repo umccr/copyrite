@@ -59,3 +59,27 @@ uses metadata fields like ETags and additional checksums to obtain data without 
 This tool requires generating `.sums` files to allow checking it. This means that a `generate` command should always be
 performed before a `check`. To avoid specifying checksums, use `--missing` on the `generate` command to generate only
 the needed checksums to perform a `check`.
+
+## Tests
+
+Run unit tests using:
+
+```sh
+cargo test --all-features
+```
+
+Run bench marks using:
+
+```sh
+cargo bench --all-features
+```
+
+Integration tests are ignored by default. They perform operations on an S3 bucket directly, and need to have a
+`CLOUD_CHECKSUM_TEST_BUCKET_URI` environment set, to a bucket and prefix that files can be written to. Run the tests
+using:
+
+```sh
+CLOUD_CHECKSUM_TEST_BUCKET_URI="s3://bucket/prefix" cargo test --all-features -- --ignored
+```
+
+

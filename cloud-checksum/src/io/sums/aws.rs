@@ -19,19 +19,20 @@ use aws_smithy_types::byte_stream::ByteStream;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::io::AsyncRead;
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
 pub struct S3Builder {
-    client: Option<Client>,
+    client: Option<Arc<Client>>,
     bucket: Option<String>,
     key: Option<String>,
 }
 
 impl S3Builder {
     /// Set the client.
-    pub fn with_client(mut self, client: Client) -> Self {
+    pub fn with_client(mut self, client: Arc<Client>) -> Self {
         self.client = Some(client);
         self
     }
@@ -48,7 +49,7 @@ impl S3Builder {
         self
     }
 
-    fn get_components(self) -> Result<(Client, String, String)> {
+    fn get_components(self) -> Result<(Arc<Client>, String, String)> {
         let error_fn =
             || ParseError("client, bucket and key are required in `S3Builder`".to_string());
 
@@ -65,8 +66,8 @@ impl S3Builder {
     }
 }
 
-impl From<(Client, String, String)> for S3 {
-    fn from((client, bucket, key): (Client, String, String)) -> Self {
+impl From<(Arc<Client>, String, String)> for S3 {
+    fn from((client, bucket, key): (Arc<Client>, String, String)) -> Self {
         Self::new(client, bucket, key)
     }
 }
@@ -74,7 +75,7 @@ impl From<(Client, String, String)> for S3 {
 /// An S3 object and AWS-related existing sums.
 #[derive(Debug, Clone)]
 pub struct S3 {
-    client: Client,
+    client: Arc<Client>,
     bucket: String,
     key: String,
     get_object_attributes: Option<GetObjectAttributesOutput>,
@@ -83,7 +84,7 @@ pub struct S3 {
 
 impl S3 {
     /// Create a new S3 object.
-    pub fn new(client: Client, bucket: String, key: String) -> S3 {
+    pub fn new(client: Arc<Client>, bucket: String, key: String) -> S3 {
         Self {
             client,
             bucket,
@@ -455,26 +456,26 @@ pub(crate) mod test {
     use aws_sdk_s3::types::GetObjectAttributesParts;
     use aws_smithy_mocks_experimental::{mock, mock_client, Rule, RuleMode};
 
-    const EXPECTED_SHA256_SUM: &str = "Kf+9U8vkMXmrL6YtvZWMDsMLNAq1DOfHheinpLR3Hjk=";
+    const EXPECTED_SHA256_SUM: &str = "Kf+9U8vkMXmrL6YtvZWMDsMLNAq1DOfHheinpLR3Hjk="; // pragma: allowlist secret
 
     const EXPECTED_MD5_SUM_5: &str = "0798905b42c575d43e921be42e126a26-5";
     const EXPECTED_MD5_SUM_4: &str = "75652bd9b9c3652b9f43e7663b3f14b6-4";
 
-    const EXPECTED_SHA256_SUM_5: &str = "i+AmvKnN0bTeoChGodtn0v+gJ5Srd1u43mrWaouheo4=";
-    const EXPECTED_SHA256_SUM_4: &str = "Wb7wV/0P9hRl2hTZ7Ee8eD7SlDUBwxJywUDIPV0W8Gw=";
+    const EXPECTED_SHA256_SUM_5: &str = "i+AmvKnN0bTeoChGodtn0v+gJ5Srd1u43mrWaouheo4="; // pragma: allowlist secret
+    const EXPECTED_SHA256_SUM_4: &str = "Wb7wV/0P9hRl2hTZ7Ee8eD7SlDUBwxJywUDIPV0W8Gw="; // pragma: allowlist secret
 
-    const EXPECTED_SHA256_PART_1: &str = "qGw2Bcs0UvgbO0gUoljNQFAWen5xWqwi2RNIEvHfDRc=";
-    const EXPECTED_SHA256_PART_2: &str = "XLJehuPqO2ZOF80bcsOwMfRUp1Sy8Pue4FNQB+BaDpU=";
-    const EXPECTED_SHA256_PART_3: &str = "BQn5YX5CBUx6XYhY9T7RnVTIsR8o/lKnSKgRRUs6B7U=";
-    const EXPECTED_SHA256_PART_4: &str = "Wt2RpJkRAlmYPk0/BfBS5XMvlvhtSRRsU4MhbJTm/RQ=";
-    const EXPECTED_SHA256_PART_5: &str = "laScT3WEixthSDryDZwNEA+U5URMQ1Q8EXOO48F4v78=";
+    const EXPECTED_SHA256_PART_1: &str = "qGw2Bcs0UvgbO0gUoljNQFAWen5xWqwi2RNIEvHfDRc="; // pragma: allowlist secret
+    const EXPECTED_SHA256_PART_2: &str = "XLJehuPqO2ZOF80bcsOwMfRUp1Sy8Pue4FNQB+BaDpU="; // pragma: allowlist secret
+    const EXPECTED_SHA256_PART_3: &str = "BQn5YX5CBUx6XYhY9T7RnVTIsR8o/lKnSKgRRUs6B7U="; // pragma: allowlist secret
+    const EXPECTED_SHA256_PART_4: &str = "Wt2RpJkRAlmYPk0/BfBS5XMvlvhtSRRsU4MhbJTm/RQ="; // pragma: allowlist secret
+    const EXPECTED_SHA256_PART_5: &str = "laScT3WEixthSDryDZwNEA+U5URMQ1Q8EXOO48F4v78="; // pragma: allowlist secret
 
-    const EXPECTED_SHA256_PART_3_4_CONCAT: &str = "pWWT3JcI0KGHFujswlkNCTl1JfsSRpbmHyMcYIbjBQA=";
+    const EXPECTED_SHA256_PART_3_4_CONCAT: &str = "pWWT3JcI0KGHFujswlkNCTl1JfsSRpbmHyMcYIbjBQA="; // pragma: allowlist secret
 
     #[tokio::test]
     pub async fn test_multi_part_with_sha256_different_part_sizes() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(mock_multi_part_with_sha256_different_part_sizes())
+            .with_client(Arc::new(mock_multi_part_with_sha256_different_part_sizes()))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -500,7 +501,7 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_multi_part_etag_only_different_part_sizes() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(mock_multi_part_etag_only_different_part_sizes())
+            .with_client(Arc::new(mock_multi_part_etag_only_different_part_sizes()))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -523,7 +524,7 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_multi_part_with_sha256() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(mock_multi_part_with_sha256())
+            .with_client(Arc::new(mock_multi_part_with_sha256()))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -548,7 +549,7 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_multi_part_etag_only() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(mock_multi_part_etag_only())
+            .with_client(Arc::new(mock_multi_part_etag_only()))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -566,7 +567,7 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_single_part_with_sha256() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(mock_single_part_with_sha256())
+            .with_client(Arc::new(mock_single_part_with_sha256()))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -584,7 +585,7 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_single_part_etag_only() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(mock_single_part_etag_only())
+            .with_client(Arc::new(mock_single_part_etag_only()))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -753,6 +754,16 @@ pub(crate) mod test {
     }
 
     fn mock_multi_part_etag_only() -> Client {
+        let get_object_attributes = mock_multi_part_etag_only_rule();
+
+        mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            get_object_attributes.as_slice()
+        )
+    }
+
+    pub(crate) fn mock_multi_part_etag_only_rule() -> Vec<Rule> {
         let get_object_attributes = mock!(Client::get_object_attributes)
             .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
             .then_output(|| {
@@ -767,18 +778,14 @@ pub(crate) mod test {
                     .build()
             });
 
-        mock_client!(
-            aws_sdk_s3,
-            RuleMode::Sequential,
-            &[
-                &get_object_attributes,
-                &head_object_rule(214748365),
-                &head_object_rule(214748365),
-                &head_object_rule(214748365),
-                &head_object_rule(214748365),
-                &head_object_rule(214748364),
-            ]
-        )
+        vec![
+            get_object_attributes,
+            head_object_rule(214748365),
+            head_object_rule(214748365),
+            head_object_rule(214748365),
+            head_object_rule(214748365),
+            head_object_rule(214748364),
+        ]
     }
 
     fn mock_single_part_with_sha256() -> Client {
@@ -800,15 +807,19 @@ pub(crate) mod test {
     }
 
     fn mock_single_part_etag_only() -> Client {
-        let get_object_attributes = mock!(Client::get_object_attributes)
-            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+        let get_object_attributes = mock_single_part_etag_only_rule();
+
+        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes])
+    }
+
+    pub(crate) fn mock_single_part_etag_only_rule() -> Rule {
+        mock!(Client::get_object_attributes)
+            .match_requests(move |req| req.bucket() == Some("bucket") && req.key() == Some("key"))
             .then_output(|| {
                 GetObjectAttributesOutput::builder()
                     .e_tag(EXPECTED_MD5_SUM)
                     .object_size(TEST_FILE_SIZE as i64)
                     .build()
-            });
-
-        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes])
+            })
     }
 }

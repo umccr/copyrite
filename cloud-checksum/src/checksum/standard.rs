@@ -3,6 +3,7 @@
 
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
+use crate::io::Provider;
 use crate::{Checksum, Endianness};
 use crc32c::crc32c_append;
 use md5::Digest;
@@ -20,10 +21,10 @@ use std::sync::Arc;
 pub enum StandardCtx {
     // Note, options remove a clone later on, but it might be
     // better to Box the state for clarity.
-    /// Calculate a CRC32.
-    CRC32(Option<crc32fast::Hasher>, Endianness),
     /// Calculate a CRC32C.
     CRC32C(u32, Endianness),
+    /// Calculate a CRC32.
+    CRC32(Option<crc32fast::Hasher>, Endianness),
     /// Calculate the MD5 checksum.
     MD5(Option<md5::Md5>),
     /// Calculate the SHA1 checksum.
@@ -58,6 +59,12 @@ impl Hash for StandardCtx {
     fn hash<H: Hasher>(&self, state: &mut H) {
         discriminant(self).hash(state);
         self.endianness().hash(state);
+    }
+}
+
+impl Default for StandardCtx {
+    fn default() -> Self {
+        Self::crc32()
     }
 }
 
@@ -249,6 +256,25 @@ impl StandardCtx {
             StandardCtx::QuickXor => 5,
         }
     }
+
+    /// Is this a preferred cloud checksum for copying files.
+    pub fn is_preferred_cloud_ctx(&self, provider: &Provider) -> bool {
+        if provider.is_s3() {
+            self.is_aws_ctx()
+        } else {
+            true
+        }
+    }
+
+    /// Is this an AWS-compatible checksum context.
+    pub fn is_aws_ctx(&self) -> bool {
+        !matches!(self, StandardCtx::QuickXor)
+    }
+
+    /// Is this an AWS additional checksum that can be specified.
+    pub fn is_aws_additional_ctx(&self) -> bool {
+        !matches!(self, StandardCtx::QuickXor | StandardCtx::MD5(_))
+    }
 }
 
 #[cfg(test)]
@@ -256,10 +282,10 @@ pub(crate) mod test {
     use crate::checksum::test::test_checksum;
     use anyhow::Result;
 
-    pub(crate) const EXPECTED_MD5_SUM: &str = "d93e71879054f205ede90d35c8081ca5";
-    pub(crate) const EXPECTED_SHA1_SUM: &str = "3eafdb6ad3a27167e0db70fccc40d0614307dabf";
+    pub(crate) const EXPECTED_MD5_SUM: &str = "d93e71879054f205ede90d35c8081ca5"; // pragma: allowlist secret
+    pub(crate) const EXPECTED_SHA1_SUM: &str = "3eafdb6ad3a27167e0db70fccc40d0614307dabf"; // pragma: allowlist secret
     pub(crate) const EXPECTED_SHA256_SUM: &str =
-        "29ffbd53cbe43179ab2fa62dbd958c0ec30b340ab50ce7c785e8a7a4b4771e39";
+        "29ffbd53cbe43179ab2fa62dbd958c0ec30b340ab50ce7c785e8a7a4b4771e39"; // pragma: allowlist secret
     pub(crate) const EXPECTED_CRC32_BE_SUM: &str = "3320f39e";
     pub(crate) const EXPECTED_CRC32_LE_SUM: &str = "9ef32033";
     pub(crate) const EXPECTED_CRC32C_BE_SUM: &str = "4920106a";

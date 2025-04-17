@@ -9,8 +9,10 @@ use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder, SharedReader};
 use crate::task::check::CheckObjects;
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
+use aws_sdk_s3::Client;
 use futures_util::future::join_all;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 /// Define the kind of task that is running.
@@ -30,6 +32,7 @@ pub struct GenerateTaskBuilder {
     reader: Option<Box<dyn SharedReader + Send>>,
     capacity: usize,
     write: bool,
+    client: Option<Arc<Client>>,
 }
 
 impl GenerateTaskBuilder {
@@ -69,6 +72,12 @@ impl GenerateTaskBuilder {
         self
     }
 
+    /// Set the S3 client to use.
+    pub fn with_client(mut self, client: Arc<Client>) -> Self {
+        self.client = Some(client);
+        self
+    }
+
     /// Write the file to the specified location one computed.
     pub fn write(mut self) -> Self {
         self.write = true;
@@ -77,7 +86,8 @@ impl GenerateTaskBuilder {
 
     /// Build a generate task.
     pub async fn build(mut self) -> Result<GenerateTask> {
-        let mut sums = ObjectSumsBuilder
+        let mut sums = ObjectSumsBuilder::default()
+            .set_client(self.client)
             .build(self.input_file_name.to_string())
             .await?;
 

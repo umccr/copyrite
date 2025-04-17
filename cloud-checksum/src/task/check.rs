@@ -4,13 +4,17 @@
 use crate::checksum::file::SumsFile;
 use crate::error::{Error, Result};
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder};
+use aws_sdk_s3::Client;
 use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
 /// Build a check task.
 #[derive(Debug, Default)]
@@ -18,6 +22,7 @@ pub struct CheckTaskBuilder {
     files: Vec<String>,
     group_by: GroupBy,
     update: bool,
+    client: Option<Arc<Client>>,
 }
 
 impl CheckTaskBuilder {
@@ -45,19 +50,32 @@ impl CheckTaskBuilder {
         self
     }
 
+    /// Set the S3 client to use.
+    pub fn with_client(mut self, client: Arc<Client>) -> Self {
+        self.client = Some(client);
+        self
+    }
+
     /// Build a check task.
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
-        let objects = join_all(self.files.into_iter().map(|file| async move {
-            let mut sums = ObjectSumsBuilder.build(file.to_string()).await?;
+        let objects = join_all(self.files.into_iter().map(|file| {
+            let client = self.client.clone();
 
-            let file_size = sums.file_size().await?;
-            let existing = sums
-                .sums_file()
-                .await?
-                .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
+            async move {
+                let mut sums = ObjectSumsBuilder::default()
+                    .set_client(client)
+                    .build(file.to_string())
+                    .await?;
 
-            Ok((existing, BTreeSet::from_iter(vec![State(sums)])))
+                let file_size = sums.file_size().await?;
+                let existing = sums
+                    .sums_file()
+                    .await?
+                    .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
+
+                Ok((existing, BTreeSet::from_iter(vec![State(sums)])))
+            }
         }))
         .await
         .into_iter()
@@ -84,6 +102,12 @@ pub enum GroupBy {
 
 /// Representation of file state to implement equality and hashing.
 pub struct State(pub(crate) Box<dyn ObjectSums + Send>);
+
+impl Debug for State {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("State")
+    }
+}
 
 impl Hash for State {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -112,8 +136,15 @@ impl Ord for State {
 }
 
 /// Objects processed from the check task.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct CheckObjects(pub(crate) BTreeMap<SumsFile, BTreeSet<State>>);
+
+impl CheckObjects {
+    /// Get the inner value.
+    pub fn into_inner(self) -> BTreeMap<SumsFile, BTreeSet<State>> {
+        self.0
+    }
+}
 
 impl Hash for CheckObjects {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -122,7 +153,7 @@ impl Hash for CheckObjects {
 }
 
 /// Execute the check task.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct CheckTask {
     objects: CheckObjects,
     group_by: GroupBy,
@@ -208,7 +239,7 @@ impl CheckTask {
 
     /// Runs the check task, returning the list of matching files.
     pub async fn run(self) -> Result<CheckObjects> {
-        let update = self.update;
+        let update = self.update && matches!(self.group_by, GroupBy::Equality);
         let result = match self.group_by {
             GroupBy::Equality => Ok::<_, Error>(self.merge_same().await?.objects),
             GroupBy::Comparability => Ok(self.merge_comparable().await?.objects),
@@ -252,6 +283,16 @@ impl CheckOutput {
     /// Convert to a JSON string.
     pub fn to_json_string(&self) -> Result<String> {
         Ok(to_string(&self)?)
+    }
+
+    /// Get the grouping option.
+    pub fn group_by(&self) -> GroupBy {
+        self.group_by
+    }
+
+    /// Get the groups.
+    pub fn groups(&self) -> &[Vec<String>] {
+        self.groups.as_slice()
     }
 }
 

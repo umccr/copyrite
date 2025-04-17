@@ -11,6 +11,7 @@ pub mod copy;
 pub mod sums;
 
 /// The type of provider for the object.
+#[derive(Debug, Clone)]
 pub enum Provider {
     File { file: String },
     S3 { bucket: String, key: String },

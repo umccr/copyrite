@@ -43,6 +43,7 @@ aws-smithy-runtime-api = "1.7.3"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 anyhow = "1"
 tempfile = "3"
+envy = "0.4"
 
 aws-smithy-mocks-experimental = "0.2"
 

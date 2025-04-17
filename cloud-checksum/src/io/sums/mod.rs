@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::io::sums::aws::S3Builder;
 use crate::io::sums::file::FileBuilder;
 use crate::io::{default_s3_client, Provider};
+use aws_sdk_s3::Client;
 use dyn_clone::DynClone;
 use futures_util::Stream;
 use std::pin::Pin;
@@ -53,7 +54,9 @@ pub trait ObjectSums: DynClone {
 
 /// Build object sums from object URLs.
 #[derive(Debug, Default)]
-pub struct ObjectSumsBuilder;
+pub struct ObjectSumsBuilder {
+    client: Option<Arc<Client>>,
+}
 
 impl ObjectSumsBuilder {
     pub async fn build(self, url: String) -> Result<Box<dyn ObjectSums + Send>> {
@@ -61,13 +64,25 @@ impl ObjectSumsBuilder {
             Provider::File { file } => {
                 Ok(Box::new(FileBuilder::default().with_file(file).build()?))
             }
-            Provider::S3 { bucket, key } => Ok(Box::new(
-                S3Builder::default()
-                    .with_key(key)
-                    .with_bucket(bucket)
-                    .with_client(default_s3_client().await?)
-                    .build()?,
-            )),
+            Provider::S3 { bucket, key } => {
+                let client = match self.client {
+                    Some(client) => client,
+                    None => Arc::new(default_s3_client().await?),
+                };
+                Ok(Box::new(
+                    S3Builder::default()
+                        .with_key(key)
+                        .with_bucket(bucket)
+                        .with_client(client)
+                        .build()?,
+                ))
+            }
         }
+    }
+
+    /// Set the S3 client if this is an s3 provider.
+    pub fn set_client(mut self, client: Option<Arc<Client>>) -> Self {
+        self.client = client;
+        self
     }
 }

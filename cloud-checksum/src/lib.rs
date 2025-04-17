@@ -1,10 +1,12 @@
 use error::Result;
+use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 
 pub mod checksum;
 pub mod error;
 pub mod task;
 
+pub mod cli;
 pub mod io;
 #[doc(hidden)]
 pub mod test;
@@ -22,7 +24,7 @@ use std::str::FromStr;
 /// Args for the checksum-cloud CLI.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about)]
-pub struct Commands {
+pub struct Command {
     /// The amount of time to calculate checksums for. Once this timeout is reached the partial
     /// checksum will be saved to the partial checksum file.
     #[arg(global = true, short, long, env)]
@@ -35,17 +37,34 @@ pub struct Commands {
     pub optimization: Optimization,
 }
 
-impl Commands {
+impl Command {
     /// Parse args and set default values.
     pub fn parse_args() -> Result<Self> {
-        let mut args = Self::parse();
-        if let Subcommands::Generate(generate) = &mut args.commands {
+        let args = Self::parse();
+        Self::validate(&args)?;
+        Ok(args)
+    }
+
+    /// Parse the command from an iterator.
+    pub fn parse_from_iter<I, T>(iter: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let args = Self::parse_from(iter);
+        Self::validate(&args)?;
+        Ok(args)
+    }
+
+    /// Validate commands.
+    pub fn validate(args: &Self) -> Result<()> {
+        if let Subcommands::Generate(generate) = &args.commands {
             // For S3 objects, passing no checksums is valid as metadata can be used, otherwise
             // it's an error if not verifying the data.
             if generate.checksum.is_empty()
                 && !generate.verify
                 && !generate.input.iter().all(|input| {
-                    matches!(Provider::try_from(input.as_str()), Ok(Provider::S3 { .. }))
+                    Provider::try_from(input.as_str()).is_ok_and(|provider| provider.is_s3())
                 })
             {
                 return Err(ParseError(
@@ -53,7 +72,8 @@ impl Commands {
                 ));
             }
         }
-        Ok(args)
+
+        Ok(())
     }
 }
 
@@ -140,7 +160,7 @@ pub enum MetadataCopy {
 impl MetadataCopy {
     /// Is this a copy metadata operation.
     pub fn is_copy(&self) -> bool {
-        matches!(self, MetadataCopy::Copy | MetadataCopy::BestEffort)
+        matches!(self, MetadataCopy::Copy)
     }
 
     /// Is this a best-effort copy metadata operation.
@@ -199,6 +219,14 @@ pub struct Copy {
     /// how the source was uploaded. This can be used to override that.
     #[arg(short, long, env, value_parser = |s: &str| parse_size(s))]
     pub part_size: Option<u64>,
+    /// The number of simultaneous copy tasks to run when using multipart copies. This controls
+    /// how many simultaneous connections are made to copy files.
+    #[arg(long, env, default_value_t = 10)]
+    pub concurrency: usize,
+    /// Do not check the checksums of the copied files after copying. By default, all copy
+    /// operations will generate checksums for a check and then verify that the copy was correct.
+    #[arg(long, env)]
+    pub no_check: bool,
 }
 
 /// The subcommands for cloud-checksum.

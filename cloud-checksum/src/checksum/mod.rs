@@ -8,6 +8,8 @@ pub mod standard;
 use crate::checksum::aws_etag::AWSETagCtx;
 use crate::checksum::standard::StandardCtx;
 use crate::error::{Error, Result};
+use crate::io::Provider;
+use aws_sdk_s3::types::ChecksumAlgorithm;
 use futures_util::{pin_mut, Stream, StreamExt};
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -24,6 +26,12 @@ use std::sync::Arc;
 pub enum Ctx {
     AWSEtag(AWSETagCtx),
     Regular(StandardCtx),
+}
+
+impl Default for Ctx {
+    fn default() -> Self {
+        Self::Regular(Default::default())
+    }
 }
 
 impl<'de> Deserialize<'de> for Ctx {
@@ -99,6 +107,41 @@ impl Ctx {
         match self {
             Ctx::Regular(_) => None,
             Ctx::AWSEtag(ctx) => Some(ctx.part_checksums()),
+        }
+    }
+
+    /// Does this context represent a valid and preferred multipart checksum. All multipart
+    /// checksums are preferred except for those with different sized part sizes. Returns
+    /// the preferred part size.
+    pub fn is_preferred_multipart(&self, provider: &Provider) -> Option<u64> {
+        if let Self::AWSEtag(ctx) = self {
+            ctx.is_preferred_multipart(provider)
+        } else {
+            None
+        }
+    }
+
+    /// Does this context represent an AWS-compatible single part checksum, i.e. is it a regular
+    /// checksum that AWS supports directly or as an additional checksum.
+    pub fn is_preferred_single_part(&self, provider: &Provider) -> bool {
+        matches!(self, Self::Regular(regular) if regular.is_preferred_cloud_ctx(provider))
+    }
+}
+
+impl From<Ctx> for ChecksumAlgorithm {
+    fn from(ctx: Ctx) -> Self {
+        let ctx = match ctx {
+            Ctx::AWSEtag(ctx) => ctx.ctx(),
+            Ctx::Regular(ctx) => ctx,
+        };
+
+        match ctx {
+            StandardCtx::CRC32C(_, _) => ChecksumAlgorithm::Crc32C,
+            StandardCtx::CRC32(_, _) => ChecksumAlgorithm::Crc32,
+            StandardCtx::SHA1(_) => ChecksumAlgorithm::Sha1,
+            StandardCtx::SHA256(_) => ChecksumAlgorithm::Sha256,
+            // By default, set some algorithm if the context doesn't line up.
+            _ => ChecksumAlgorithm::Crc32,
         }
     }
 }
