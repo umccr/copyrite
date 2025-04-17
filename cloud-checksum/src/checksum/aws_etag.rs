@@ -6,23 +6,29 @@ use crate::checksum::standard::StandardCtx;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use crate::io::Provider;
-use phf::phf_ordered_map;
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::sync::Arc;
 
+/// Constant for 1 MiB.
+pub const MIB: u64 = 1024 * 1024;
+/// Constant for 1 GiB.
+pub const GIB: u64 = 1024 * 1024 * 1024;
+/// Constant for 1 GB.
+pub const GB: u64 = 1000 * 1000 * 1000;
+
 /// Defines the "best" order for part sizes that should be preferenced when copying/generating
 /// new checksums. This list takes into account defaults that are likely to show up in the AWS CLI
 /// and SDKs.
-pub static PART_SIZE_ORDERING: phf::OrderedMap<u64, u64> = phf_ordered_map! {
+pub const PREFERRED_PART_SIZES: &[u64] = &[
     // AWS CLI/boto3 uses 8MiB as the default:
     // https://github.com/aws/aws-cli/blob/b9459db122d9f596a4570b6b5ecca44311b48fc2/awscli/customizations/s3/transferconfig.py#L21
     // https://github.com/boto/boto3/blob/0442d32d2d2cbc5efbe158f6336993d1ee89b36b/boto3/s3/transfer.py#L243
     // Java V2 uses 8MiB:
     // https://github.com/aws/aws-sdk-java-v2/blob/5463dd3d403450e167408895c152c62884da65bd/services/s3/src/main/java/software/amazon/awssdk/services/s3/internal/multipart/MultipartConfigurationResolver.java#L28
-    8388608_u64 => 0,
+    8 * MIB,
     // C++ SDK uses 5MiB:
     // https://github.com/aws/aws-sdk-cpp/blob/93f60cc8aad399a3977287485c19c24d15723b78/src/aws-cpp-sdk-transfer/include/aws/transfer/TransferManager.h#L35
     // Go seems to also default to 5MiB:
@@ -33,44 +39,63 @@ pub static PART_SIZE_ORDERING: phf::OrderedMap<u64, u64> = phf_ordered_map! {
     // https://github.com/aws/aws-sdk-net/blob/0f72ad1c90f471505c0013c92ec5e9e567239527/sdk/src/Services/S3/Custom/Util/S3Constants.cs#L35
     // PHP:
     // https://github.com/aws/aws-sdk-php/blob/713bdb1ff0c2eb519932c111fc450f6b5462b69f/src/S3/MultipartUploader.php#L19
-    5242880_u64 => 1,
+    5 * MIB,
     // Console uses 16mib:
-    16777216_u64 => 2,
+    16 * MIB,
     // Ruby SDK uses 50MiB:
     // https://github.com/aws/aws-sdk-ruby/blob/2c8a0686794e8d03da504fcb25984f7fae93f5b3/gems/aws-sdk-s3/lib/aws-sdk-s3/object_multipart_copier.rb#L31
-    52428800_u64 => 3,
+    50 * MIB,
     // Java V1 SDK uses 100MiB and 16mib:
     // https://github.com/aws/aws-sdk-java/blob/bdca0550fc15769618a51338f5f2f84bc603a1cf/aws-java-sdk-s3/src/main/java/com/amazonaws/services/s3/transfer/TransferManagerConfiguration.java#L32-L46
     // But it also does some calculations based on the total size:
     // https://github.com/aws/aws-sdk-java/blob/bdca0550fc15769618a51338f5f2f84bc603a1cf/aws-java-sdk-s3/src/main/java/com/amazonaws/services/s3/transfer/internal/TransferManagerUtils.java#L119-L125
-    104857600_u64 => 4,
+    100 * MIB,
     // s3cmd uses 15mib:
     // https://github.com/s3tools/s3cmd/blob/8cb9b23992714b5ec22c1e514a50996e25aa333b/S3/Config.py#L196
-    15728640_u64 => 5,
+    15 * MIB,
     // Some other options that a user might enter:
-    // 10 mib
-    10485760_u64 => 6,
-    // 500 mib
-    524288000_u64 => 7,
-    // 1 gib
-    1073741824_u64 => 8,
-    // 2 gib
-    2147483648_u64 => 9,
-    // 5 gib
-    5368709120_u64 => 10,
-    // 1000 mib
-    1048576000_u64 => 11,
-    // 2000 mib
-    2097152000_u64 => 12,
-    // 5000 mib
-    5242880000_u64 => 13,
-    // 1 gb
-    1000000000_u64 => 14,
-    // 2 gb
-    2000000000_u64 => 15,
-    // 5 gb
-    5000000000_u64 => 16,
-};
+    10 * MIB,
+    20 * MIB,
+    200 * MIB,
+    500 * MIB,
+    GIB,
+    2 * GIB,
+    5 * GIB,
+    1000 * MIB,
+    2000 * MIB,
+    5000 * MIB,
+    GB,
+    2 * GB,
+    5 * GB,
+];
+
+/// Find the part size position in `PREFERRED_PART_SIZE`.
+pub const fn part_size_position(part_size: u64) -> Option<usize> {
+    let position = match part_size {
+        s if s == const { PREFERRED_PART_SIZES[0] } => 1,
+        s if s == const { PREFERRED_PART_SIZES[1] } => 2,
+        s if s == const { PREFERRED_PART_SIZES[2] } => 3,
+        s if s == const { PREFERRED_PART_SIZES[3] } => 4,
+        s if s == const { PREFERRED_PART_SIZES[4] } => 5,
+        s if s == const { PREFERRED_PART_SIZES[5] } => 6,
+        s if s == const { PREFERRED_PART_SIZES[6] } => 7,
+        s if s == const { PREFERRED_PART_SIZES[7] } => 8,
+        s if s == const { PREFERRED_PART_SIZES[8] } => 9,
+        s if s == const { PREFERRED_PART_SIZES[9] } => 10,
+        s if s == const { PREFERRED_PART_SIZES[10] } => 11,
+        s if s == const { PREFERRED_PART_SIZES[11] } => 12,
+        s if s == const { PREFERRED_PART_SIZES[12] } => 13,
+        s if s == const { PREFERRED_PART_SIZES[13] } => 14,
+        s if s == const { PREFERRED_PART_SIZES[14] } => 15,
+        s if s == const { PREFERRED_PART_SIZES[15] } => 16,
+        s if s == const { PREFERRED_PART_SIZES[16] } => 17,
+        s if s == const { PREFERRED_PART_SIZES[17] } => 18,
+        s if s == const { PREFERRED_PART_SIZES[18] } => 19,
+        _ => return None,
+    };
+
+    Some(position)
+}
 
 /// Calculate checksums using an AWS ETag style.
 #[derive(Debug, Clone)]
@@ -99,8 +124,8 @@ impl Ord for AWSETagCtx {
 
         // If there is only one part size, use the preferred part size ordering
         if parts.len() == 1 && other_parts.len() == 1 {
-            let pos = PART_SIZE_ORDERING.get(&parts[0]);
-            let pos_other = PART_SIZE_ORDERING.get(&other_parts[0]);
+            let pos = part_size_position(parts[0]);
+            let pos_other = part_size_position(other_parts[0]);
 
             if let (Some(pos), Some(pos_other)) = (pos, pos_other) {
                 return (pos, &self.ctx).cmp(&(pos_other, &other.ctx));

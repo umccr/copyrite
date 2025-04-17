@@ -1,7 +1,7 @@
 //! The copy command task implementation.
 //!
 
-use crate::checksum::aws_etag::PART_SIZE_ORDERING;
+use crate::checksum::aws_etag::PREFERRED_PART_SIZES;
 use crate::checksum::file::SumsFile;
 use crate::checksum::Ctx;
 use crate::error::Error::CopyError;
@@ -284,12 +284,12 @@ impl CopyTaskBuilder {
         };
         // Use multipart if the size reaches the threshold.
         if size > threshold {
-            let part_size = PART_SIZE_ORDERING.keys().copied().find(|part_size| {
-                Self::is_multipart(size, *part_size, max_parts, max_part_size, min_part_size)
+            let part_size = PREFERRED_PART_SIZES.iter().find(|part_size| {
+                Self::is_multipart(size, **part_size, max_parts, max_part_size, min_part_size)
             });
 
             return if let Some(part_size) = part_size {
-                Ok(CopySettings::new(Some(part_size), additional_ctx, size))
+                Ok(CopySettings::new(Some(*part_size), additional_ctx, size))
             } else {
                 Err(err())
             };
