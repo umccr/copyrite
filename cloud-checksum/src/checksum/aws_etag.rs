@@ -71,30 +71,15 @@ pub const PREFERRED_PART_SIZES: &[u64] = &[
 
 /// Find the part size position in `PREFERRED_PART_SIZE`.
 pub const fn part_size_position(part_size: u64) -> Option<usize> {
-    let position = match part_size {
-        s if s == const { PREFERRED_PART_SIZES[0] } => 1,
-        s if s == const { PREFERRED_PART_SIZES[1] } => 2,
-        s if s == const { PREFERRED_PART_SIZES[2] } => 3,
-        s if s == const { PREFERRED_PART_SIZES[3] } => 4,
-        s if s == const { PREFERRED_PART_SIZES[4] } => 5,
-        s if s == const { PREFERRED_PART_SIZES[5] } => 6,
-        s if s == const { PREFERRED_PART_SIZES[6] } => 7,
-        s if s == const { PREFERRED_PART_SIZES[7] } => 8,
-        s if s == const { PREFERRED_PART_SIZES[8] } => 9,
-        s if s == const { PREFERRED_PART_SIZES[9] } => 10,
-        s if s == const { PREFERRED_PART_SIZES[10] } => 11,
-        s if s == const { PREFERRED_PART_SIZES[11] } => 12,
-        s if s == const { PREFERRED_PART_SIZES[12] } => 13,
-        s if s == const { PREFERRED_PART_SIZES[13] } => 14,
-        s if s == const { PREFERRED_PART_SIZES[14] } => 15,
-        s if s == const { PREFERRED_PART_SIZES[15] } => 16,
-        s if s == const { PREFERRED_PART_SIZES[16] } => 17,
-        s if s == const { PREFERRED_PART_SIZES[17] } => 18,
-        s if s == const { PREFERRED_PART_SIZES[18] } => 19,
-        _ => return None,
-    };
+    macro_rules! get_position {
+        { $($index:expr),* } => {
+            $(if part_size == PREFERRED_PART_SIZES[$index] { return Some($index + 1) })*
+        }
+    }
 
-    Some(position)
+    get_position!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18);
+
+    None
 }
 
 /// Calculate checksums using an AWS ETag style.
