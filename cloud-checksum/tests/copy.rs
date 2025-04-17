@@ -201,7 +201,7 @@ fn assert_head_multipart(head: HeadObjectOutput) {
         head.e_tag,
         Some("\"ec1e29805585d04a93eb8cf464b68c43-2\"".to_string())
     );
-    assert_eq!(head.checksum_crc32, Some("H/gGmw==-2".to_string()));
+    assert_eq!(head.checksum_crc64_nvme, Some("yM/EwMxFxsE=".to_string()));
 }
 
 fn assert_head_single_part(head: HeadObjectOutput) {
@@ -209,7 +209,7 @@ fn assert_head_single_part(head: HeadObjectOutput) {
         head.e_tag,
         Some("\"617808065bb1a8be2755f9be0c0ac769\"".to_string())
     );
-    assert_eq!(head.checksum_crc32, Some("URA4jQ==".to_string()));
+    assert_eq!(head.checksum_crc64_nvme, Some("yM/EwMxFxsE=".to_string()));
 }
 
 async fn execute_command(commands: &[&str]) {

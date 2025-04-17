@@ -13,12 +13,15 @@ use crate::io::Provider;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::get_object_attributes::GetObjectAttributesOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
-use aws_sdk_s3::types::{ChecksumMode, ChecksumType, ObjectAttributes, ObjectPart};
+use aws_sdk_s3::types::{
+    ChecksumAlgorithm, ChecksumMode, ChecksumType, ObjectAttributes, ObjectPart,
+};
 use aws_sdk_s3::Client;
 use aws_smithy_types::byte_stream::ByteStream;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
 
@@ -192,6 +195,9 @@ impl S3 {
             StandardCtx::SHA256(_) => attributes.checksum().and_then(|c| c.checksum_sha256()),
             StandardCtx::CRC32(_, _) => attributes.checksum().and_then(|c| c.checksum_crc32()),
             StandardCtx::CRC32C(_, _) => attributes.checksum().and_then(|c| c.checksum_crc32_c()),
+            StandardCtx::CRC64NVME(_, _) => {
+                attributes.checksum().and_then(|c| c.checksum_crc64_nvme())
+            }
             _ => None,
         };
 
@@ -206,6 +212,7 @@ impl S3 {
             StandardCtx::SHA256(_) => part.checksum_sha256(),
             StandardCtx::CRC32(_, _) => part.checksum_crc32(),
             StandardCtx::CRC32C(_, _) => part.checksum_crc32_c(),
+            StandardCtx::CRC64NVME(_, _) => part.checksum_crc64_nvme(),
             // There are no part checksums for `ETag`s.
             _ => None,
         };
@@ -281,14 +288,7 @@ impl S3 {
             let attributes = self.get_object_attributes().await?;
 
             let file_size = attributes.object_size().map(u64::try_from).transpose()?;
-            let total_parts = attributes
-                .object_parts()
-                .and_then(|parts| parts.total_parts_count)
-                .map(u64::try_from)
-                .transpose()?;
-            let checksum_type = attributes
-                .checksum()
-                .and_then(|c| c.checksum_type().cloned());
+            let (total_parts, checksum_type) = Self::parse_parts_and_type(sum.as_str())?;
 
             (file_size, total_parts, checksum_type)
         };
@@ -308,7 +308,7 @@ impl S3 {
         // Create the AWS context with the available information. This can be a composite checksum
         // with a part size, or a regular context otherwise.
         let ctx = match (total_parts, checksum_type) {
-            (Some(total_parts), Some(ChecksumType::Composite) | None) => {
+            (Some(total_parts), ChecksumType::Composite) => {
                 // Get the part mode from the individual part sizes. This will be used to format
                 // the output.
                 let part_mode = if let Some(ref parts) = parts {
@@ -365,6 +365,8 @@ impl S3 {
             .await?;
         self.add_checksum(&mut sums_file, StandardCtx::sha256())
             .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::crc64nvme())
+            .await?;
 
         if sums_file.checksums.is_empty() {
             return Err(AwsError(
@@ -373,6 +375,19 @@ impl S3 {
         }
 
         Ok(sums_file)
+    }
+
+    /// Parse the number of parts and the checksum type from a string.
+    pub fn parse_parts_and_type(s: &str) -> Result<(Option<u64>, ChecksumType)> {
+        let split = s.rsplit_once("-");
+        if let Some((_, parts)) = split {
+            let parts = u64::from_str(parts).map_err(|err| {
+                ParseError(format!("failed to parse parts from checksum: {}", err))
+            })?;
+            Ok((Some(parts), ChecksumType::Composite))
+        } else {
+            Ok((None, ChecksumType::FullObject))
+        }
     }
 
     /// Get the inner values not including the S3 client.
@@ -409,6 +424,7 @@ impl S3 {
         let key = SumsFile::format_sums_file(&self.key);
         self.client
             .put_object()
+            .checksum_algorithm(ChecksumAlgorithm::Crc64Nvme)
             .bucket(&self.bucket)
             .key(&key)
             .body(ByteStream::from(sums_file.to_json_string()?.into_bytes()))
@@ -461,8 +477,8 @@ pub(crate) mod test {
     const EXPECTED_MD5_SUM_5: &str = "0798905b42c575d43e921be42e126a26-5";
     const EXPECTED_MD5_SUM_4: &str = "75652bd9b9c3652b9f43e7663b3f14b6-4";
 
-    const EXPECTED_SHA256_SUM_5: &str = "i+AmvKnN0bTeoChGodtn0v+gJ5Srd1u43mrWaouheo4="; // pragma: allowlist secret
-    const EXPECTED_SHA256_SUM_4: &str = "Wb7wV/0P9hRl2hTZ7Ee8eD7SlDUBwxJywUDIPV0W8Gw="; // pragma: allowlist secret
+    const EXPECTED_SHA256_SUM_5: &str = "i+AmvKnN0bTeoChGodtn0v+gJ5Srd1u43mrWaouheo4=-5"; // pragma: allowlist secret
+    const EXPECTED_SHA256_SUM_4: &str = "Wb7wV/0P9hRl2hTZ7Ee8eD7SlDUBwxJywUDIPV0W8Gw=-4"; // pragma: allowlist secret
 
     const EXPECTED_SHA256_PART_1: &str = "qGw2Bcs0UvgbO0gUoljNQFAWen5xWqwi2RNIEvHfDRc="; // pragma: allowlist secret
     const EXPECTED_SHA256_PART_2: &str = "XLJehuPqO2ZOF80bcsOwMfRUp1Sy8Pue4FNQB+BaDpU="; // pragma: allowlist secret

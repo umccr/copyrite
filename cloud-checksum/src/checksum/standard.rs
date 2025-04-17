@@ -69,7 +69,7 @@ impl Hash for StandardCtx {
 
 impl Default for StandardCtx {
     fn default() -> Self {
-        Self::crc32()
+        Self::crc64nvme()
     }
 }
 
@@ -89,6 +89,7 @@ impl FromStr for StandardCtx {
             Checksum::SHA256 => Self::sha256(),
             Checksum::CRC32 => Self::crc32(),
             Checksum::CRC32C => Self::crc32c(),
+            Checksum::CRC64NVME => Self::crc64nvme(),
             _ => return Err(ParseError("unsupported checksum algorithm".to_string())),
         };
         Ok(ctx)
@@ -171,6 +172,7 @@ impl StandardCtx {
             let ctx = match Checksum::from_str(s)? {
                 Checksum::CRC32 => Self::crc32().with_endianness(Endianness::LittleEndian),
                 Checksum::CRC32C => Self::crc32c().with_endianness(Endianness::LittleEndian),
+                Checksum::CRC64NVME => Self::crc64nvme().with_endianness(Endianness::LittleEndian),
                 _ => return Err(ParseError("invalid suffix -le for checksum".to_string())),
             };
             Ok(Some(ctx))
@@ -178,6 +180,7 @@ impl StandardCtx {
             let ctx = match Checksum::from_str(s)? {
                 Checksum::CRC32 => Self::crc32(),
                 Checksum::CRC32C => Self::crc32c(),
+                Checksum::CRC64NVME => Self::crc64nvme(),
                 _ => return Err(ParseError("invalid suffix -be for checksum".to_string())),
             };
             Ok(Some(ctx))
@@ -191,6 +194,7 @@ impl StandardCtx {
         match self {
             Self::CRC32(ctx, _) => Self::CRC32(ctx, endianness),
             Self::CRC32C(ctx, _) => Self::CRC32C(ctx, endianness),
+            Self::CRC64NVME(ctx, _) => Self::CRC64NVME(ctx, endianness),
             checksum => checksum,
         }
     }
@@ -259,9 +263,9 @@ impl StandardCtx {
     /// Extract the endianness if this is a CRC variant.
     pub fn endianness(&self) -> Option<Endianness> {
         match self {
-            StandardCtx::CRC32(_, endianness) | StandardCtx::CRC32C(_, endianness) => {
-                Some(*endianness)
-            }
+            StandardCtx::CRC32(_, endianness)
+            | StandardCtx::CRC32C(_, endianness)
+            | StandardCtx::CRC64NVME(_, endianness) => Some(*endianness),
             _ => None,
         }
     }

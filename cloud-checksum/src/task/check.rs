@@ -384,17 +384,17 @@ pub(crate) mod test {
                 SumsFile::new(
                     Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
-                        ("md5".parse()?, Checksum::new("123".to_string()),),
-                        ("sha1".parse()?, Checksum::new("456".to_string()),),
-                        ("sha256".parse()?, Checksum::new("789".to_string()),)
+                        ("sha256".parse()?, Checksum::new("abc".to_string()),),
+                        ("crc32".parse()?, Checksum::new("efg".to_string()),),
+                        ("crc32c".parse()?, Checksum::new("hij".to_string()),)
                     ])
                 ),
                 SumsFile::new(
                     Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
-                        ("sha256".parse()?, Checksum::new("abc".to_string()),),
-                        ("crc32".parse()?, Checksum::new("efg".to_string()),),
-                        ("crc32c".parse()?, Checksum::new("hij".to_string()),)
+                        ("md5".parse()?, Checksum::new("123".to_string()),),
+                        ("sha1".parse()?, Checksum::new("456".to_string()),),
+                        ("sha256".parse()?, Checksum::new("789".to_string()),)
                     ])
                 )
             ]
@@ -422,18 +422,18 @@ pub(crate) mod test {
                 SumsFile::new(
                     Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
-                        ("md5".parse()?, Default::default(),),
-                        ("sha1".parse()?, Default::default(),),
-                        ("sha256".parse()?, Default::default(),)
+                        ("crc32".parse()?, Default::default(),),
+                        ("crc32c".parse()?, Default::default(),)
                     ])
                 ),
                 SumsFile::new(
                     Some(TEST_FILE_SIZE),
                     BTreeMap::from_iter(vec![
-                        ("crc32".parse()?, Default::default(),),
-                        ("crc32c".parse()?, Default::default(),)
+                        ("md5".parse()?, Default::default(),),
+                        ("sha1".parse()?, Default::default(),),
+                        ("sha256".parse()?, Default::default(),)
                     ])
-                )
+                ),
             ]
         );
 

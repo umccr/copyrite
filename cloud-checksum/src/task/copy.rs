@@ -503,17 +503,15 @@ impl CopyTask {
         }
 
         // Complete the upload
-        download_fn(
-            MultiPartOptions {
-                part_number: None,
-                start,
-                end,
-                upload_id: upload_id.clone(),
-                parts: parts.clone(),
-            },
-            self.state.clone(),
-        )
-        .await?;
+        let options = MultiPartOptions {
+            part_number: None,
+            start,
+            end,
+            upload_id: upload_id.clone(),
+            parts: parts.clone(),
+        };
+        let result = download_fn(options.clone(), self.state.clone()).await?;
+        upload_fn(result, options, self.state.clone()).await?;
 
         Ok(self.state.size())
     }
