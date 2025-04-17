@@ -9,7 +9,7 @@ use crc32c::crc32c_append;
 use md5::Digest;
 use std::cmp::Ordering;
 use std::fmt;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::mem::discriminant;
 use std::str::FromStr;
@@ -17,10 +17,9 @@ use std::sync::Arc;
 
 /// The checksum calculator. This also defines the ordering of which checksums are preferred
 /// for generating/copying data.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum StandardCtx {
-    // Note, options remove a clone later on, but it might be
-    // better to Box the state for clarity.
+    CRC64NVME(Option<crc64fast_nvme::Digest>, Endianness),
     /// Calculate a CRC32C.
     CRC32C(u32, Endianness),
     /// Calculate a CRC32.
@@ -33,6 +32,12 @@ pub enum StandardCtx {
     SHA256(Option<sha2::Sha256>),
     /// Calculate the QuickXor checksum.
     QuickXor,
+}
+
+impl Debug for StandardCtx {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self)
+    }
 }
 
 impl Ord for StandardCtx {
@@ -64,7 +69,7 @@ impl Hash for StandardCtx {
 
 impl Default for StandardCtx {
     fn default() -> Self {
-        Self::crc32()
+        Self::crc64nvme()
     }
 }
 
@@ -84,6 +89,7 @@ impl FromStr for StandardCtx {
             Checksum::SHA256 => Self::sha256(),
             Checksum::CRC32 => Self::crc32(),
             Checksum::CRC32C => Self::crc32c(),
+            Checksum::CRC64NVME => Self::crc64nvme(),
             _ => return Err(ParseError("unsupported checksum algorithm".to_string())),
         };
         Ok(ctx)
@@ -93,6 +99,7 @@ impl FromStr for StandardCtx {
 impl From<&StandardCtx> for Checksum {
     fn from(checksum: &StandardCtx) -> Self {
         match checksum {
+            StandardCtx::CRC64NVME(_, _) => Self::CRC64NVME,
             StandardCtx::MD5(_) => Self::MD5,
             StandardCtx::SHA1(_) => Self::SHA1,
             StandardCtx::SHA256(_) => Self::SHA256,
@@ -117,6 +124,10 @@ impl Display for StandardCtx {
             StandardCtx::CRC32C(_, endianness) => match endianness {
                 Endianness::LittleEndian => write!(f, "crc32c-{}", endianness),
                 Endianness::BigEndian => write!(f, "crc32c"),
+            },
+            StandardCtx::CRC64NVME(_, endianness) => match endianness {
+                Endianness::LittleEndian => write!(f, "crc64nvme-{}", endianness),
+                Endianness::BigEndian => write!(f, "crc64nvme"),
             },
             StandardCtx::QuickXor => todo!(),
         }
@@ -149,6 +160,11 @@ impl StandardCtx {
         Self::CRC32C(0, Endianness::BigEndian)
     }
 
+    /// Create the CRC64NVME variant.
+    pub fn crc64nvme() -> Self {
+        Self::CRC64NVME(Some(crc64fast_nvme::Digest::new()), Endianness::BigEndian)
+    }
+
     /// Parse into a `ChecksumCtx` for values that use endianness. Uses an -le suffix for
     /// little-endian and -be for big-endian.
     pub fn parse_endianness(s: &str) -> Result<Option<Self>> {
@@ -156,6 +172,7 @@ impl StandardCtx {
             let ctx = match Checksum::from_str(s)? {
                 Checksum::CRC32 => Self::crc32().with_endianness(Endianness::LittleEndian),
                 Checksum::CRC32C => Self::crc32c().with_endianness(Endianness::LittleEndian),
+                Checksum::CRC64NVME => Self::crc64nvme().with_endianness(Endianness::LittleEndian),
                 _ => return Err(ParseError("invalid suffix -le for checksum".to_string())),
             };
             Ok(Some(ctx))
@@ -163,6 +180,7 @@ impl StandardCtx {
             let ctx = match Checksum::from_str(s)? {
                 Checksum::CRC32 => Self::crc32(),
                 Checksum::CRC32C => Self::crc32c(),
+                Checksum::CRC64NVME => Self::crc64nvme(),
                 _ => return Err(ParseError("invalid suffix -be for checksum".to_string())),
             };
             Ok(Some(ctx))
@@ -176,6 +194,7 @@ impl StandardCtx {
         match self {
             Self::CRC32(ctx, _) => Self::CRC32(ctx, endianness),
             Self::CRC32C(ctx, _) => Self::CRC32C(ctx, endianness),
+            Self::CRC64NVME(ctx, _) => Self::CRC64NVME(ctx, endianness),
             checksum => checksum,
         }
     }
@@ -188,6 +207,7 @@ impl StandardCtx {
             StandardCtx::SHA256(Some(ctx)) => ctx.update(data),
             StandardCtx::CRC32(Some(ctx), _) => ctx.update(&data),
             StandardCtx::CRC32C(ctx, _) => *ctx = crc32c_append(*ctx, &data),
+            StandardCtx::CRC64NVME(Some(ctx), _) => ctx.write(&data),
             StandardCtx::QuickXor => todo!(),
             _ => panic!("cannot call update with empty context"),
         };
@@ -212,6 +232,10 @@ impl StandardCtx {
                 Endianness::LittleEndian => ctx.to_le_bytes().to_vec(),
                 Endianness::BigEndian => ctx.to_be_bytes().to_vec(),
             },
+            StandardCtx::CRC64NVME(ctx, endianness) => match endianness {
+                Endianness::LittleEndian => ctx.take().expect(msg).finish().to_le_bytes().to_vec(),
+                Endianness::BigEndian => ctx.take().expect(msg).finish().to_be_bytes().to_vec(),
+            },
             StandardCtx::QuickXor => todo!(),
         };
 
@@ -226,6 +250,7 @@ impl StandardCtx {
             StandardCtx::SHA256(_) => Self::sha256(),
             StandardCtx::CRC32(_, endianness) => Self::crc32().with_endianness(*endianness),
             StandardCtx::CRC32C(_, endianness) => Self::crc32c().with_endianness(*endianness),
+            StandardCtx::CRC64NVME(_, endianness) => Self::crc64nvme().with_endianness(*endianness),
             StandardCtx::QuickXor => todo!(),
         }
     }
@@ -238,9 +263,9 @@ impl StandardCtx {
     /// Extract the endianness if this is a CRC variant.
     pub fn endianness(&self) -> Option<Endianness> {
         match self {
-            StandardCtx::CRC32(_, endianness) | StandardCtx::CRC32C(_, endianness) => {
-                Some(*endianness)
-            }
+            StandardCtx::CRC32(_, endianness)
+            | StandardCtx::CRC32C(_, endianness)
+            | StandardCtx::CRC64NVME(_, endianness) => Some(*endianness),
             _ => None,
         }
     }
@@ -248,12 +273,13 @@ impl StandardCtx {
     /// Get the numeric value of the enum.
     pub fn to_u8(&self) -> u8 {
         match self {
-            StandardCtx::MD5(_) => 0,
-            StandardCtx::SHA1(_) => 1,
-            StandardCtx::SHA256(_) => 2,
+            StandardCtx::CRC64NVME(_, _) => 1,
+            StandardCtx::CRC32C(_, _) => 2,
             StandardCtx::CRC32(_, _) => 3,
-            StandardCtx::CRC32C(_, _) => 4,
-            StandardCtx::QuickXor => 5,
+            StandardCtx::MD5(_) => 4,
+            StandardCtx::SHA1(_) => 5,
+            StandardCtx::SHA256(_) => 6,
+            StandardCtx::QuickXor => 7,
         }
     }
 

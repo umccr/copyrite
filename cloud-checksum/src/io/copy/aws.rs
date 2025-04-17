@@ -567,7 +567,6 @@ impl S3 {
                 .body(ByteStream::from(buf))
                 .send()
                 .await?;
-
             Ok((part, part_number, upload_id).into())
         } else {
             self.complete_multipart_upload(

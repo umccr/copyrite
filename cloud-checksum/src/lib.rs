@@ -255,6 +255,8 @@ pub enum Checksum {
     CRC32,
     /// Calculate a CRC32C.
     CRC32C,
+    /// Calculate a CRC64NVME.
+    CRC64NVME,
     /// Calculate the QuickXor checksum.
     QuickXor,
 }

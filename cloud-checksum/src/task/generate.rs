@@ -389,8 +389,8 @@ pub(crate) mod test {
         assert_eq!(
             result,
             vec![SumCtxPair::new(
-                files.first().unwrap().to_string(),
-                Ctx::Regular(StandardCtx::crc32c())
+                files[2].to_string(),
+                Ctx::Regular(StandardCtx::sha256())
             )]
             .into()
         );
