@@ -14,6 +14,7 @@ use aws_sdk_s3::Client;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::Duration;
 use parse_size::parse_size;
+use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -281,7 +282,7 @@ impl MetadataCopy {
 }
 
 /// Mode to execute copy task in.
-#[derive(Debug, Clone, ValueEnum, Copy, Default)]
+#[derive(Debug, Clone, ValueEnum, Copy, Default, Deserialize, Serialize)]
 pub enum CopyMode {
     /// Always use server-side copy operations if they are available. This may still download and
     /// upload if it is not possible to server-side copy.
@@ -314,7 +315,7 @@ pub struct Copy {
     #[arg(long, env, default_value = "copy")]
     pub tag_mode: MetadataCopy,
     /// Controls how metadata is copied. By default, this will copy all metadata and fail if the
-    /// METADATA could not be copied.
+    /// metadata could not be copied.
     #[arg(long, env, default_value = "copy")]
     pub metadata_mode: MetadataCopy,
     #[arg(long, env, default_value = "server-side")]
