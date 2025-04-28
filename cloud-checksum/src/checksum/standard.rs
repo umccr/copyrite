@@ -1,10 +1,10 @@
 //! Standard checksum algorithms
 //!
 
+use crate::cli::{Checksum, Endianness};
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use crate::io::Provider;
-use crate::{Checksum, Endianness};
 use crc32c::crc32c_append;
 use md5::Digest;
 use std::cmp::Ordering;

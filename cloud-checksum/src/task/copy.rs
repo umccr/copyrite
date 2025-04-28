@@ -4,12 +4,12 @@
 use crate::checksum::aws_etag::PREFERRED_PART_SIZES;
 use crate::checksum::file::SumsFile;
 use crate::checksum::Ctx;
+use crate::cli::{CopyMode, MetadataCopy};
 use crate::error::Error::CopyError;
 use crate::error::{Error, Result};
 use crate::io::copy::{CopyResult, CopyState, MultiPartOptions, ObjectCopy, ObjectCopyBuilder};
 use crate::io::sums::ObjectSumsBuilder;
 use crate::io::Provider;
-use crate::{CopyMode, MetadataCopy};
 use aws_sdk_s3::Client;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};

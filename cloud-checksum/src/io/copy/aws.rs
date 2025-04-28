@@ -2,10 +2,10 @@
 //!
 
 use crate::checksum::file::SumsFile;
+use crate::cli::MetadataCopy;
 use crate::error::Error::{AwsError, CopyError, ParseError};
 use crate::error::{Error, Result};
 use crate::io::copy::{CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part};
-use crate::MetadataCopy;
 use aws_sdk_s3::operation::get_object_tagging::{GetObjectTaggingError, GetObjectTaggingOutput};
 use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
 use aws_sdk_s3::operation::upload_part::UploadPartOutput;
