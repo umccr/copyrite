@@ -3,7 +3,7 @@
 //!
 
 use crate::checksum::standard::StandardCtx;
-use crate::error::Error::ParseError;
+use crate::error::Error::{AwsError, ParseError};
 use crate::error::{Error, Result};
 use crate::io::Provider;
 use std::cmp::Ordering;
@@ -266,7 +266,7 @@ impl AWSETagCtx {
             // If the current byte position is greater than the part size, then split into a new
             // part checksum.
             let (data, remainder) = data.split_at(usize::try_from(
-                self.current_part_size - self.current_bytes,
+                self.current_part_size.checked_sub(self.current_bytes).ok_or_else(|| AwsError("part size too large".to_string()))?,
             )?);
 
             self.ctx.update(Arc::from(data))?;
@@ -340,9 +340,9 @@ impl AWSETagCtx {
         // Support an alias of aws-etag for md5.
         let mut s = s.replace("aws-etag", "md5-aws");
 
-        // If no part size has been specified default to 1.
+        // If no part size has been specified default to the first preferred part size.
         if s == "md5-aws" {
-            s = "md5-aws-1".to_string();
+            s = format!("md5-aws-{}b", PREFERRED_PART_SIZES[0]);
         }
 
         let mut iter = s.rsplitn(2, "-aws-");
