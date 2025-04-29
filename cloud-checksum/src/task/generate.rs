@@ -7,7 +7,7 @@ use crate::error::Error::GenerateError;
 use crate::error::{Error, Result};
 use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder, SharedReader};
-use crate::task::check::CheckObjects;
+use crate::task::check::{CheckObjects, SumsKey};
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use aws_sdk_s3::Client;
 use futures_util::future::join_all;
@@ -313,7 +313,7 @@ impl SumCtxPairs {
         let file_ctx = files
             .0
             .iter()
-            .flat_map(|(file, _)| file.checksums.keys().cloned())
+            .flat_map(|(file, _)| file.0 .0.checksums.keys().cloned())
             .fold(BTreeMap::new(), |mut map, val| {
                 // Count occurrences
                 map.entry(val).and_modify(|count| *count += 1).or_insert(1);
@@ -328,7 +328,7 @@ impl SumCtxPairs {
             let ctxs = files
                 .0
                 .into_iter()
-                .flat_map(|(file, state)| {
+                .flat_map(|(SumsKey((file, _, _)), state)| {
                     // If the sums group already contains this checksum, skip.
                     if file.checksums.contains_key(&file_ctx) {
                         return None;
@@ -382,9 +382,9 @@ pub(crate) mod test {
             .with_group_by(GroupBy::Comparability)
             .build()
             .await?;
-        let check = check.run().await?;
+        let (objects, _, _) = check.run().await?.into_inner();
 
-        let result = SumCtxPairs::from_comparable(check)?.unwrap();
+        let result = SumCtxPairs::from_comparable(objects)?.unwrap();
 
         assert_eq!(
             result,

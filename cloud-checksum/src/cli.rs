@@ -7,7 +7,8 @@ use crate::error::Error::ParseError;
 use crate::error::Result;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::{default_s3_client, Provider};
-use crate::task::check::{CheckObjects, CheckOutput, CheckTaskBuilder, GroupBy};
+use crate::stats::CheckStats;
+use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::{CopyInfo, CopyTaskBuilder};
 use crate::task::generate::{GenerateTaskBuilder, SumCtxPairs};
 use aws_sdk_s3::Client;
@@ -15,10 +16,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use humantime::Duration;
 use parse_size::parse_size;
 use serde::{Deserialize, Serialize};
+use serde_json::{to_string, to_string_pretty};
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::stdin;
 
 /// Args for the checksum-cloud CLI.
@@ -32,9 +35,12 @@ pub struct Command {
     /// The subcommands for cloud-checksum.
     #[command(subcommand)]
     pub commands: Subcommands,
-    /// Commands related to optimizing IO and CPU tasks.
+    /// Options related to optimizing IO and CPU tasks.
     #[command(flatten)]
     pub optimization: Optimization,
+    /// Options related to outputting data from the CLI.
+    #[command(flatten)]
+    pub output: Output,
 }
 
 impl Command {
@@ -80,16 +86,32 @@ impl Command {
     pub async fn execute(self) -> Result<()> {
         let client = Arc::new(default_s3_client().await?);
 
+        let pretty_json = self.output.pretty_json;
         match self.commands {
             Subcommands::Generate(generate_args) => {
                 generate_args.generate(self.optimization, client).await?;
             }
             Subcommands::Check(check_args) => {
-                check_args.check(client).await?;
+                let output = check_args.check(client).await?;
+                Self::print_stats(&output, pretty_json)?;
             }
             Subcommands::Copy(copy_args) => {
                 copy_args.copy(self.optimization, client).await?;
             }
+        }
+
+        Ok(())
+    }
+
+    /// Print output statistics
+    pub fn print_stats<T>(stats: &T, pretty_json: bool) -> Result<()>
+    where
+        T: Serialize,
+    {
+        if pretty_json {
+            println!("{}", to_string_pretty(stats)?);
+        } else {
+            println!("{}", to_string(stats)?);
         }
 
         Ok(())
@@ -169,7 +191,7 @@ impl Generate {
         } else {
             if self.missing {
                 let ctxs = Check::comparable_check(self.input.clone(), client.clone()).await?;
-                let ctxs = SumCtxPairs::from_comparable(ctxs)?;
+                let ctxs = SumCtxPairs::from_comparable(ctxs.into_inner().0)?;
                 if let Some(ctxs) = ctxs {
                     for ctx in ctxs.into_inner() {
                         let (input, ctx) = ctx.into_inner();
@@ -228,7 +250,7 @@ pub struct Check {
 
 impl Check {
     /// Perform a check for comparability on the input files.
-    pub async fn comparable_check(input: Vec<String>, client: Arc<Client>) -> Result<CheckObjects> {
+    pub async fn comparable_check(input: Vec<String>, client: Arc<Client>) -> Result<CheckTask> {
         CheckTaskBuilder::default()
             .with_input_files(input)
             .with_group_by(GroupBy::Comparability)
@@ -240,20 +262,21 @@ impl Check {
     }
 
     /// Perform the check sub command from the args.
-    pub async fn check(self, client: Arc<Client>) -> Result<CheckOutput> {
-        let files = CheckTaskBuilder::default()
+    pub async fn check(self, client: Arc<Client>) -> Result<CheckStats> {
+        let now = Instant::now();
+
+        let group_by = self.group_by;
+        let check = CheckTaskBuilder::default()
             .with_input_files(self.input)
-            .with_group_by(self.group_by)
+            .with_group_by(group_by)
             .with_update(self.update)
             .with_client(client)
             .build()
             .await?
             .run()
             .await?;
-        let output = CheckOutput::from((files, self.group_by));
 
-        println!("{}", output.to_json_string()?);
-        Ok(output)
+        Ok(CheckStats::from_task(group_by, check, now.elapsed()))
     }
 }
 
@@ -264,7 +287,7 @@ pub enum MetadataCopy {
     /// Copy all tags or metadata and fail if it could not be copied.
     Copy,
     /// Do not copy any tags or metadata.
-    Supress,
+    Suppress,
     /// Attempt to copy tags or metadata but do not fail if it could not be copied.
     BestEffort,
 }
@@ -366,7 +389,7 @@ impl Copy {
 
             // If the inputs have no checksums to begin with, we need to generate something for
             // the check, so pick the default.
-            let checksum = if ctxs.into_inner().is_empty() {
+            let checksum = if ctxs.into_inner().0 .0.is_empty() {
                 vec![Ctx::default()]
             } else {
                 vec![]
@@ -392,7 +415,7 @@ impl Copy {
             .check(client)
             .await?;
 
-            if result.groups().len() != 1 {
+            if result.groups.len() != 1 {
                 return Err(Error::CopyError(format!(
                     "Copy check failed, the files {} and {} are not identical",
                     self.source, self.destination
@@ -475,4 +498,13 @@ pub struct Optimization {
     /// by the reader before they are passed into the channel.
     #[arg(global = true, long, env, default_value_t = 1048576)]
     pub reader_chunk_size: usize,
+}
+
+/// Options related to outputting information from the CLI.
+#[derive(Args, Debug)]
+#[group(required = false)]
+pub struct Output {
+    /// Print the output statistics using indented and multi-line json rather than on a single line.
+    #[arg(global = true, long, env, default_value_t = false)]
+    pub pretty_json: bool,
 }

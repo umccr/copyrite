@@ -174,10 +174,10 @@ impl SumsFile {
     }
 
     /// Check if the sums file is the same as another according to all available checksums
-    /// in the sums file.
-    pub fn is_same(&self, other: &Self) -> bool {
+    /// in the sums file. Returns the ctx that resulted in equality if the sums are the same.
+    pub fn is_same(&self, other: &Self) -> Option<&Ctx> {
         if self.size != other.size {
-            return false;
+            return None;
         }
 
         for (key, checksum) in &self.checksums {
@@ -186,24 +186,25 @@ impl SumsFile {
                 // top level checksum encodes part information for AWS sums, there is no need to
                 // compare the part checksums.
                 if checksum == other_checksum {
-                    return true;
+                    return Some(key);
                 }
             }
         }
 
-        false
+        None
     }
 
     /// Check if the sums file is comparable to another sums file because it contains at least
-    /// one of the same checksum type.
-    pub fn comparable(&self, other: &Self) -> bool {
+    /// one of the same checksum type. Returns the ctx that resulted in comparability if the sums
+    /// are the same.
+    pub fn comparable(&self, other: &Self) -> Option<&Ctx> {
         if self.size != other.size {
-            return false;
+            return None;
         }
 
         self.checksums
             .keys()
-            .any(|key| other.checksums.contains_key(key))
+            .find(|&key| other.checksums.contains_key(key))
     }
 
     /// Set the size.
@@ -284,14 +285,14 @@ pub(crate) mod test {
         file_two
             .checksums
             .insert(aws, Checksum::new(EXPECTED_ETAG.to_string()));
-        assert!(file_one.is_same(&file_two));
+        assert!(file_one.is_same(&file_two).is_some());
 
         let mut file_two = file_one.clone();
         let mut aws: Ctx = "aws-etag-1b".parse()?;
         aws.set_file_size(Some(1));
         set_checksums(&mut file_two, aws);
 
-        assert!(!file_one.is_same(&file_two));
+        assert!(file_one.is_same(&file_two).is_none());
 
         Ok(())
     }
@@ -306,14 +307,14 @@ pub(crate) mod test {
         file_two
             .checksums
             .insert(aws, Checksum::new(expected_md5_1gib().to_string()));
-        assert!(file_one.comparable(&file_two));
+        assert!(file_one.comparable(&file_two).is_some());
 
         let mut file_two = file_one.clone();
         let mut aws: Ctx = "aws-etag-1b".parse()?;
         aws.set_file_size(Some(1));
         set_checksums(&mut file_two, aws);
 
-        assert!(!file_one.comparable(&file_two));
+        assert!(file_one.comparable(&file_two).is_none());
 
         Ok(())
     }

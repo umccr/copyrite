@@ -559,7 +559,10 @@ pub(crate) mod test {
         println!("{}", serde_json::to_string_pretty(&result).unwrap());
         println!("{}", serde_json::to_string_pretty(&expected).unwrap());
 
-        assert!(result.into_iter().zip(expected).all(|(a, b)| a.is_same(&b)));
+        assert!(result
+            .into_iter()
+            .zip(expected)
+            .all(|(a, b)| a.is_same(&b).is_some()));
     }
 
     #[tokio::test]
