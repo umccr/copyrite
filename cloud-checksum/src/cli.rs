@@ -7,7 +7,7 @@ use crate::error::Error::ParseError;
 use crate::error::Result;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::{default_s3_client, Provider};
-use crate::stats::CheckStats;
+use crate::stats::{CheckStats, GenerateFileStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::{CopyInfo, CopyTaskBuilder};
 use crate::task::generate::{GenerateTaskBuilder, SumCtxPairs};
@@ -89,7 +89,10 @@ impl Command {
         let pretty_json = self.output.pretty_json;
         match self.commands {
             Subcommands::Generate(generate_args) => {
-                generate_args.generate(self.optimization, client).await?;
+                let output = generate_args.generate(self.optimization, client).await?;
+                if let Some(output) = output {
+                    Self::print_stats(&output, pretty_json)?;
+                }
             }
             Subcommands::Check(check_args) => {
                 let output = check_args.check(client).await?;
@@ -171,7 +174,11 @@ pub struct Generate {
 
 impl Generate {
     /// Perform the generate sub command from the args.
-    pub async fn generate(self, optimization: Optimization, client: Arc<Client>) -> Result<()> {
+    pub async fn generate(
+        self,
+        optimization: Optimization,
+        client: Arc<Client>,
+    ) -> Result<Option<GenerateStats>> {
         if self.input[0] == "-" {
             let reader = ChannelReader::new(stdin(), optimization.channel_capacity);
 
@@ -185,17 +192,36 @@ impl Generate {
                 .await?
                 .run()
                 .await?
+                .into_inner()
+                .0
                 .to_json_string()?;
 
-            println!("{}", output)
+            println!("{}", output);
+
+            Ok(None)
         } else {
+            let now = Instant::now();
+            let mut check_stats = None;
+            let mut generate_stats = vec![];
+
             if self.missing {
-                let ctxs = Check::comparable_check(self.input.clone(), client.clone()).await?;
-                let ctxs = SumCtxPairs::from_comparable(ctxs.into_inner().0)?;
+                let now = Instant::now();
+                let (ctxs, group_by) =
+                    Check::comparable_check(self.input.clone(), client.clone()).await?;
+                let (objects, compared, updated) = ctxs.into_inner();
+                check_stats = Some(CheckStats::new(
+                    now.elapsed().as_secs_f64(),
+                    group_by,
+                    compared,
+                    objects.to_groups(),
+                    updated,
+                ));
+
+                let ctxs = SumCtxPairs::from_comparable(objects)?;
                 if let Some(ctxs) = ctxs {
                     for ctx in ctxs.into_inner() {
                         let (input, ctx) = ctx.into_inner();
-                        GenerateTaskBuilder::default()
+                        let task = GenerateTaskBuilder::default()
                             .with_overwrite(self.force_overwrite)
                             .with_verify(self.verify)
                             .with_input_file_name(input)
@@ -207,12 +233,14 @@ impl Generate {
                             .await?
                             .run()
                             .await?;
+
+                        generate_stats.push(GenerateFileStats::from_task(task));
                     }
                 }
             };
 
             for input in self.input {
-                GenerateTaskBuilder::default()
+                let task = GenerateTaskBuilder::default()
                     .with_overwrite(self.force_overwrite)
                     .with_verify(self.verify)
                     .with_input_file_name(input)
@@ -224,10 +252,15 @@ impl Generate {
                     .await?
                     .run()
                     .await?;
+                generate_stats.push(GenerateFileStats::from_task(task));
             }
-        }
 
-        Ok(())
+            Ok(Some(GenerateStats::new(
+                now.elapsed().as_secs_f64(),
+                generate_stats,
+                check_stats,
+            )))
+        }
     }
 }
 
@@ -250,15 +283,21 @@ pub struct Check {
 
 impl Check {
     /// Perform a check for comparability on the input files.
-    pub async fn comparable_check(input: Vec<String>, client: Arc<Client>) -> Result<CheckTask> {
-        CheckTaskBuilder::default()
-            .with_input_files(input)
-            .with_group_by(GroupBy::Comparability)
-            .with_client(client)
-            .build()
-            .await?
-            .run()
-            .await
+    pub async fn comparable_check(
+        input: Vec<String>,
+        client: Arc<Client>,
+    ) -> Result<(CheckTask, GroupBy)> {
+        Ok((
+            CheckTaskBuilder::default()
+                .with_input_files(input)
+                .with_group_by(GroupBy::Comparability)
+                .with_client(client)
+                .build()
+                .await?
+                .run()
+                .await?,
+            GroupBy::Comparability,
+        ))
     }
 
     /// Perform the check sub command from the args.
@@ -389,7 +428,7 @@ impl Copy {
 
             // If the inputs have no checksums to begin with, we need to generate something for
             // the check, so pick the default.
-            let checksum = if ctxs.into_inner().0 .0.is_empty() {
+            let checksum = if ctxs.0.into_inner().0 .0.is_empty() {
                 vec![Ctx::default()]
             } else {
                 vec![]

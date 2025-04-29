@@ -125,6 +125,9 @@ impl GenerateTaskBuilder {
             reader: Some(reader),
             write: self.write,
             object_sums: sums,
+            updated_sums: vec![],
+            output: Default::default(),
+            checksums_generated: Default::default(),
         };
 
         let task = task.add_tasks(HashSet::from_iter(self.ctxs))?;
@@ -148,6 +151,9 @@ pub struct GenerateTask {
     reader: Option<Box<dyn SharedReader + Send>>,
     write: bool,
     object_sums: Box<dyn ObjectSums + Send>,
+    updated_sums: Vec<String>,
+    output: SumsFile,
+    checksums_generated: BTreeMap<Ctx, Checksum>,
 }
 
 impl GenerateTask {
@@ -225,9 +231,10 @@ impl GenerateTask {
     }
 
     /// Runs the generate task, returning an output file.
-    pub async fn run(self) -> Result<SumsFile> {
+    pub async fn run(mut self) -> Result<Self> {
         let mut file_size = 0;
-        let checksums = join_all(self.tasks)
+        let tasks: Vec<_> = self.tasks.drain(..).collect();
+        let checksums = join_all(tasks)
             .await
             .into_iter()
             .map(|val| {
@@ -249,10 +256,10 @@ impl GenerateTask {
             .into_iter()
             .flatten();
 
-        let checksums = BTreeMap::from_iter(checksums);
-        let new_file = SumsFile::new(Some(file_size), checksums);
+        self.checksums_generated = BTreeMap::from_iter(checksums);
+        let new_file = SumsFile::new(Some(file_size), self.checksums_generated.clone());
 
-        let output = match self.existing_output {
+        let output = match self.existing_output.clone() {
             Some(file) if !matches!(self.overwrite, OverwriteMode::Overwrite) => {
                 file.merge(new_file)?
             }
@@ -266,10 +273,34 @@ impl GenerateTask {
         }
 
         if self.write {
-            self.object_sums.write_sums_file(&output).await?;
+            let current = self.object_sums.sums_file().await?;
+
+            if current.as_ref() != Some(&output) {
+                self.object_sums.write_sums_file(&output).await?;
+                self.updated_sums.push(self.object_sums.location());
+            }
         }
 
-        Ok(output)
+        self.output = output;
+
+        Ok(self)
+    }
+
+    /// Get the inner values.
+    pub fn into_inner(
+        self,
+    ) -> (
+        SumsFile,
+        Box<dyn ObjectSums + Send>,
+        Vec<String>,
+        BTreeMap<Ctx, Checksum>,
+    ) {
+        (
+            self.output,
+            self.object_sums,
+            self.updated_sums,
+            self.checksums_generated,
+        )
     }
 }
 
@@ -472,7 +503,9 @@ pub(crate) mod test {
             .build()
             .await?
             .run()
-            .await?)
+            .await?
+            .into_inner()
+            .0)
     }
 
     async fn test_generate(

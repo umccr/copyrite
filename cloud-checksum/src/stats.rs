@@ -5,6 +5,7 @@ use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
 use crate::cli::CopyMode;
 use crate::task::check::{CheckTask, GroupBy};
+use crate::task::generate::GenerateTask;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -12,12 +13,16 @@ use std::time::Duration;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GenerateStats {
     pub(crate) elapsed_seconds: f64,
-    pub(crate) stats: GenerateFileStats,
-    pub(crate) check_stats: CheckStats,
+    pub(crate) stats: Vec<GenerateFileStats>,
+    pub(crate) check_stats: Option<CheckStats>,
 }
 
 impl GenerateStats {
-    pub fn new(elapsed_seconds: f64, stats: GenerateFileStats, check_stats: CheckStats) -> Self {
+    pub fn new(
+        elapsed_seconds: f64,
+        stats: Vec<GenerateFileStats>,
+        check_stats: Option<CheckStats>,
+    ) -> Self {
         Self {
             elapsed_seconds,
             stats,
@@ -38,6 +43,12 @@ impl GenerateFileStats {
             input,
             checksums_generated,
         }
+    }
+
+    pub fn from_task(task: GenerateTask) -> Self {
+        let (_, object, _, checksums_generated) = task.into_inner();
+
+        Self::new(object.location(), checksums_generated)
     }
 }
 
@@ -70,7 +81,7 @@ impl CheckStats {
     pub fn from_task(group_by: GroupBy, task: CheckTask, elapsed: Duration) -> Self {
         let (objects, compared, updated) = task.into_inner();
 
-        CheckStats::new(
+        Self::new(
             elapsed.as_secs_f64(),
             group_by,
             compared,
