@@ -235,7 +235,7 @@ impl Generate {
 #[derive(Debug, Args)]
 pub struct Check {
     /// The input file to check a checksum. Requires at least two files.
-    #[arg(value_delimiter = ',', required = true, num_args = 2)]
+    #[arg(value_delimiter = ',', required = true, num_args = 2..)]
     pub input: Vec<String>,
     /// Update existing sums files when running the `check` subcommand. This will add checksums to
     /// any sums files that are confirmed to be identical through other sums files.
@@ -505,6 +505,6 @@ pub struct Optimization {
 #[group(required = false)]
 pub struct Output {
     /// Print the output statistics using indented and multi-line json rather than on a single line.
-    #[arg(global = true, long, env, default_value_t = false)]
+    #[arg(global = true, long, env)]
     pub pretty_json: bool,
 }

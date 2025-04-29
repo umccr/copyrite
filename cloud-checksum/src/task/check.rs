@@ -76,7 +76,7 @@ impl CheckTaskBuilder {
                     .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
 
                 Ok((
-                    SumsKey((existing, false, sums.location())),
+                    SumsKey((existing, sums.location())),
                     BTreeSet::from_iter(vec![State(sums)]),
                 ))
             }
@@ -143,7 +143,7 @@ impl Ord for State {
 
 /// Tracks information related to the sums file as it is being processed.
 #[derive(Default, Debug)]
-pub struct SumsKey(pub(crate) (SumsFile, bool, String));
+pub struct SumsKey(pub(crate) (SumsFile, String));
 
 impl Hash for SumsKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -232,11 +232,11 @@ impl CheckTask {
             let mut reprocess = Vec::with_capacity(objects.len());
 
             // Process a single sums file at a time.
-            'outer: while let Some((SumsKey((a, a_updated, a_location)), mut a_locations)) =
+            'outer: while let Some((SumsKey((a, a_location)), mut a_locations)) =
                 objects.pop()
             {
                 // Check to see if it can be merged with another sums file in the list.
-                for (SumsKey((b, b_updated, b_location)), b_locations) in objects.iter_mut() {
+                for (SumsKey((b, b_location)), b_locations) in objects.iter_mut() {
                     // If it can be merged with another file, do the merge and add it back in for
                     // the next loop.
                     if let Some(ctx) = compare(&a, b) {
@@ -248,19 +248,14 @@ impl CheckTask {
 
                         b_locations.append(&mut a_locations);
 
-                        let prev = Self::hash(&b);
                         b.merge_mut(a);
-                        let curr = Self::hash(&b);
-
-                        // Track whether the merge resulted in an update to the existing sums file.
-                        *b_updated = prev != curr;
 
                         continue 'outer;
                     }
                 }
 
                 // If it could not be merged, add it back into the list for re-processing.
-                reprocess.push((SumsKey((a, a_updated, a_location)), a_locations));
+                reprocess.push((SumsKey((a, a_location)), a_locations));
             }
 
             self.objects = CheckObjects(BTreeMap::from_iter(reprocess));
@@ -311,11 +306,14 @@ impl CheckTask {
 
         let mut updated_sums = vec![];
         if update {
-            for (SumsKey((file, updated, _)), locations) in &result.objects.0 {
+            for (SumsKey((file, _)), locations) in &result.objects.0 {
                 for location in locations {
-                    if *updated {
-                        location.0.write_sums_file(file).await?;
-                        updated_sums.push(location.0.location());
+                    let mut location = location.0.clone();
+                    let current = location.sums_file().await?;
+                    
+                    if current.as_ref() != Some(file) {
+                        location.write_sums_file(file).await?;
+                        updated_sums.push(location.location());
                     }
                 }
             }

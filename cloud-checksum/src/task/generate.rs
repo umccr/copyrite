@@ -328,7 +328,7 @@ impl SumCtxPairs {
             let ctxs = files
                 .0
                 .into_iter()
-                .flat_map(|(SumsKey((file, _, _)), state)| {
+                .flat_map(|(SumsKey((file, _)), state)| {
                     // If the sums group already contains this checksum, skip.
                     if file.checksums.contains_key(&file_ctx) {
                         return None;
