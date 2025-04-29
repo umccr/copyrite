@@ -1,7 +1,7 @@
 //! Performs the check task to determine if files are identical from .sums files.
 //!
 
-use crate::checksum::file::SumsFile;
+use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
 use crate::error::{Error, Result};
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder};
@@ -217,7 +217,7 @@ impl CheckTask {
     /// Groups sums files based on a comparison function.
     async fn merge_fn<F>(mut self, compare: F) -> Result<Self>
     where
-        for<'a> F: Fn(&'a SumsFile, &'a SumsFile) -> Option<&'a Ctx>,
+        for<'a> F: Fn(&'a SumsFile, &'a SumsFile) -> Option<(&'a Ctx, &'a Checksum)>,
     {
         // This might be more efficient using graph algorithms to find a set of connected
         // graphs based on the equality of the sums files.
@@ -232,18 +232,15 @@ impl CheckTask {
             let mut reprocess = Vec::with_capacity(objects.len());
 
             // Process a single sums file at a time.
-            'outer: while let Some((SumsKey((a, a_location)), mut a_locations)) =
-                objects.pop()
-            {
+            'outer: while let Some((SumsKey((a, a_location)), mut a_locations)) = objects.pop() {
                 // Check to see if it can be merged with another sums file in the list.
                 for (SumsKey((b, b_location)), b_locations) in objects.iter_mut() {
                     // If it can be merged with another file, do the merge and add it back in for
                     // the next loop.
-                    if let Some(ctx) = compare(&a, b) {
+                    if let Some((ctx, checksum)) = compare(&a, b) {
                         self.compared_directly.push(CheckComparison::new(
-                            a_location,
-                            b_location.to_string(),
-                            ctx.clone(),
+                            vec![a_location, b_location.to_string()],
+                            (ctx.clone(), checksum.clone()),
                         ));
 
                         b_locations.append(&mut a_locations);
@@ -310,7 +307,7 @@ impl CheckTask {
                 for location in locations {
                     let mut location = location.0.clone();
                     let current = location.sums_file().await?;
-                    
+
                     if current.as_ref() != Some(file) {
                         location.write_sums_file(file).await?;
                         updated_sums.push(location.location());

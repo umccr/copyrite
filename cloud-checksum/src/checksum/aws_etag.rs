@@ -266,7 +266,9 @@ impl AWSETagCtx {
             // If the current byte position is greater than the part size, then split into a new
             // part checksum.
             let (data, remainder) = data.split_at(usize::try_from(
-                self.current_part_size.checked_sub(self.current_bytes).ok_or_else(|| AwsError("part size too large".to_string()))?,
+                self.current_part_size
+                    .checked_sub(self.current_bytes)
+                    .ok_or_else(|| AwsError("part size too large".to_string()))?,
             )?);
 
             self.ctx.update(Arc::from(data))?;

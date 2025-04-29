@@ -174,8 +174,8 @@ impl SumsFile {
     }
 
     /// Check if the sums file is the same as another according to all available checksums
-    /// in the sums file. Returns the ctx that resulted in equality if the sums are the same.
-    pub fn is_same(&self, other: &Self) -> Option<&Ctx> {
+    /// in the sums file. Returns the key value that resulted in equality if the sums are the same.
+    pub fn is_same(&self, other: &Self) -> Option<(&Ctx, &Checksum)> {
         if self.size != other.size {
             return None;
         }
@@ -186,7 +186,7 @@ impl SumsFile {
                 // top level checksum encodes part information for AWS sums, there is no need to
                 // compare the part checksums.
                 if checksum == other_checksum {
-                    return Some(key);
+                    return Some((key, checksum));
                 }
             }
         }
@@ -195,16 +195,20 @@ impl SumsFile {
     }
 
     /// Check if the sums file is comparable to another sums file because it contains at least
-    /// one of the same checksum type. Returns the ctx that resulted in comparability if the sums
-    /// are the same.
-    pub fn comparable(&self, other: &Self) -> Option<&Ctx> {
+    /// one of the same checksum type. Returns the key value that resulted in comparability if the
+    /// sums are the same.
+    pub fn comparable(&self, other: &Self) -> Option<(&Ctx, &Checksum)> {
         if self.size != other.size {
             return None;
         }
 
-        self.checksums
-            .keys()
-            .find(|&key| other.checksums.contains_key(key))
+        for (key, value) in &self.checksums {
+            if other.checksums.contains_key(key) {
+                return Some((key, value));
+            }
+        }
+
+        None
     }
 
     /// Set the size.

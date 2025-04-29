@@ -6,23 +6,39 @@ use crate::checksum::Ctx;
 use crate::cli::CopyMode;
 use crate::task::check::{CheckTask, GroupBy};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GenerateStats {
-    time_taken: Duration,
-    stats: GenerateFileStats,
-    check_stats: CheckStats,
+    pub(crate) elapsed_seconds: f64,
+    pub(crate) stats: GenerateFileStats,
+    pub(crate) check_stats: CheckStats,
+}
+
+impl GenerateStats {
+    pub fn new(elapsed_seconds: f64, stats: GenerateFileStats, check_stats: CheckStats) -> Self {
+        Self {
+            elapsed_seconds,
+            stats,
+            check_stats,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GenerateFileStats {
-    input: String,
-    sums_location: String,
-    existing_sums: SumsFile,
-    output_sums: SumsFile,
-    checksums_generated: BTreeMap<Ctx, Checksum>,
+    pub(crate) input: String,
+    pub(crate) checksums_generated: BTreeMap<Ctx, Checksum>,
+}
+
+impl GenerateFileStats {
+    pub fn new(input: String, checksums_generated: BTreeMap<Ctx, Checksum>) -> Self {
+        Self {
+            input,
+            checksums_generated,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -80,17 +96,16 @@ pub struct CopyStats {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CheckComparison {
-    left: String,
-    right: String,
-    reason: Ctx,
+    pub(crate) locations: Vec<String>,
+    #[serde(flatten)]
+    pub(crate) reason: HashMap<Ctx, Checksum>,
 }
 
 impl CheckComparison {
-    pub fn new(left: String, right: String, reason: Ctx) -> Self {
+    pub fn new(locations: Vec<String>, reason: (Ctx, Checksum)) -> Self {
         Self {
-            left,
-            right,
-            reason,
+            locations,
+            reason: HashMap::from_iter(vec![reason]),
         }
     }
 }
