@@ -7,6 +7,7 @@ use crate::error::Error;
 use crate::error::Error::ParseError;
 use crate::error::Result;
 use crate::io::sums::channel::ChannelReader;
+use crate::io::sums::ObjectSumsBuilder;
 use crate::io::{default_s3_client, Provider};
 use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateFileStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
@@ -416,6 +417,7 @@ impl Copy {
         &self,
         client: Arc<Client>,
         optimization: Optimization,
+        verify: bool,
     ) -> Result<(CheckStats, Option<GenerateStats>)> {
         let input = vec![self.source.to_string(), self.destination.to_string()];
         let (ctxs, _) = Check::comparable_check(input.clone(), client.clone()).await?;
@@ -434,7 +436,7 @@ impl Copy {
             checksum,
             missing: true,
             force_overwrite: false,
-            verify: false,
+            verify,
         }
         .generate(optimization, client.clone())
         .await?;
@@ -448,13 +450,6 @@ impl Copy {
         .check(client)
         .await?;
 
-        // if result.groups.len() != 1 {
-        //     return Err(Error::CopyError(format!(
-        //         "Copy check failed, the files {} and {} are not identical",
-        //         self.source, self.destination
-        //     )));
-        // }
-
         Ok((result, generate))
     }
 
@@ -462,26 +457,42 @@ impl Copy {
     pub async fn copy(self, optimization: Optimization, client: Arc<Client>) -> Result<CopyStats> {
         let now = Instant::now();
 
+        let mut exists = false;
         if !self.no_skip {
-            let (check_stats, generate_stats) = self
-                .copy_check(client.clone(), optimization.clone())
-                .await?;
+            // Check if it exists in the first place.
+            let file_size = ObjectSumsBuilder::default()
+                .set_client(Some(client.clone()))
+                .build(self.destination.to_string())
+                .await?
+                .file_size()
+                .await;
 
-            if check_stats.groups.len() == 1 {
-                let copy_stats = CopyStats {
-                    elapsed_seconds: now.elapsed().as_secs_f64(),
-                    source: self.source,
-                    destination: self.destination,
-                    bytes_transferred: 0,
-                    copy_mode: self.copy_mode,
-                    reason: Option::<ChecksumPair>::from(&check_stats),
-                    skipped: true,
-                    n_retries: 0,
-                    api_errors: vec![],
-                    generate_stats,
-                    check_stats: Some(check_stats),
-                };
-                return Ok(copy_stats);
+            // If it does exist and the check in the following block fails, there must be a
+            // sums mismatch.
+            exists = file_size.is_ok_and(|file_size| file_size.is_some());
+
+            if exists {
+                let (check_stats, generate_stats) = self
+                    .copy_check(client.clone(), optimization.clone(), false)
+                    .await?;
+
+                if check_stats.groups.len() == 1 {
+                    let copy_stats = CopyStats {
+                        elapsed_seconds: now.elapsed().as_secs_f64(),
+                        source: self.source,
+                        destination: self.destination,
+                        bytes_transferred: 0,
+                        copy_mode: self.copy_mode,
+                        reason: Option::<ChecksumPair>::from(&check_stats),
+                        skipped: true,
+                        sums_mismatch: false,
+                        n_retries: 0,
+                        api_errors: vec![],
+                        generate_stats,
+                        check_stats: Some(check_stats),
+                    };
+                    return Ok(copy_stats);
+                }
             }
         }
 
@@ -499,17 +510,21 @@ impl Copy {
             .run()
             .await?;
 
+        // If the file existed at the start there must be a sums mismatch.
+        let sums_mismatch = exists;
         let copy_stats = if !self.no_check {
-            let (check_stats, generate_stats) = self.copy_check(client, optimization).await?;
+            let (check_stats, generate_stats) =
+                self.copy_check(client, optimization, sums_mismatch).await?;
             CopyStats::from_task(
                 result,
                 Some(check_stats),
                 generate_stats,
                 now.elapsed(),
                 false,
+                sums_mismatch,
             )
         } else {
-            CopyStats::from_task(result, None, None, now.elapsed(), false)
+            CopyStats::from_task(result, None, None, now.elapsed(), false, sums_mismatch)
         };
 
         Ok(copy_stats)

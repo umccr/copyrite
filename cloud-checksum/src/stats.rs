@@ -194,10 +194,15 @@ pub struct CopyStats {
     /// Whether the copy was skipped because the destination already has the file with
     /// matching sums.
     pub(crate) skipped: bool,
+    /// Whether the copy occurred because the sums at the destination did not match the source sums.
+    /// This will be true if the destination file existed but the sums do not match, thus forcing
+    /// a re-copy. It will be false if the destination did not exist in the first place.
+    pub(crate) sums_mismatch: bool,
     /// The mode of the copy, either server-side or download-upload.
     pub(crate) copy_mode: CopyMode,
     /// The reason a copy was considered successful. This shows the matching checksum that
-    /// determines that the copy completed correctly.
+    /// determines that the copy completed correctly. If the copy was skipped, this shows the
+    /// matching checksum.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<ChecksumPair>,
     /// The number of retries if there was permission issues for copying metadata or tags.
@@ -221,6 +226,7 @@ impl CopyStats {
         generate_stats: Option<GenerateStats>,
         elapsed: Duration,
         skipped: bool,
+        sums_mismatch: bool,
     ) -> Self {
         Self {
             elapsed_seconds: elapsed.as_secs_f64(),
@@ -228,6 +234,7 @@ impl CopyStats {
             destination: copy_task.destination().format(),
             bytes_transferred: copy_task.bytes_transferred(),
             skipped,
+            sums_mismatch,
             copy_mode: copy_task.copy_mode(),
             reason: check_stats.as_ref().and_then(Option::<ChecksumPair>::from),
             n_retries: copy_task.n_retries(),
