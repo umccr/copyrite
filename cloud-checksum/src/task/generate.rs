@@ -125,7 +125,7 @@ impl GenerateTaskBuilder {
             reader: Some(reader),
             write: self.write,
             object_sums: sums,
-            updated_sums: vec![],
+            updated: false,
             output: Default::default(),
             checksums_generated: Default::default(),
         };
@@ -151,7 +151,7 @@ pub struct GenerateTask {
     reader: Option<Box<dyn SharedReader + Send>>,
     write: bool,
     object_sums: Box<dyn ObjectSums + Send>,
-    updated_sums: Vec<String>,
+    updated: bool,
     output: SumsFile,
     checksums_generated: BTreeMap<Ctx, Checksum>,
 }
@@ -277,7 +277,7 @@ impl GenerateTask {
 
             if current.as_ref() != Some(&output) {
                 self.object_sums.write_sums_file(&output).await?;
-                self.updated_sums.push(self.object_sums.location());
+                self.updated = true;
             }
         }
 
@@ -292,13 +292,13 @@ impl GenerateTask {
     ) -> (
         SumsFile,
         Box<dyn ObjectSums + Send>,
-        Vec<String>,
+        bool,
         BTreeMap<Ctx, Checksum>,
     ) {
         (
             self.output,
             self.object_sums,
-            self.updated_sums,
+            self.updated,
             self.checksums_generated,
         )
     }
