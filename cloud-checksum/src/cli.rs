@@ -8,7 +8,7 @@ use crate::error::Error::ParseError;
 use crate::error::Result;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::{default_s3_client, Provider};
-use crate::stats::{CheckStats, CopyStats, GenerateFileStats, GenerateStats};
+use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateFileStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::CopyTaskBuilder;
 use crate::task::generate::{GenerateTaskBuilder, SumCtxPairs};
@@ -404,12 +404,87 @@ pub struct Copy {
     /// operations will generate checksums for a check and then verify that the copy was correct.
     #[arg(long, env)]
     pub no_check: bool,
+    /// Always perform the copy and do not skip if sums match. By default, a copy is performed only
+    /// if the file is not at the destination or if the sums of the source and destination do not
+    /// match.
+    #[arg(long, env)]
+    pub no_skip: bool,
 }
 
 impl Copy {
+    pub async fn copy_check(
+        &self,
+        client: Arc<Client>,
+        optimization: Optimization,
+    ) -> Result<(CheckStats, Option<GenerateStats>)> {
+        let input = vec![self.source.to_string(), self.destination.to_string()];
+        let (ctxs, _) = Check::comparable_check(input.clone(), client.clone()).await?;
+
+        // If the inputs have no checksums to begin with, we need to generate something for
+        // the check, so pick the default.
+        let checksum = if ctxs.compared_directly().is_empty() {
+            vec![Ctx::default()]
+        } else {
+            vec![]
+        };
+
+        // First generate missing sums.
+        let (_, generate) = Generate {
+            input: input.clone(),
+            checksum,
+            missing: true,
+            force_overwrite: false,
+            verify: false,
+        }
+        .generate(optimization, client.clone())
+        .await?;
+
+        // Then perform check.
+        let result = Check {
+            input,
+            update: true,
+            group_by: GroupBy::Equality,
+        }
+        .check(client)
+        .await?;
+
+        // if result.groups.len() != 1 {
+        //     return Err(Error::CopyError(format!(
+        //         "Copy check failed, the files {} and {} are not identical",
+        //         self.source, self.destination
+        //     )));
+        // }
+
+        Ok((result, generate))
+    }
+
     /// Perform the copy sub command from the args.
     pub async fn copy(self, optimization: Optimization, client: Arc<Client>) -> Result<CopyStats> {
         let now = Instant::now();
+
+        if !self.no_skip {
+            let (check_stats, generate_stats) = self
+                .copy_check(client.clone(), optimization.clone())
+                .await?;
+
+            if check_stats.groups.len() == 1 {
+                let copy_stats = CopyStats {
+                    elapsed_seconds: now.elapsed().as_secs_f64(),
+                    source: self.source,
+                    destination: self.destination,
+                    bytes_transferred: 0,
+                    copy_mode: self.copy_mode,
+                    reason: Option::<ChecksumPair>::from(&check_stats),
+                    skipped: true,
+                    n_retries: 0,
+                    api_errors: vec![],
+                    generate_stats,
+                    check_stats: Some(check_stats),
+                };
+                return Ok(copy_stats);
+            }
+        }
+
         let result = CopyTaskBuilder::default()
             .with_source(self.source.to_string())
             .with_destination(self.destination.to_string())
@@ -424,53 +499,18 @@ impl Copy {
             .run()
             .await?;
 
-        let mut generate_stats = None;
-        let mut check_stats = None;
-        if !self.no_check {
-            let input = vec![self.source.to_string(), self.destination.to_string()];
-            let (ctxs, _) = Check::comparable_check(input.clone(), client.clone()).await?;
-
-            // If the inputs have no checksums to begin with, we need to generate something for
-            // the check, so pick the default.
-            let checksum = if ctxs.compared_directly().is_empty() {
-                vec![Ctx::default()]
-            } else {
-                vec![]
-            };
-
-            // First generate missing sums.
-            let (_, generate) = Generate {
-                input: input.clone(),
-                checksum,
-                missing: true,
-                force_overwrite: false,
-                verify: false,
-            }
-            .generate(optimization, client.clone())
-            .await?;
-
-            generate_stats = generate;
-
-            // Then perform check.
-            let result = Check {
-                input,
-                update: true,
-                group_by: GroupBy::Equality,
-            }
-            .check(client)
-            .await?;
-
-            if result.groups.len() != 1 {
-                return Err(Error::CopyError(format!(
-                    "Copy check failed, the files {} and {} are not identical",
-                    self.source, self.destination
-                )));
-            }
-
-            check_stats = Some(result);
-        }
-
-        let copy_stats = CopyStats::from_task(result, check_stats, generate_stats, now.elapsed());
+        let copy_stats = if !self.no_check {
+            let (check_stats, generate_stats) = self.copy_check(client, optimization).await?;
+            CopyStats::from_task(
+                result,
+                Some(check_stats),
+                generate_stats,
+                now.elapsed(),
+                false,
+            )
+        } else {
+            CopyStats::from_task(result, None, None, now.elapsed(), false)
+        };
 
         Ok(copy_stats)
     }
@@ -535,7 +575,7 @@ impl Display for Endianness {
 }
 
 /// Commands related to optimizing IO and CPU tasks.
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 #[group(required = false)]
 pub struct Optimization {
     /// The capacity of the sender channel for the channel reader. This controls the

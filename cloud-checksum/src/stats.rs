@@ -44,6 +44,15 @@ impl ChecksumPair {
     }
 }
 
+impl From<&CheckStats> for Option<ChecksumPair> {
+    fn from(stats: &CheckStats) -> Self {
+        stats
+            .compared
+            .first()
+            .map(|compared| compared.reason.clone())
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ChecksumStats(Vec<ChecksumPair>);
 
@@ -137,6 +146,7 @@ pub struct CopyStats {
     pub(crate) source: String,
     pub(crate) destination: String,
     pub(crate) bytes_transferred: u64,
+    pub(crate) skipped: bool,
     pub(crate) copy_mode: CopyMode,
     pub(crate) reason: Option<ChecksumPair>,
     pub(crate) n_retries: u64,
@@ -151,19 +161,16 @@ impl CopyStats {
         check_stats: Option<CheckStats>,
         generate_stats: Option<GenerateStats>,
         elapsed: Duration,
+        skipped: bool,
     ) -> Self {
         Self {
             elapsed_seconds: elapsed.as_secs_f64(),
             source: copy_task.source().format(),
             destination: copy_task.destination().format(),
             bytes_transferred: copy_task.bytes_transferred(),
+            skipped,
             copy_mode: copy_task.copy_mode(),
-            reason: check_stats.as_ref().and_then(|stats| {
-                stats
-                    .compared
-                    .first()
-                    .map(|compared| compared.reason.clone())
-            }),
+            reason: check_stats.as_ref().and_then(Option::<ChecksumPair>::from),
             n_retries: copy_task.n_retries(),
             api_errors: copy_task.api_errors().to_vec(),
             generate_stats,
