@@ -1,15 +1,16 @@
 //! Cli commands and code.
 //!
 
+use crate::checksum::file::SumsFile;
 use crate::checksum::Ctx;
 use crate::error::Error;
 use crate::error::Error::ParseError;
 use crate::error::Result;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::{default_s3_client, Provider};
-use crate::stats::{CheckStats, GenerateFileStats, GenerateStats};
+use crate::stats::{CheckStats, CopyStats, GenerateFileStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
-use crate::task::copy::{CopyInfo, CopyTaskBuilder};
+use crate::task::copy::CopyTaskBuilder;
 use crate::task::generate::{GenerateTaskBuilder, SumCtxPairs};
 use aws_sdk_s3::Client;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -89,17 +90,17 @@ impl Command {
         let pretty_json = self.output.pretty_json;
         match self.commands {
             Subcommands::Generate(generate_args) => {
-                let output = generate_args.generate(self.optimization, client).await?;
-                if let Some(output) = output {
-                    Self::print_stats(&output, pretty_json)?;
-                }
+                let (sums, stats) = generate_args.generate(self.optimization, client).await?;
+                Self::print_stats(sums.as_ref(), false)?;
+                Self::print_stats(stats.as_ref(), pretty_json)?;
             }
             Subcommands::Check(check_args) => {
                 let output = check_args.check(client).await?;
-                Self::print_stats(&output, pretty_json)?;
+                Self::print_stats(Some(&output), pretty_json)?;
             }
             Subcommands::Copy(copy_args) => {
-                copy_args.copy(self.optimization, client).await?;
+                let output = copy_args.copy(self.optimization, client).await?;
+                Self::print_stats(Some(&output), pretty_json)?;
             }
         }
 
@@ -107,10 +108,12 @@ impl Command {
     }
 
     /// Print output statistics
-    pub fn print_stats<T>(stats: &T, pretty_json: bool) -> Result<()>
+    pub fn print_stats<T>(stats: Option<&T>, pretty_json: bool) -> Result<()>
     where
         T: Serialize,
     {
+        let Some(stats) = stats else { return Ok(()) };
+
         if pretty_json {
             println!("{}", to_string_pretty(stats)?);
         } else {
@@ -178,7 +181,7 @@ impl Generate {
         self,
         optimization: Optimization,
         client: Arc<Client>,
-    ) -> Result<Option<GenerateStats>> {
+    ) -> Result<(Option<SumsFile>, Option<GenerateStats>)> {
         if self.input[0] == "-" {
             let reader = ChannelReader::new(stdin(), optimization.channel_capacity);
 
@@ -193,12 +196,9 @@ impl Generate {
                 .run()
                 .await?
                 .into_inner()
-                .0
-                .to_json_string()?;
+                .0;
 
-            println!("{}", output);
-
-            Ok(None)
+            Ok((Some(output), None))
         } else {
             let now = Instant::now();
             let mut check_stats = None;
@@ -255,11 +255,14 @@ impl Generate {
                 generate_stats.push(GenerateFileStats::from_task(task));
             }
 
-            Ok(Some(GenerateStats::new(
-                now.elapsed().as_secs_f64(),
-                generate_stats,
-                check_stats,
-            )))
+            Ok((
+                None,
+                Some(GenerateStats::new(
+                    now.elapsed().as_secs_f64(),
+                    generate_stats,
+                    check_stats,
+                )),
+            ))
         }
     }
 }
@@ -405,7 +408,8 @@ pub struct Copy {
 
 impl Copy {
     /// Perform the copy sub command from the args.
-    pub async fn copy(self, optimization: Optimization, client: Arc<Client>) -> Result<CopyInfo> {
+    pub async fn copy(self, optimization: Optimization, client: Arc<Client>) -> Result<CopyStats> {
+        let now = Instant::now();
         let result = CopyTaskBuilder::default()
             .with_source(self.source.to_string())
             .with_destination(self.destination.to_string())
@@ -420,22 +424,22 @@ impl Copy {
             .run()
             .await?;
 
-        println!("{}", result.to_json_string()?);
-
+        let mut generate_stats = None;
+        let mut check_stats = None;
         if !self.no_check {
             let input = vec![self.source.to_string(), self.destination.to_string()];
-            let ctxs = Check::comparable_check(input.clone(), client.clone()).await?;
+            let (ctxs, _) = Check::comparable_check(input.clone(), client.clone()).await?;
 
             // If the inputs have no checksums to begin with, we need to generate something for
             // the check, so pick the default.
-            let checksum = if ctxs.0.into_inner().0 .0.is_empty() {
+            let checksum = if ctxs.compared_directly().is_empty() {
                 vec![Ctx::default()]
             } else {
                 vec![]
             };
 
             // First generate missing sums.
-            Generate {
+            let (_, generate) = Generate {
                 input: input.clone(),
                 checksum,
                 missing: true,
@@ -444,6 +448,8 @@ impl Copy {
             }
             .generate(optimization, client.clone())
             .await?;
+
+            generate_stats = generate;
 
             // Then perform check.
             let result = Check {
@@ -460,9 +466,13 @@ impl Copy {
                     self.source, self.destination
                 )));
             }
+
+            check_stats = Some(result);
         }
 
-        Ok(result)
+        let copy_stats = CopyStats::from_task(result, check_stats, generate_stats, now.elapsed());
+
+        Ok(copy_stats)
     }
 }
 

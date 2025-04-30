@@ -1,13 +1,14 @@
 //! Structs related to output statistics.
 //!
 
-use crate::checksum::file::{Checksum, SumsFile};
+use crate::checksum::file::Checksum;
 use crate::checksum::Ctx;
 use crate::cli::CopyMode;
 use crate::task::check::{CheckTask, GroupBy};
+use crate::task::copy::CopyTask;
 use crate::task::generate::GenerateTask;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -31,24 +32,51 @@ impl GenerateStats {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ChecksumPair {
+    pub(crate) kind: Ctx,
+    pub(crate) value: Checksum,
+}
+
+impl ChecksumPair {
+    pub fn new(kind: Ctx, value: Checksum) -> Self {
+        Self { kind, value }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ChecksumStats(Vec<ChecksumPair>);
+
+impl From<BTreeMap<Ctx, Checksum>> for ChecksumStats {
+    fn from(map: BTreeMap<Ctx, Checksum>) -> Self {
+        Self(
+            map.into_iter()
+                .map(|(k, v)| ChecksumPair::new(k, v))
+                .collect(),
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GenerateFileStats {
     pub(crate) input: String,
-    pub(crate) checksums_generated: BTreeMap<Ctx, Checksum>,
+    pub(crate) updated: Vec<String>,
+    pub(crate) checksums_generated: ChecksumStats,
 }
 
 impl GenerateFileStats {
-    pub fn new(input: String, checksums_generated: BTreeMap<Ctx, Checksum>) -> Self {
+    pub fn new(input: String, updated: Vec<String>, checksums_generated: ChecksumStats) -> Self {
         Self {
             input,
+            updated,
             checksums_generated,
         }
     }
 
     pub fn from_task(task: GenerateTask) -> Self {
-        let (_, object, _, checksums_generated) = task.into_inner();
+        let (_, object, updated, checksums_generated) = task.into_inner();
 
-        Self::new(object.location(), checksums_generated)
+        Self::new(object.location(), updated, checksums_generated.into())
     }
 }
 
@@ -91,45 +119,67 @@ impl CheckStats {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApiError {
+    pub(crate) error: String,
+    pub(crate) message: String,
+}
+
+impl ApiError {
+    pub fn new(error: String, message: String) -> Self {
+        Self { error, message }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CopyStats {
-    elapsed_seconds: f64,
-    source: String,
-    destination: String,
-    bytes_transferred: u64,
-    copy_mode: CopyMode,
-    generate_stats: GenerateStats,
-    check_stats: CheckStats,
-    reason: SumsMatched,
-    n_retries: u64,
-    api_calls_failed: Vec<String>,
+    pub(crate) elapsed_seconds: f64,
+    pub(crate) source: String,
+    pub(crate) destination: String,
+    pub(crate) bytes_transferred: u64,
+    pub(crate) copy_mode: CopyMode,
+    pub(crate) reason: Option<ChecksumPair>,
+    pub(crate) n_retries: u64,
+    pub(crate) api_errors: Vec<ApiError>,
+    pub(crate) generate_stats: Option<GenerateStats>,
+    pub(crate) check_stats: Option<CheckStats>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct CheckComparison {
-    pub(crate) locations: Vec<String>,
-    #[serde(flatten)]
-    pub(crate) reason: HashMap<Ctx, Checksum>,
-}
-
-impl CheckComparison {
-    pub fn new(locations: Vec<String>, reason: (Ctx, Checksum)) -> Self {
+impl CopyStats {
+    pub fn from_task(
+        copy_task: CopyTask,
+        check_stats: Option<CheckStats>,
+        generate_stats: Option<GenerateStats>,
+        elapsed: Duration,
+    ) -> Self {
         Self {
-            locations,
-            reason: HashMap::from_iter(vec![reason]),
+            elapsed_seconds: elapsed.as_secs_f64(),
+            source: copy_task.source().format(),
+            destination: copy_task.destination().format(),
+            bytes_transferred: copy_task.bytes_transferred(),
+            copy_mode: copy_task.copy_mode(),
+            reason: check_stats.as_ref().and_then(|stats| {
+                stats
+                    .compared
+                    .first()
+                    .map(|compared| compared.reason.clone())
+            }),
+            n_retries: copy_task.n_retries(),
+            api_errors: copy_task.api_errors().to_vec(),
+            generate_stats,
+            check_stats,
         }
     }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct CopySumsType {
-    sums: SumsFile,
-    is_metadata_sums: bool,
+pub struct CheckComparison {
+    pub(crate) locations: Vec<String>,
+    pub(crate) reason: ChecksumPair,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SumsMatched {
-    source_sums: CopySumsType,
-    destination_sums: CopySumsType,
-    decider: Ctx,
+impl CheckComparison {
+    pub fn new(locations: Vec<String>, reason: ChecksumPair) -> Self {
+        Self { locations, reason }
+    }
 }

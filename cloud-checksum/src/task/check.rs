@@ -5,7 +5,7 @@ use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
 use crate::error::{Error, Result};
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder};
-use crate::stats::CheckComparison;
+use crate::stats::{CheckComparison, ChecksumPair};
 use aws_sdk_s3::Client;
 use clap::ValueEnum;
 use futures_util::future::join_all;
@@ -240,7 +240,7 @@ impl CheckTask {
                     if let Some((ctx, checksum)) = compare(&a, b) {
                         self.compared_directly.push(CheckComparison::new(
                             vec![a_location, b_location.to_string()],
-                            (ctx.clone(), checksum.clone()),
+                            ChecksumPair::new(ctx.clone(), checksum.clone()),
                         ));
 
                         b_locations.append(&mut a_locations);
@@ -324,6 +324,16 @@ impl CheckTask {
     /// Get the inner values.
     pub fn into_inner(self) -> (CheckObjects, Vec<CheckComparison>, Vec<String>) {
         (self.objects, self.compared_directly, self.updated)
+    }
+
+    /// Get the inner state objects.
+    pub fn state_objects(&self) -> &BTreeMap<SumsKey, BTreeSet<State>> {
+        &self.objects.0
+    }
+
+    /// Get the comparisons.
+    pub fn compared_directly(&self) -> &[CheckComparison] {
+        self.compared_directly.as_slice()
     }
 }
 

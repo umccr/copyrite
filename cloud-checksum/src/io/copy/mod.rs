@@ -8,6 +8,7 @@ use crate::error::Result;
 use crate::io::copy::aws::S3Builder;
 use crate::io::copy::file::FileBuilder;
 use crate::io::{default_s3_client, Provider};
+use crate::stats::ApiError;
 use aws_sdk_s3::Client;
 use dyn_clone::DynClone;
 use std::collections::HashMap;
@@ -47,8 +48,14 @@ pub struct MultiPartOptions {
 }
 
 impl MultiPartOptions {
+    /// Format the HTTP range for the request.
     pub fn format_range(&self) -> Option<String> {
         Some(format!("bytes={}-{}", self.start, self.end.checked_sub(1)?))
+    }
+
+    /// The amount of bytes that will be transferred.
+    pub fn bytes_transferred(&self) -> u64 {
+        self.end - self.start
     }
 }
 
@@ -69,12 +76,34 @@ pub struct Part {
 pub struct CopyResult {
     pub(crate) part: Option<Part>,
     pub(crate) upload_id: Option<String>,
+    pub(crate) bytes_transferred: u64,
+    pub(crate) n_retries: u64,
+    pub(crate) api_errors: Vec<ApiError>,
 }
 
 impl CopyResult {
     /// Create a new copy result.
-    pub fn new(part: Option<Part>, upload_id: Option<String>) -> Self {
-        Self { part, upload_id }
+    pub fn new(
+        part: Option<Part>,
+        upload_id: Option<String>,
+        bytes_transferred: u64,
+        api_errors: Vec<ApiError>,
+    ) -> Result<Self> {
+        let result = Self {
+            part,
+            upload_id,
+            bytes_transferred,
+            ..Default::default()
+        };
+
+        result.with_api_errors(api_errors)
+    }
+
+    /// Set the errors.
+    pub fn with_api_errors(mut self, api_errors: Vec<ApiError>) -> Result<Self> {
+        self.n_retries = u64::try_from(api_errors.len())?;
+        self.api_errors = api_errors;
+        Ok(self)
     }
 }
 
@@ -83,6 +112,7 @@ impl From<(Part, String)> for CopyResult {
         Self {
             part: Some(part),
             upload_id: Some(upload_id),
+            ..Default::default()
         }
     }
 }
@@ -90,7 +120,7 @@ impl From<(Part, String)> for CopyResult {
 /// The state of the copy operation.
 #[derive(Debug, Clone)]
 pub struct CopyState {
-    size: Option<u64>,
+    size: u64,
     tags: Option<String>,
     metadata: Option<HashMap<String, String>>,
     additional_ctx: Option<Ctx>,
@@ -98,7 +128,7 @@ pub struct CopyState {
 
 impl CopyState {
     /// Get the object size.
-    pub fn size(&self) -> Option<u64> {
+    pub fn size(&self) -> u64 {
         self.size
     }
 
@@ -118,11 +148,7 @@ impl CopyState {
     }
 
     /// Create a new state.
-    pub fn new(
-        size: Option<u64>,
-        tags: Option<String>,
-        metadata: Option<HashMap<String, String>>,
-    ) -> Self {
+    pub fn new(size: u64, tags: Option<String>, metadata: Option<HashMap<String, String>>) -> Self {
         Self {
             size,
             tags,

@@ -6,6 +6,7 @@ use crate::cli::MetadataCopy;
 use crate::error::Error::{AwsError, CopyError, ParseError};
 use crate::error::{Error, Result};
 use crate::io::copy::{CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part};
+use crate::stats::ApiError;
 use aws_sdk_s3::operation::get_object_tagging::{GetObjectTaggingError, GetObjectTaggingOutput};
 use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
 use aws_sdk_s3::operation::upload_part::UploadPartOutput;
@@ -17,6 +18,7 @@ use aws_sdk_s3::Client;
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_types::byte_stream::ByteStream;
+use aws_smithy_types::error::display::DisplayErrorContext;
 use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use std::collections::HashMap;
 use std::result;
@@ -201,7 +203,11 @@ impl S3 {
                 )
             };
 
-        let size = head.content_length.map(u64::try_from).transpose()?;
+        let size = head
+            .content_length
+            .map(u64::try_from)
+            .transpose()?
+            .ok_or_else(|| AwsError("missing size".to_string()))?;
         let metadata = head.metadata;
 
         Ok(CopyState::new(size, tags, metadata))
@@ -263,6 +269,15 @@ impl S3 {
         false
     }
 
+    fn api_error<T: ProvideErrorMetadata + std::error::Error + 'static>(
+        err: &SdkError<T, HttpResponse>,
+    ) -> ApiError {
+        ApiError::new(
+            err.code().unwrap_or_default().to_string(),
+            DisplayErrorContext(err).to_string(),
+        )
+    }
+
     /// Create a new multipart upload.
     pub async fn get_multipart_upload(
         &self,
@@ -271,7 +286,7 @@ impl S3 {
         tagging: Option<String>,
         metadata: Option<HashMap<String, String>>,
         additional_checksum: Option<ChecksumAlgorithm>,
-    ) -> Result<String> {
+    ) -> Result<(String, Vec<ApiError>)> {
         let do_upload = |tagging, metadata, additional_checksum| async {
             self.client
                 .create_multipart_upload()
@@ -290,18 +305,27 @@ impl S3 {
             additional_checksum.clone(),
         )
         .await;
+
         // Retry if this is a best effort copy and the error was access denied.
-        let upload = if self.tag_mode.is_best_effort()
-            && result.as_ref().is_err_and(Self::is_access_denied)
-        {
-            do_upload(None, metadata, additional_checksum).await?
+        let (upload, err) = if let Err(ref err) = result {
+            if self.tag_mode.is_best_effort() && Self::is_access_denied(err) {
+                (
+                    do_upload(None, metadata, additional_checksum).await?,
+                    vec![Self::api_error(err)],
+                )
+            } else {
+                (result?, vec![])
+            }
         } else {
-            result?
+            (result?, vec![])
         };
 
-        upload
-            .upload_id
-            .ok_or_else(|| AwsError("missing upload id".to_string()))
+        Ok((
+            upload
+                .upload_id
+                .ok_or_else(|| AwsError("missing upload id".to_string()))?,
+            err,
+        ))
     }
 
     fn get_source(&self) -> Result<&BucketKey> {
@@ -317,7 +341,7 @@ impl S3 {
     }
 
     /// Copy the object using the `CopyObject` operation.
-    pub async fn copy_object(&self, state: &CopyState) -> Result<Option<u64>> {
+    pub async fn copy_object(&self, state: &CopyState) -> Result<CopyResult> {
         let size = state.size();
 
         let (tagging, tagging_set) = self.tagging_directive();
@@ -350,21 +374,27 @@ impl S3 {
             additional_checksum.clone(),
         )
         .await;
-        // Retry if this is a best effort copy and the error was access denied.
-        if self.tag_mode.is_best_effort() && result.as_ref().is_err_and(Self::is_access_denied) {
-            do_copy(
-                TaggingDirective::Replace,
-                Some("".to_string()),
-                metadata,
-                metadata_set.clone(),
-                additional_checksum,
-            )
-            .await?;
-        } else {
-            result?;
-        }
 
-        Ok(size)
+        // Retry if this is a best effort copy and the error was access denied.
+        let (_, err) = if let Err(ref err) = result {
+            if self.tag_mode.is_best_effort() && Self::is_access_denied(err) {
+                let result = do_copy(
+                    TaggingDirective::Replace,
+                    Some("".to_string()),
+                    metadata,
+                    metadata_set.clone(),
+                    additional_checksum,
+                )
+                .await?;
+                (result, vec![Self::api_error(err)])
+            } else {
+                (result?, vec![])
+            }
+        } else {
+            (result?, vec![])
+        };
+
+        CopyResult::new(None, None, size, err)
     }
 
     /// Get the copy source.
@@ -408,8 +438,8 @@ impl S3 {
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
 
         // Create the upload id if it doesn't exist or use the existing one.
-        let upload_id = if let Some(upload_id) = &multi_part.upload_id {
-            upload_id.to_string()
+        let (upload_id, api_errors) = if let Some(upload_id) = &multi_part.upload_id {
+            (upload_id.to_string(), vec![])
         } else {
             self.get_multipart_upload(
                 &destination.key,
@@ -440,7 +470,11 @@ impl S3 {
                 .copy_part_result
                 .ok_or_else(|| AwsError("missing copy part result".to_string()))?;
 
-            Ok((part, part_number, upload_id).into())
+            let mut result: CopyResult = (part, part_number, upload_id).into();
+            result.bytes_transferred = multi_part.bytes_transferred();
+            result = result.with_api_errors(api_errors)?;
+
+            Ok(result)
         } else {
             self.complete_multipart_upload(
                 &destination.key,
@@ -450,7 +484,7 @@ impl S3 {
             )
             .await?;
 
-            Ok(CopyResult::new(None, Some(upload_id)))
+            CopyResult::new(None, Some(upload_id), 0, vec![])
         }
     }
 
@@ -486,7 +520,7 @@ impl S3 {
         &self,
         mut content: CopyContent,
         state: &CopyState,
-    ) -> Result<Option<u64>> {
+    ) -> Result<CopyResult> {
         let destination = self.get_destination()?;
         let buf = Self::read_content(&mut content).await?;
 
@@ -511,14 +545,21 @@ impl S3 {
             buf.clone(),
         )
         .await;
-        // Retry if this is a best effort copy and the error was access denied.
-        if self.tag_mode.is_best_effort() && result.as_ref().is_err_and(Self::is_access_denied) {
-            do_put(None, state.metadata(), additional_checksum, buf).await?;
-        } else {
-            result?;
-        }
 
-        Ok(state.size())
+        // Retry if this is a best effort copy and the error was access denied.
+        let (_, err) = if let Err(ref err) = result {
+            if self.tag_mode.is_best_effort() && Self::is_access_denied(err) {
+                let result = do_put(None, state.metadata(), additional_checksum, buf).await?;
+
+                (result, vec![Self::api_error(err)])
+            } else {
+                (result?, vec![])
+            }
+        } else {
+            (result?, vec![])
+        };
+
+        CopyResult::new(None, None, state.size(), err)
     }
 
     /// Read the copy content into a buffer.
@@ -542,8 +583,8 @@ impl S3 {
 
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
         // Create the upload id if it doesn't exist or use the existing one.
-        let upload_id = if let Some(upload_id) = multi_part.upload_id {
-            upload_id
+        let (upload_id, err) = if let Some(upload_id) = multi_part.upload_id.as_ref() {
+            (upload_id.to_string(), vec![])
         } else {
             self.get_multipart_upload(
                 &destination.key,
@@ -567,7 +608,12 @@ impl S3 {
                 .body(ByteStream::from(buf))
                 .send()
                 .await?;
-            Ok((part, part_number, upload_id).into())
+
+            let mut result: CopyResult = (part, part_number, upload_id).into();
+            result.bytes_transferred = multi_part.bytes_transferred();
+            result = result.with_api_errors(err)?;
+
+            Ok(result)
         } else {
             self.complete_multipart_upload(
                 &destination.key,
@@ -577,7 +623,7 @@ impl S3 {
             )
             .await?;
 
-            Ok(CopyResult::new(None, Some(upload_id)))
+            CopyResult::new(None, Some(upload_id), 0, err)
         }
     }
 
@@ -624,8 +670,7 @@ impl ObjectCopy for S3 {
         if let Some(multi_part) = multi_part {
             self.copy_object_multipart(multi_part, state).await
         } else {
-            self.copy_object(state).await?;
-            Ok(Default::default())
+            self.copy_object(state).await
         }
     }
 
@@ -642,8 +687,7 @@ impl ObjectCopy for S3 {
         if let Some(multi_part) = multi_part {
             self.put_object_multipart(data, multi_part, state).await
         } else {
-            self.put_object(data, state).await?;
-            Ok(Default::default())
+            self.put_object(data, state).await
         }
     }
 
