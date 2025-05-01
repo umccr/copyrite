@@ -52,6 +52,8 @@ pub trait ObjectSums: DynClone {
     fn location(&self) -> String;
 }
 
+dyn_clone::clone_trait_object!(ObjectSums);
+
 /// Build object sums from object URLs.
 #[derive(Debug, Default)]
 pub struct ObjectSumsBuilder {

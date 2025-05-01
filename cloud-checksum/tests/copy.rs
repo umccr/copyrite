@@ -6,10 +6,9 @@ use anyhow::Result;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::ChecksumMode;
 use aws_sdk_s3::Client;
-use cloud_checksum::cli::execute_args;
+use cloud_checksum::cli::Command;
 use cloud_checksum::io::{default_s3_client, Provider};
 use cloud_checksum::test::TestFileBuilder;
-use cloud_checksum::Command;
 use envy::prefixed;
 use serde::Deserialize;
 use std::fs::File;
@@ -214,5 +213,5 @@ fn assert_head_single_part(head: HeadObjectOutput) {
 
 async fn execute_command(commands: &[&str]) {
     let args = Command::parse_from_iter(commands).unwrap();
-    execute_args(args).await.unwrap();
+    args.execute().await.unwrap();
 }

@@ -7,7 +7,7 @@ use crate::error::Error::GenerateError;
 use crate::error::{Error, Result};
 use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder, SharedReader};
-use crate::task::check::CheckObjects;
+use crate::task::check::{CheckObjects, SumsKey};
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use aws_sdk_s3::Client;
 use futures_util::future::join_all;
@@ -125,6 +125,9 @@ impl GenerateTaskBuilder {
             reader: Some(reader),
             write: self.write,
             object_sums: sums,
+            updated: false,
+            output: Default::default(),
+            checksums_generated: Default::default(),
         };
 
         let task = task.add_tasks(HashSet::from_iter(self.ctxs))?;
@@ -148,6 +151,9 @@ pub struct GenerateTask {
     reader: Option<Box<dyn SharedReader + Send>>,
     write: bool,
     object_sums: Box<dyn ObjectSums + Send>,
+    updated: bool,
+    output: SumsFile,
+    checksums_generated: BTreeMap<Ctx, Checksum>,
 }
 
 impl GenerateTask {
@@ -225,9 +231,10 @@ impl GenerateTask {
     }
 
     /// Runs the generate task, returning an output file.
-    pub async fn run(self) -> Result<SumsFile> {
+    pub async fn run(mut self) -> Result<Self> {
         let mut file_size = 0;
-        let checksums = join_all(self.tasks)
+        let tasks: Vec<_> = self.tasks.drain(..).collect();
+        let checksums = join_all(tasks)
             .await
             .into_iter()
             .map(|val| {
@@ -249,10 +256,10 @@ impl GenerateTask {
             .into_iter()
             .flatten();
 
-        let checksums = BTreeMap::from_iter(checksums);
-        let new_file = SumsFile::new(Some(file_size), checksums);
+        self.checksums_generated = BTreeMap::from_iter(checksums);
+        let new_file = SumsFile::new(Some(file_size), self.checksums_generated.clone());
 
-        let output = match self.existing_output {
+        let output = match self.existing_output.clone() {
             Some(file) if !matches!(self.overwrite, OverwriteMode::Overwrite) => {
                 file.merge(new_file)?
             }
@@ -266,10 +273,34 @@ impl GenerateTask {
         }
 
         if self.write {
-            self.object_sums.write_sums_file(&output).await?;
+            let current = self.object_sums.sums_file().await?;
+
+            if current.as_ref() != Some(&output) {
+                self.object_sums.write_sums_file(&output).await?;
+                self.updated = true;
+            }
         }
 
-        Ok(output)
+        self.output = output;
+
+        Ok(self)
+    }
+
+    /// Get the inner values.
+    pub fn into_inner(
+        self,
+    ) -> (
+        SumsFile,
+        Box<dyn ObjectSums + Send>,
+        bool,
+        BTreeMap<Ctx, Checksum>,
+    ) {
+        (
+            self.output,
+            self.object_sums,
+            self.updated,
+            self.checksums_generated,
+        )
     }
 }
 
@@ -313,7 +344,7 @@ impl SumCtxPairs {
         let file_ctx = files
             .0
             .iter()
-            .flat_map(|(file, _)| file.checksums.keys().cloned())
+            .flat_map(|(file, _)| file.0 .0.checksums.keys().cloned())
             .fold(BTreeMap::new(), |mut map, val| {
                 // Count occurrences
                 map.entry(val).and_modify(|count| *count += 1).or_insert(1);
@@ -328,7 +359,7 @@ impl SumCtxPairs {
             let ctxs = files
                 .0
                 .into_iter()
-                .flat_map(|(file, state)| {
+                .flat_map(|(SumsKey((file, _)), state)| {
                     // If the sums group already contains this checksum, skip.
                     if file.checksums.contains_key(&file_ctx) {
                         return None;
@@ -382,9 +413,9 @@ pub(crate) mod test {
             .with_group_by(GroupBy::Comparability)
             .build()
             .await?;
-        let check = check.run().await?;
+        let (objects, _, _) = check.run().await?.into_inner();
 
-        let result = SumCtxPairs::from_comparable(check)?.unwrap();
+        let result = SumCtxPairs::from_comparable(objects)?.unwrap();
 
         assert_eq!(
             result,
@@ -472,7 +503,9 @@ pub(crate) mod test {
             .build()
             .await?
             .run()
-            .await?)
+            .await?
+            .into_inner()
+            .0)
     }
 
     async fn test_generate(
