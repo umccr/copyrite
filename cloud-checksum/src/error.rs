@@ -4,6 +4,7 @@
 use aws_sdk_s3::error::SdkError;
 use aws_smithy_runtime_api::client::result::CreateUnhandledError;
 use aws_smithy_types::byte_stream;
+use serde::{Deserialize, Serialize, Serializer};
 use std::num::TryFromIntError;
 use std::{error, io, result};
 use thiserror::Error;
@@ -14,16 +15,18 @@ use tokio::task::JoinError;
 pub type Result<T> = result::Result<T, Error>;
 
 /// Error types for checksum_cloud.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Serialize, Deserialize)]
 pub enum Error {
     #[error("in concurrency logic: {0}")]
     ConcurrencyError(String),
     #[error("in memory logic: {0}")]
     MemoryError(String),
+    #[serde(serialize_with = "serialize_io", skip_deserializing)]
     #[error("performing IO: {0}")]
     IOError(#[from] io::Error),
     #[error("parsing: {0}")]
     ParseError(String),
+    #[serde(serialize_with = "serialize_try_from_int", skip_deserializing)]
     #[error("overflow converting numbers: {0}")]
     OverflowError(#[from] TryFromIntError),
     #[error("serde: {0}")]
@@ -38,6 +41,23 @@ pub enum Error {
     CopyError(String),
     #[error("aws error: {0}")]
     AwsError(String),
+}
+
+fn serialize_try_from_int<S>(
+    err: &TryFromIntError,
+    serializer: S,
+) -> result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    err.to_string().serialize(serializer)
+}
+
+fn serialize_io<S>(err: &io::Error, serializer: S) -> result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    err.to_string().serialize(serializer)
 }
 
 impl From<JoinError> for Error {

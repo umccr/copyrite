@@ -94,7 +94,10 @@ impl Command {
             Subcommands::Generate(generate_args) => {
                 let (sums, stats) = generate_args
                     .generate(self.optimization, client, true)
-                    .await?;
+                    .await
+                    .inspect_err(|err| {
+                        Self::print_stats(err, pretty_json).ok();
+                    })?;
                 if let Some(stats) = stats {
                     Self::print_stats(&stats, pretty_json)?;
                 } else {
@@ -105,13 +108,19 @@ impl Command {
             Subcommands::Check(check_args) => {
                 let output = check_args
                     .check(self.optimization, client, write_sums_file, false)
-                    .await?;
+                    .await
+                    .inspect_err(|err| {
+                        Self::print_stats(err, pretty_json).ok();
+                    })?;
                 Self::print_stats(&output, pretty_json)?;
             }
             Subcommands::Copy(copy_args) => {
                 let output = copy_args
                     .copy(client, self.optimization, write_sums_file)
-                    .await?;
+                    .await
+                    .inspect_err(|err| {
+                        Self::print_stats(err, pretty_json).ok();
+                    })?;
                 Self::print_stats(&output, pretty_json)?;
             }
         }
