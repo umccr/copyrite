@@ -21,6 +21,7 @@ use std::sync::Arc;
 #[derive(Debug, Default)]
 pub struct CheckTaskBuilder {
     files: Vec<String>,
+    sums_files: Vec<(String, SumsFile)>,
     group_by: GroupBy,
     update: bool,
     client: Option<Arc<Client>>,
@@ -33,14 +34,14 @@ impl CheckTaskBuilder {
         self
     }
 
-    /// Set the group by mode.
-    pub fn with_group_by(mut self, group_by: GroupBy) -> Self {
-        self.group_by = group_by;
+    /// Set the sums file directly without reading from input files.
+    pub fn with_sums_files(mut self, files: Vec<(String, SumsFile)>) -> Self {
+        self.sums_files = files;
         self
     }
 
-    /// Generate missing checksums that are required to check for equality.
-    pub fn generate_missing(mut self, group_by: GroupBy) -> Self {
+    /// Set the group by mode.
+    pub fn with_group_by(mut self, group_by: GroupBy) -> Self {
         self.group_by = group_by;
         self
     }
@@ -60,7 +61,8 @@ impl CheckTaskBuilder {
     /// Build a check task.
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
-        let objects = join_all(self.files.into_iter().map(|file| {
+
+        let mut objects = join_all(self.files.into_iter().map(|file| {
             let client = self.client.clone();
 
             async move {
@@ -77,7 +79,7 @@ impl CheckTaskBuilder {
 
                 Ok((
                     SumsKey((existing, sums.location())),
-                    BTreeSet::from_iter(vec![State(sums)]),
+                    BTreeSet::from_iter(vec![State::ObjectSums(sums)]),
                 ))
             }
         }))
@@ -85,12 +87,18 @@ impl CheckTaskBuilder {
         .into_iter()
         .collect::<Result<BTreeMap<_, _>>>()?;
 
+        for (location, sums) in self.sums_files {
+            objects.insert(
+                SumsKey((sums.clone(), location.to_string())),
+                BTreeSet::from_iter(vec![State::ExistingSums((location, sums))]),
+            );
+        }
+
         Ok(CheckTask {
             objects: CheckObjects(objects),
             group_by,
             update: self.update,
-            compared_directly: vec![],
-            updated: vec![],
+            ..Default::default()
         })
     }
 }
@@ -107,7 +115,49 @@ pub enum GroupBy {
 }
 
 /// Representation of file state to implement equality and hashing.
-pub struct State(pub(crate) Box<dyn ObjectSums + Send>);
+#[derive(Clone)]
+pub enum State {
+    ObjectSums(Box<dyn ObjectSums + Send>),
+    ExistingSums((String, SumsFile)),
+}
+
+impl State {
+    /// Get the location of the state.
+    pub fn location(&self) -> String {
+        match self {
+            State::ObjectSums(object) => object.location(),
+            State::ExistingSums((location, _)) => location.to_string(),
+        }
+    }
+
+    /// Get the sums file.
+    pub async fn sums_file(&mut self) -> Result<Option<SumsFile>> {
+        match self {
+            State::ObjectSums(object) => object.sums_file().await,
+            State::ExistingSums((_, sums)) => Ok(Some(sums.clone())),
+        }
+    }
+
+    /// Write the sums file to the location. If no object sums are used then this creates a new
+    /// object sums to write the file.
+    pub async fn write_sums_file(
+        &self,
+        sums: &SumsFile,
+        client: Option<Arc<Client>>,
+    ) -> Result<()> {
+        match self {
+            State::ObjectSums(object) => object.write_sums_file(sums).await,
+            State::ExistingSums((location, _)) => {
+                ObjectSumsBuilder::default()
+                    .set_client(client)
+                    .build(location.to_string())
+                    .await?
+                    .write_sums_file(sums)
+                    .await
+            }
+        }
+    }
+}
 
 impl Debug for State {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -117,7 +167,7 @@ impl Debug for State {
 
 impl Hash for State {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.location().hash(state);
+        self.location().hash(state);
     }
 }
 
@@ -125,7 +175,7 @@ impl Eq for State {}
 
 impl PartialEq for State {
     fn eq(&self, other: &Self) -> bool {
-        self.0.location() == other.0.location()
+        self.location() == other.location()
     }
 }
 
@@ -137,7 +187,7 @@ impl PartialOrd for State {
 
 impl Ord for State {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.location().cmp(&other.0.location())
+        self.location().cmp(&other.location())
     }
 }
 
@@ -185,7 +235,7 @@ impl CheckObjects {
     pub fn to_groups(&self) -> Vec<Vec<String>> {
         let mut groups = Vec::with_capacity(self.0.len());
         for state in self.0.values() {
-            groups.push(state.iter().map(|state| state.0.location()).collect());
+            groups.push(state.iter().map(|state| state.location()).collect());
         }
         groups
     }
@@ -205,6 +255,7 @@ pub struct CheckTask {
     update: bool,
     compared_directly: Vec<CheckComparison>,
     updated: Vec<String>,
+    client: Option<Arc<Client>>,
 }
 
 impl CheckTask {
@@ -296,6 +347,7 @@ impl CheckTask {
     /// Runs the check task, returning the list of matching files.
     pub async fn run(self) -> Result<Self> {
         let update = self.update && matches!(self.group_by, GroupBy::Equality);
+        let client = self.client.clone();
         let mut result = match self.group_by {
             GroupBy::Equality => Ok::<_, Error>(self.merge_same().await?),
             GroupBy::Comparability => Ok(self.merge_comparable().await?),
@@ -305,11 +357,11 @@ impl CheckTask {
         if update {
             for (SumsKey((file, _)), locations) in &result.objects.0 {
                 for location in locations {
-                    let mut location = location.0.clone();
+                    let mut location = location.clone();
                     let current = location.sums_file().await?;
 
                     if current.as_ref() != Some(file) {
-                        location.write_sums_file(file).await?;
+                        location.write_sums_file(file, client.clone()).await?;
                         updated_sums.push(location.location());
                     }
                 }

@@ -21,7 +21,7 @@ pub struct GenerateStats {
     pub(crate) stats: Vec<GenerateFileStats>,
     /// Stats from running `check` for comparability when computing sums with `--missing`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) check_stats: Option<CheckStats>,
+    pub(crate) check_stats: Option<Box<CheckStats>>,
 }
 
 impl GenerateStats {
@@ -37,7 +37,7 @@ impl GenerateStats {
                 .into_iter()
                 .filter(|stat| !stat.checksums_generated.0.is_empty())
                 .collect(),
-            check_stats,
+            check_stats: check_stats.map(Box::new),
         }
     }
 }
@@ -130,6 +130,9 @@ pub struct CheckStats {
     /// The set of sums that were updated if using `--update`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) updated: Vec<String>,
+    /// Any generate stats computed if using `--missing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) generate_stats: Option<GenerateStats>,
 }
 
 impl CheckStats {
@@ -140,6 +143,7 @@ impl CheckStats {
         compared: Vec<CheckComparison>,
         groups: Vec<Vec<String>>,
         updated: Vec<String>,
+        generate_stats: Option<GenerateStats>,
     ) -> Self {
         Self {
             elapsed_seconds,
@@ -147,11 +151,17 @@ impl CheckStats {
             compared,
             groups,
             updated,
+            generate_stats,
         }
     }
 
     /// Create check stats from a task.
-    pub fn from_task(group_by: GroupBy, task: CheckTask, elapsed: Duration) -> Self {
+    pub fn from_task(
+        group_by: GroupBy,
+        task: CheckTask,
+        elapsed: Duration,
+        generate_stats: Option<GenerateStats>,
+    ) -> Self {
         let (objects, compared, updated) = task.into_inner();
 
         Self::new(
@@ -160,6 +170,7 @@ impl CheckStats {
             compared,
             objects.to_groups(),
             updated,
+            generate_stats,
         )
     }
 }
@@ -210,9 +221,6 @@ pub struct CopyStats {
     /// The API errors if there was permission issues for copying metadata or tags.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) api_errors: Vec<ApiError>,
-    /// Stats from generating sums when checking the copy operations.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) generate_stats: Option<GenerateStats>,
     /// Stats from checking sums to ensure that the copy was successful.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) check_stats: Option<CheckStats>,
@@ -223,7 +231,6 @@ impl CopyStats {
     pub fn from_task(
         copy_task: CopyTask,
         check_stats: Option<CheckStats>,
-        generate_stats: Option<GenerateStats>,
         elapsed: Duration,
         skipped: bool,
         sums_mismatch: bool,
@@ -239,7 +246,6 @@ impl CopyStats {
             reason: check_stats.as_ref().and_then(Option::<ChecksumPair>::from),
             n_retries: copy_task.n_retries(),
             api_errors: copy_task.api_errors().to_vec(),
-            generate_stats,
             check_stats,
         }
     }

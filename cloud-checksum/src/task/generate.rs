@@ -79,8 +79,13 @@ impl GenerateTaskBuilder {
     }
 
     /// Write the file to the specified location one computed.
-    pub fn write(mut self) -> Self {
-        self.write = true;
+    pub fn write(self) -> Self {
+        self.set_write(true)
+    }
+
+    /// Set the write flag.
+    pub fn set_write(mut self, write: bool) -> Self {
+        self.write = write;
         self
     }
 
@@ -302,6 +307,11 @@ impl GenerateTask {
             self.checksums_generated,
         )
     }
+
+    /// Return the computed sums file.
+    pub fn sums_file(&self) -> &SumsFile {
+        &self.output
+    }
 }
 
 /// Holds a file name and checksum context.
@@ -367,7 +377,7 @@ impl SumCtxPairs {
                     file_ctx.set_file_size(file.size);
 
                     let first = state.into_iter().next();
-                    first.map(|state| SumCtxPair::new(state.0.location(), file_ctx.clone()))
+                    first.map(|state| SumCtxPair::new(state.location(), file_ctx.clone()))
                 })
                 .collect();
 
