@@ -214,7 +214,7 @@ impl CopyTaskBuilder {
         let min_part_size = destination_copy.min_part_size();
 
         // Only use the sums file if the size is not set.
-        let sums = if self.part_size.is_none() {
+        /*let sums = if self.part_size.is_none() {
             ObjectSumsBuilder::default()
                 .set_client(self.client.clone())
                 .build(self.source.to_string())
@@ -223,7 +223,9 @@ impl CopyTaskBuilder {
                 .await?
         } else {
             None
-        };
+        }; */
+        
+        let sums = None;
 
         // If there are existing sums, try the best part size.
         let settings = if let Some(sums) = sums {
@@ -359,6 +361,7 @@ impl CopyTaskBuilder {
         let concurrency = self
             .concurrency
             .ok_or_else(|| CopyError("concurrency not set".to_string()))?;
+
         let settings = self
             .use_settings(destination.clone(), destination_copy.as_ref(), &state)
             .await?;

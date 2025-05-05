@@ -43,6 +43,15 @@ pub struct Command {
     /// Options related to outputting data from the CLI.
     #[command(flatten)]
     pub output: Output,
+    /// Options related to how cloud credentials are obtained
+    #[arg(
+        global = true,
+        long,
+        env,
+        default_value = "default-environment",
+        alias = "source-credential-provider"
+    )]
+    pub credential_provider: CredentialProvider,
 }
 
 impl Command {
@@ -86,7 +95,7 @@ impl Command {
 
     /// Execute the command from the args.
     pub async fn execute(self) -> Result<()> {
-        let client = Arc::new(default_s3_client().await?);
+        let client = Arc::new(default_s3_client(self.credential_provider.is_anonymous()).await?);
 
         let pretty_json = self.output.pretty_json;
         let write_sums_file = self.output.write_sums_file;
@@ -435,6 +444,23 @@ impl CopyMode {
     }
 }
 
+/// Details of how to locate credentials or specify no credentials needed
+#[derive(Debug, Clone, ValueEnum, Copy, Default, Deserialize, Serialize)]
+pub enum CredentialProvider {
+    /// Use the default mechanism of the SDK that obtains credentials from the system
+    #[default]
+    DefaultEnvironment,
+    /// Explicitly state that we want to attempt operations using no credentials (no SDK signing)
+    NoCredentials,
+}
+
+impl CredentialProvider {
+    /// Is this source of credentials one with no credentials (i.e. anonymous unsigned calls)
+    pub fn is_anonymous(&self) -> bool {
+        matches!(self, CredentialProvider::NoCredentials)
+    }
+}
+
 /// The copy subcommand components.
 #[derive(Debug, Args)]
 pub struct Copy {
@@ -456,6 +482,10 @@ pub struct Copy {
     pub metadata_mode: MetadataCopy,
     #[arg(long, env, default_value = "server-side")]
     pub copy_mode: CopyMode,
+
+    #[arg(long, env, default_value = "default-environment")]
+    pub destination_credential_provider: CredentialProvider,
+
     /// The threshold at which a file uses multipart uploads when copying to S3. This can be
     /// specified with a size unit, e.g. 8mib. By default, a multipart copy will occur when the
     /// source file was uploaded using multipart, in order to match sums. This can be used to

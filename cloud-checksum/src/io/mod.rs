@@ -106,9 +106,25 @@ impl TryFrom<&str> for Provider {
     }
 }
 
-pub async fn default_s3_client() -> Result<Client> {
-    let config = load_defaults(BehaviorVersion::latest()).await;
-    Ok(Client::new(&config))
+pub async fn default_s3_client(make_anonymous: bool) -> Result<Client> {
+    let sdk_config = match make_anonymous {
+        true => {
+            aws_config::defaults(BehaviorVersion::v2025_01_17())
+                .region("ap-southeast-2")
+                .no_credentials()
+                .load()
+                .await
+        }
+        false => {
+            aws_config::defaults(BehaviorVersion::v2025_01_17())
+                .load()
+                .await
+        }
+    };
+
+    let config = aws_sdk_s3::config::Builder::from(&sdk_config).build();
+
+    Ok(Client::from_conf(config))
 }
 
 #[cfg(test)]
