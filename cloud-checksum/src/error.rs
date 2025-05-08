@@ -7,6 +7,7 @@ use aws_smithy_types::byte_stream;
 use serde::{Deserialize, Serialize, Serializer};
 use std::num::TryFromIntError;
 use std::{error, io, result};
+use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
@@ -86,10 +87,11 @@ impl From<serde_json::Error> for Error {
 
 impl<T> From<SdkError<T>> for Error
 where
-    T: Send + Sync + error::Error + CreateUnhandledError + 'static,
+    T: Send + Sync + error::Error + CreateUnhandledError + ProvideErrorMetadata + 'static,
 {
     fn from(err: SdkError<T>) -> Self {
-        Self::AwsError(err.into_service_error().to_string())
+        let err = err.into_service_error();
+        Self::AwsError(format!("{}: {}", err, err.message().unwrap_or_default()))
     }
 }
 
