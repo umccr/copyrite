@@ -4,6 +4,7 @@
 use crate::checksum::file::Checksum;
 use crate::checksum::Ctx;
 use crate::cli::CopyMode;
+use crate::error::ApiError;
 use crate::task::check::{CheckTask, GroupBy};
 use crate::task::copy::CopyTask;
 use crate::task::generate::GenerateTask;
@@ -172,22 +173,6 @@ impl CheckStats {
             updated,
             generate_stats,
         )
-    }
-}
-
-/// An API error that could be returned from storage.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ApiError {
-    /// The error kind, e.g. `AccessDenied`.
-    pub(crate) error: String,
-    /// The error message.
-    pub(crate) message: String,
-}
-
-impl ApiError {
-    /// Create a new error.
-    pub fn new(error: String, message: String) -> Self {
-        Self { error, message }
     }
 }
 

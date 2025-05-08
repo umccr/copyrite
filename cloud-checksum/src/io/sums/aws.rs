@@ -6,7 +6,7 @@ use crate::checksum::file::Checksum;
 use crate::checksum::file::SumsFile;
 use crate::checksum::standard::StandardCtx;
 use crate::checksum::Ctx;
-use crate::error::Error::{AwsError, ParseError};
+use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use crate::io::sums::ObjectSums;
 use crate::io::Provider;
@@ -369,7 +369,7 @@ impl S3 {
             .await?;
 
         if sums_file.checksums.is_empty() {
-            return Err(AwsError(
+            return Err(Error::aws_error(
                 "failed to create sums file from metadata".to_string(),
             ));
         }
