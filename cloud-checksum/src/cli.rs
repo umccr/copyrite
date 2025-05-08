@@ -8,7 +8,7 @@ use crate::error::Error::{CheckError, ParseError};
 use crate::error::Result;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::ObjectSumsBuilder;
-use crate::io::{default_s3_client, Provider};
+use crate::io::{create_s3_client, Provider};
 use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateFileStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::CopyTaskBuilder;
@@ -43,15 +43,9 @@ pub struct Command {
     /// Options related to outputting data from the CLI.
     #[command(flatten)]
     pub output: Output,
-    /// Options related to how cloud credentials are obtained
-    #[arg(
-        global = true,
-        long,
-        env,
-        default_value = "default-environment",
-        alias = "source-credential-provider"
-    )]
-    pub credential_provider: CredentialProvider,
+    /// Options related to credentials.
+    #[command(flatten)]
+    pub credentials: Credentials,
 }
 
 impl Command {
@@ -90,12 +84,23 @@ impl Command {
             }
         }
 
+        let credentials = &args.credentials;
+        if (credentials.source_credential_provider.is_aws() && credentials.source_profile.is_none())
+            || (credentials.destination_credential_provider.is_aws()
+                && credentials.destination_profile.is_none())
+        {
+            return Err(ParseError(
+                "a profile must be specified when using the `aws-profile` credential provider"
+                    .to_string(),
+            ));
+        }
+
         Ok(())
     }
 
     /// Execute the command from the args.
     pub async fn execute(self) -> Result<()> {
-        let client = Arc::new(default_s3_client(self.credential_provider.is_anonymous()).await?);
+        let client = Arc::new(self.credentials.source_client().await?);
 
         let pretty_json = self.output.pretty_json;
         let write_sums_file = self.output.write_sums_file;
@@ -121,15 +126,25 @@ impl Command {
                     .inspect_err(|err| {
                         Self::print_stats(err, pretty_json).ok();
                     })?;
+
                 Self::print_stats(&output, pretty_json)?;
             }
             Subcommands::Copy(copy_args) => {
+                let destination_client = Arc::new(self.credentials.destination_client().await?);
+
                 let output = copy_args
-                    .copy(client, self.optimization, write_sums_file)
+                    .copy(
+                        client,
+                        destination_client,
+                        self.credentials,
+                        self.optimization,
+                        write_sums_file,
+                    )
                     .await
                     .inspect_err(|err| {
                         Self::print_stats(err, pretty_json).ok();
                     })?;
+
                 Self::print_stats(&output, pretty_json)?;
             }
         }
@@ -452,12 +467,24 @@ pub enum CredentialProvider {
     DefaultEnvironment,
     /// Explicitly state that we want to attempt operations using no credentials (no SDK signing)
     NoCredentials,
+    /// An AWS profile name.
+    AwsProfile,
 }
 
 impl CredentialProvider {
     /// Is this source of credentials one with no credentials (i.e. anonymous unsigned calls)
     pub fn is_anonymous(&self) -> bool {
         matches!(self, CredentialProvider::NoCredentials)
+    }
+
+    /// Is this an aws-profile credential provider.
+    pub fn is_aws(&self) -> bool {
+        matches!(self, CredentialProvider::AwsProfile)
+    }
+
+    /// Is this a default credential provider.
+    pub fn is_default(&self) -> bool {
+        matches!(self, CredentialProvider::DefaultEnvironment)
     }
 }
 
@@ -482,10 +509,6 @@ pub struct Copy {
     pub metadata_mode: MetadataCopy,
     #[arg(long, env, default_value = "server-side")]
     pub copy_mode: CopyMode,
-
-    #[arg(long, env, default_value = "default-environment")]
-    pub destination_credential_provider: CredentialProvider,
-
     /// The threshold at which a file uses multipart uploads when copying to S3. This can be
     /// specified with a size unit, e.g. 8mib. By default, a multipart copy will occur when the
     /// source file was uploaded using multipart, in order to match sums. This can be used to
@@ -537,7 +560,9 @@ impl Copy {
     /// Perform the copy sub command from the args.
     pub async fn copy(
         self,
-        client: Arc<Client>,
+        source_client: Arc<Client>,
+        destination_client: Arc<Client>,
+        credentials: Credentials,
         optimization: Optimization,
         write_sums_file: bool,
     ) -> Result<CopyStats> {
@@ -547,7 +572,7 @@ impl Copy {
         if !self.no_skip {
             // Check if it exists in the first place.
             let file_size = ObjectSumsBuilder::default()
-                .set_client(Some(client.clone()))
+                .set_client(Some(source_client.clone()))
                 .build(self.destination.to_string())
                 .await?
                 .file_size()
@@ -559,7 +584,12 @@ impl Copy {
 
             if exists {
                 let check_stats = self
-                    .copy_check(client.clone(), optimization.clone(), false, write_sums_file)
+                    .copy_check(
+                        source_client.clone(),
+                        optimization.clone(),
+                        false,
+                        write_sums_file,
+                    )
                     .await?;
 
                 if check_stats.groups.len() == 1 {
@@ -581,6 +611,15 @@ impl Copy {
             }
         }
 
+        // The copy mode must be download-upload if not using default credential providers.
+        let copy_mode = if credentials.source_credential_provider.is_default()
+            && credentials.destination_credential_provider.is_default()
+        {
+            self.copy_mode
+        } else {
+            CopyMode::DownloadUpload
+        };
+
         let result = CopyTaskBuilder::default()
             .with_source(self.source.to_string())
             .with_destination(self.destination.to_string())
@@ -588,8 +627,9 @@ impl Copy {
             .with_multipart_threshold(self.multipart_threshold)
             .with_concurrency(self.concurrency)
             .with_part_size(self.part_size)
-            .with_copy_mode(self.copy_mode)
-            .with_client(client.clone())
+            .with_copy_mode(copy_mode)
+            .with_source_client(source_client.clone())
+            .with_destination_client(destination_client)
             .build()
             .await?
             .run()
@@ -599,7 +639,7 @@ impl Copy {
         let sums_mismatch = exists;
         let copy_stats = if !self.no_check {
             let check_stats = self
-                .copy_check(client, optimization, sums_mismatch, write_sums_file)
+                .copy_check(source_client, optimization, sums_mismatch, write_sums_file)
                 .await?;
             CopyStats::from_task(
                 result,
@@ -701,4 +741,73 @@ pub struct Output {
     /// destination.
     #[arg(global = true, long, env)]
     pub write_sums_file: bool,
+}
+
+/// Options related to credentials. Options prefixed with `source_` affect `check`, `generate` and
+/// the source of a `copy` command. These options also have an alias without the prefix as they are
+/// used in all commands. Options prefixed with `destination_` only affect the destination of a
+/// `copy` command.
+#[derive(Args, Debug)]
+#[group(required = false)]
+pub struct Credentials {
+    /// The credentials source credentials to use. This affects the credentials used for `check`
+    /// `generate` and the source of a `copy` operation.
+    #[arg(
+        global = true,
+        long,
+        env,
+        default_value = "default-environment",
+        alias = "credential-provider"
+    )]
+    pub source_credential_provider: CredentialProvider,
+    /// The destination credentials to use. This only affects the credentials used for the
+    /// destination of a `copy` operation.
+    #[arg(global = true, long, env, default_value = "default-environment")]
+    pub destination_credential_provider: CredentialProvider,
+    /// The source profile to use if the source credential provider is `aws-profile`.
+    /// This must be specified if using `aws-profile`.
+    #[arg(global = true, long, env, alias = "profile")]
+    pub source_profile: Option<String>,
+    /// The destinatiom profile to use if the destination credential provider is `aws-profile`.
+    /// This must be specified if using `aws-profile`.
+    #[arg(global = true, long, env)]
+    pub destination_profile: Option<String>,
+    /// Set the region for the source credential provider.
+    #[arg(global = true, long, env, alias = "region")]
+    pub source_region: Option<String>,
+    /// Set the region for the source credential provider.
+    #[arg(global = true, long, env)]
+    pub destination_region: Option<String>,
+    /// Set the source endpoint URL for AWS calls. This allows using a different endpoint that
+    /// has an S3-compatible storage API.
+    #[arg(global = true, long, env, alias = "endpoint-url")]
+    pub source_endpoint_url: Option<String>,
+    /// Set the destination endpoint URL for AWS calls. This allows using a different endpoint
+    /// that has an S3-compatible storage API.
+    #[arg(global = true, long, env)]
+    pub destination_endpoint_url: Option<String>,
+}
+
+impl Credentials {
+    /// Construct the source client from the credentials.
+    pub async fn source_client(&self) -> Result<Client> {
+        create_s3_client(
+            &self.source_credential_provider,
+            self.source_profile.as_deref(),
+            self.source_region.as_deref(),
+            self.source_endpoint_url.as_deref(),
+        )
+        .await
+    }
+
+    /// Construct the destination client from the credentials.
+    pub async fn destination_client(&self) -> Result<Client> {
+        create_s3_client(
+            &self.destination_credential_provider,
+            self.destination_profile.as_deref(),
+            self.destination_region.as_deref(),
+            self.destination_endpoint_url.as_deref(),
+        )
+        .await
+    }
 }
