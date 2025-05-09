@@ -18,13 +18,26 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 /// Build a check task.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CheckTaskBuilder {
     files: Vec<String>,
     sums_files: Vec<(String, SumsFile)>,
     group_by: GroupBy,
     update: bool,
-    client: Option<Arc<Client>>,
+    clients: Vec<Option<Arc<Client>>>,
+}
+
+impl Default for CheckTaskBuilder {
+    fn default() -> Self {
+        Self {
+            files: Default::default(),
+            sums_files: Default::default(),
+            group_by: Default::default(),
+            update: Default::default(),
+            // Ensure at least one element in the vector to repeat.
+            clients: vec![None],
+        }
+    }
 }
 
 impl CheckTaskBuilder {
@@ -37,6 +50,12 @@ impl CheckTaskBuilder {
     /// Set the sums file directly without reading from input files.
     pub fn with_sums_files(mut self, files: Vec<(String, SumsFile)>) -> Self {
         self.sums_files = files;
+        self
+    }
+
+    /// Set the S3 client to use for each input file.
+    pub fn with_clients(mut self, clients: Vec<Arc<Client>>) -> Self {
+        self.clients = clients.into_iter().map(Some).collect();
         self
     }
 
@@ -54,7 +73,7 @@ impl CheckTaskBuilder {
 
     /// Set the S3 client to use.
     pub fn with_client(mut self, client: Arc<Client>) -> Self {
-        self.client = Some(client);
+        self.clients = vec![Some(client)];
         self
     }
 
@@ -62,31 +81,32 @@ impl CheckTaskBuilder {
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
 
-        let (objects, errors): (Vec<_>, Vec<_>) = join_all(self.files.into_iter().map(|file| {
-            let client = self.client.clone();
+        let (objects, errors): (Vec<_>, Vec<_>) = join_all(
+            self.files
+                .into_iter()
+                .zip(self.clients.into_iter().cycle())
+                .map(|(file, client)| async move {
+                    let mut sums = ObjectSumsBuilder::default()
+                        .set_client(client)
+                        .build(file.to_string())
+                        .await?;
 
-            async move {
-                let mut sums = ObjectSumsBuilder::default()
-                    .set_client(client)
-                    .build(file.to_string())
-                    .await?;
+                    let file_size = sums.file_size().await?;
+                    let existing = sums
+                        .sums_file()
+                        .await?
+                        .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
 
-                let file_size = sums.file_size().await?;
-                let existing = sums
-                    .sums_file()
-                    .await?
-                    .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
-
-                let errors = sums.api_errors();
-                Ok((
-                    (
-                        SumsKey((existing, sums.location())),
-                        BTreeSet::from_iter(vec![State::ObjectSums(sums)]),
-                    ),
-                    errors,
-                ))
-            }
-        }))
+                    let errors = sums.api_errors();
+                    Ok((
+                        (
+                            SumsKey((existing, sums.location())),
+                            BTreeSet::from_iter(vec![State::ObjectSums(sums)]),
+                        ),
+                        errors,
+                    ))
+                }),
+        )
         .await
         .into_iter()
         .collect::<Result<Vec<_>>>()?

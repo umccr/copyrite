@@ -8,7 +8,7 @@ use crate::error::Error::{CheckError, ParseError};
 use crate::error::Result;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::ObjectSumsBuilder;
-use crate::io::{create_s3_client, Provider};
+use crate::io::{create_s3_client, default_s3_client, Provider};
 use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateFileStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::CopyTaskBuilder;
@@ -108,7 +108,7 @@ impl Command {
         match self.commands {
             Subcommands::Generate(generate_args) => {
                 let (sums, stats) = generate_args
-                    .generate(self.optimization, client, true)
+                    .generate(self.optimization, vec![client], true)
                     .await
                     .inspect_err(|err| {
                         Self::print_stats(err, pretty_json).ok();
@@ -122,7 +122,7 @@ impl Command {
             }
             Subcommands::Check(check_args) => {
                 let output = check_args
-                    .check(self.optimization, client, write_sums_file, false)
+                    .check(self.optimization, write_sums_file, false, vec![client])
                     .await
                     .inspect_err(|err| {
                         Self::print_stats(err, pretty_json).ok();
@@ -224,7 +224,7 @@ impl Generate {
     pub async fn generate(
         self,
         optimization: Optimization,
-        client: Arc<Client>,
+        mut clients: Vec<Arc<Client>>,
         write_sums_file: bool,
     ) -> Result<(Vec<SumsFile>, Option<GenerateStats>)> {
         if self.input[0] == "-" {
@@ -235,7 +235,7 @@ impl Generate {
                 .with_verify(self.verify)
                 .with_context(self.checksum)
                 .with_reader(reader)
-                .with_client(client)
+                .set_client(clients.first().cloned())
                 .build()
                 .await?
                 .run()
@@ -254,7 +254,7 @@ impl Generate {
             if self.missing {
                 let now = Instant::now();
                 let (ctxs, group_by) =
-                    Check::comparable_check(self.input.clone(), client.clone()).await?;
+                    Check::comparable_check(self.input.clone(), clients.clone()).await?;
                 let (objects, compared, updated, api_errors) = ctxs.into_inner();
                 check_stats = Some(CheckStats::new(
                     now.elapsed().as_secs_f64(),
@@ -266,9 +266,17 @@ impl Generate {
                     api_errors,
                 ));
 
+                if clients.is_empty() {
+                    clients = vec![Arc::new(default_s3_client().await?)];
+                }
+
                 let ctxs = SumCtxPairs::from_comparable(objects)?;
                 if let Some(ctxs) = ctxs {
-                    for ctx in ctxs.into_inner() {
+                    for (ctx, client) in ctxs
+                        .into_inner()
+                        .into_iter()
+                        .zip(clients.clone().into_iter().cycle())
+                    {
                         let (input, ctx) = ctx.into_inner();
                         let task = GenerateTaskBuilder::default()
                             .with_overwrite(self.force_overwrite)
@@ -276,7 +284,7 @@ impl Generate {
                             .with_input_file_name(input)
                             .with_context(vec![ctx])
                             .with_capacity(optimization.channel_capacity)
-                            .with_client(client.clone())
+                            .with_client(client)
                             .set_write(write_sums_file)
                             .build()
                             .await?
@@ -290,14 +298,14 @@ impl Generate {
                 }
             };
 
-            for input in self.input {
+            for (input, client) in self.input.into_iter().zip(clients.into_iter().cycle()) {
                 let task = GenerateTaskBuilder::default()
                     .with_overwrite(self.force_overwrite)
                     .with_verify(self.verify)
                     .with_input_file_name(input)
                     .with_context(self.checksum.clone())
                     .with_capacity(optimization.channel_capacity)
-                    .with_client(client.clone())
+                    .with_client(client)
                     .set_write(write_sums_file)
                     .build()
                     .await?
@@ -347,13 +355,13 @@ impl Check {
     /// Perform a check for comparability on the input files.
     pub async fn comparable_check(
         input: Vec<String>,
-        client: Arc<Client>,
+        clients: Vec<Arc<Client>>,
     ) -> Result<(CheckTask, GroupBy)> {
         Ok((
             CheckTaskBuilder::default()
                 .with_input_files(input)
                 .with_group_by(GroupBy::Comparability)
-                .with_client(client)
+                .with_clients(clients)
                 .build()
                 .await?
                 .run()
@@ -375,9 +383,9 @@ impl Check {
     pub async fn check(
         self,
         optimization: Optimization,
-        client: Arc<Client>,
         write_sums_file: bool,
         verify: bool,
+        clients: Vec<Arc<Client>>,
     ) -> Result<CheckStats> {
         let now = Instant::now();
         let group_by = self.group_by;
@@ -385,10 +393,10 @@ impl Check {
         let builder = CheckTaskBuilder::default()
             .with_group_by(group_by)
             .with_update(self.update)
-            .with_client(client.clone());
+            .with_clients(clients.clone());
         let mut generate_stats = None;
         let builder = if self.missing {
-            let (ctxs, _) = Check::comparable_check(self.input.clone(), client.clone()).await?;
+            let (ctxs, _) = Check::comparable_check(self.input.clone(), clients.clone()).await?;
             let checksum = Check::generate_sums(ctxs);
 
             let (sums, stats) = Generate {
@@ -398,7 +406,7 @@ impl Check {
                 force_overwrite: false,
                 verify,
             }
-            .generate(optimization, client.clone(), write_sums_file)
+            .generate(optimization, clients.clone(), write_sums_file)
             .await?;
             generate_stats = stats;
 
@@ -544,7 +552,8 @@ pub struct Copy {
 impl Copy {
     pub async fn copy_check(
         &self,
-        client: Arc<Client>,
+        source_client: Arc<Client>,
+        destination_client: Arc<Client>,
         optimization: Optimization,
         verify: bool,
         write_sums_file: bool,
@@ -557,7 +566,12 @@ impl Copy {
             group_by: GroupBy::Equality,
             missing: true,
         }
-        .check(optimization, client, write_sums_file, verify)
+        .check(
+            optimization,
+            write_sums_file,
+            verify,
+            vec![source_client, destination_client],
+        )
         .await?;
 
         Ok(result)
@@ -592,6 +606,7 @@ impl Copy {
                 let check_stats = self
                     .copy_check(
                         source_client.clone(),
+                        destination_client.clone(),
                         optimization.clone(),
                         false,
                         write_sums_file,
@@ -635,7 +650,7 @@ impl Copy {
             .with_part_size(self.part_size)
             .with_copy_mode(copy_mode)
             .with_source_client(source_client.clone())
-            .with_destination_client(destination_client)
+            .with_destination_client(destination_client.clone())
             .build()
             .await?
             .run()
@@ -645,7 +660,13 @@ impl Copy {
         let sums_mismatch = exists;
         let copy_stats = if !self.no_check {
             let check_stats = self
-                .copy_check(source_client, optimization, sums_mismatch, write_sums_file)
+                .copy_check(
+                    source_client,
+                    destination_client,
+                    optimization,
+                    sums_mismatch,
+                    write_sums_file,
+                )
                 .await?;
             CopyStats::from_task(
                 result,

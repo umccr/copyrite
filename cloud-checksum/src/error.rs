@@ -16,6 +16,7 @@ use aws_sdk_s3::operation::upload_part_copy::UploadPartCopyError;
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_runtime_api::client::result::CreateUnhandledError;
 use aws_smithy_types::byte_stream;
+use aws_smithy_types::error::display::DisplayErrorContext;
 use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use serde::{Deserialize, Serialize, Serializer};
 use std::fmt::{Debug, Display, Formatter};
@@ -177,7 +178,7 @@ where
             err.message()
                 .map(|msg| msg.to_string())
                 .or_else(|| err.as_service_error().map(|err| err.to_string()))
-                .unwrap_or_else(|| "Unknown".to_string()),
+                .unwrap_or_else(|| DisplayErrorContext(&err).to_string()),
         )
     }
 }

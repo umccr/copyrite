@@ -341,39 +341,26 @@ impl CopyTaskBuilder {
             CopyMode::DownloadUpload
         };
 
-        let (source_copy, destination_copy) = if is_same_provider {
-            let source = ObjectCopyBuilder::default()
-                .with_copy_metadata(self.metadata_mode)
-                .with_copy_tags(self.tag_mode)
-                .set_client(self.source_client.clone())
-                .set_source(Some(source.clone()))
-                .set_destination(Some(destination.clone()))
-                .build()
-                .await?;
-
-            (source.clone(), source)
-        } else {
-            (
-                ObjectCopyBuilder::default()
-                    .with_copy_metadata(self.metadata_mode)
-                    .with_copy_tags(self.tag_mode)
-                    .set_client(self.source_client.clone())
-                    .set_source(Some(source.clone()))
-                    .build()
-                    .await?,
-                ObjectCopyBuilder::default()
-                    .with_copy_metadata(self.metadata_mode)
-                    .with_copy_tags(self.tag_mode)
-                    .set_client(
-                        self.destination_client
-                            .clone()
-                            .or_else(|| self.source_client.clone()),
-                    )
-                    .set_destination(Some(destination.clone()))
-                    .build()
-                    .await?,
+        let source_copy = ObjectCopyBuilder::default()
+            .with_copy_metadata(self.metadata_mode)
+            .with_copy_tags(self.tag_mode)
+            .set_client(self.source_client.clone())
+            .set_source(Some(source.clone()))
+            .set_destination(Some(destination.clone()))
+            .build()
+            .await?;
+        let destination_copy = ObjectCopyBuilder::default()
+            .with_copy_metadata(self.metadata_mode)
+            .with_copy_tags(self.tag_mode)
+            .set_client(
+                self.destination_client
+                    .clone()
+                    .or_else(|| self.source_client.clone()),
             )
-        };
+            .set_destination(Some(destination.clone()))
+            .build()
+            .await?;
+
         let state = source_copy.initialize_state().await?;
 
         let concurrency = self

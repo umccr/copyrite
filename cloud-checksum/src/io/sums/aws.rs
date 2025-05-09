@@ -178,7 +178,11 @@ impl S3 {
     /// checksums (not including the `ETag`) are base64 encoded when returned from the SDK.
     /// The `ETag` is hex encoded.
     fn decode_sum(ctx: &StandardCtx, sum: String) -> Result<Vec<u8>> {
-        let sum = sum.split("-").next().unwrap_or_else(|| &sum);
+        let sum = sum
+            .split("-")
+            .next()
+            .unwrap_or_else(|| &sum)
+            .trim_matches('"');
 
         if Self::is_additional_checksum(ctx) {
             let data = BASE64_STANDARD

@@ -73,8 +73,13 @@ impl GenerateTaskBuilder {
     }
 
     /// Set the S3 client to use.
-    pub fn with_client(mut self, client: Arc<Client>) -> Self {
-        self.client = Some(client);
+    pub fn with_client(self, client: Arc<Client>) -> Self {
+        self.set_client(Some(client))
+    }
+
+    /// Set the S3 client to use.
+    pub fn set_client(mut self, client: Option<Arc<Client>>) -> Self {
+        self.client = client;
         self
     }
 
