@@ -899,21 +899,23 @@ pub(crate) mod test {
         mock_client!(
             aws_sdk_s3,
             RuleMode::Sequential,
-            &[
-                head_object_size_rule(format!("\"{}\"", EXPECTED_MD5_SUM), None, None),
-                get_object_attributes
-            ]
+            get_object_attributes.as_slice()
         )
     }
 
-    pub(crate) fn mock_single_part_etag_only_rule() -> Rule {
-        mock!(Client::get_object_attributes)
-            .match_requests(move |req| req.bucket() == Some("bucket") && req.key() == Some("key"))
-            .then_output(|| {
-                GetObjectAttributesOutput::builder()
-                    .e_tag(EXPECTED_MD5_SUM)
-                    .object_size(TEST_FILE_SIZE as i64)
-                    .build()
-            })
+    pub(crate) fn mock_single_part_etag_only_rule() -> Vec<Rule> {
+        vec![
+            head_object_size_rule(format!("\"{}\"", EXPECTED_MD5_SUM), None, None),
+            mock!(Client::get_object_attributes)
+                .match_requests(move |req| {
+                    req.bucket() == Some("bucket") && req.key() == Some("key")
+                })
+                .then_output(|| {
+                    GetObjectAttributesOutput::builder()
+                        .e_tag(EXPECTED_MD5_SUM)
+                        .object_size(TEST_FILE_SIZE as i64)
+                        .build()
+                }),
+        ]
     }
 }

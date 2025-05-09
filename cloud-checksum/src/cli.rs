@@ -471,6 +471,11 @@ impl CopyMode {
     pub fn is_download_upload(&self) -> bool {
         matches!(self, CopyMode::DownloadUpload)
     }
+
+    /// Is this a server-side copy operation.
+    pub fn is_server_side(&self) -> bool {
+        matches!(self, CopyMode::ServerSide)
+    }
 }
 
 /// Details of how to locate credentials or specify no credentials needed
@@ -795,7 +800,7 @@ pub struct Credentials {
     /// This must be specified if using `aws-profile`.
     #[arg(global = true, long, env, alias = "profile")]
     pub source_profile: Option<String>,
-    /// The destinatiom profile to use if the destination credential provider is `aws-profile`.
+    /// The destination profile to use if the destination credential provider is `aws-profile`.
     /// This must be specified if using `aws-profile`.
     #[arg(global = true, long, env)]
     pub destination_profile: Option<String>,

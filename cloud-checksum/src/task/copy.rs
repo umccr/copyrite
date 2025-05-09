@@ -341,25 +341,35 @@ impl CopyTaskBuilder {
             CopyMode::DownloadUpload
         };
 
-        let source_copy = ObjectCopyBuilder::default()
-            .with_copy_metadata(self.metadata_mode)
-            .with_copy_tags(self.tag_mode)
-            .set_client(self.source_client.clone())
-            .set_source(Some(source.clone()))
-            .set_destination(Some(destination.clone()))
-            .build()
-            .await?;
-        let destination_copy = ObjectCopyBuilder::default()
-            .with_copy_metadata(self.metadata_mode)
-            .with_copy_tags(self.tag_mode)
-            .set_client(
-                self.destination_client
-                    .clone()
-                    .or_else(|| self.source_client.clone()),
+        let (source_copy, destination_copy) = if copy_mode.is_server_side() {
+            let source = ObjectCopyBuilder::default()
+                .with_copy_metadata(self.metadata_mode)
+                .with_copy_tags(self.tag_mode)
+                .set_client(self.source_client.clone())
+                .set_source(Some(source.clone()))
+                .set_destination(Some(destination.clone()))
+                .build()
+                .await?;
+
+            (source.clone(), source)
+        } else {
+            (
+                ObjectCopyBuilder::default()
+                    .with_copy_metadata(self.metadata_mode)
+                    .with_copy_tags(self.tag_mode)
+                    .set_client(self.source_client.clone())
+                    .set_source(Some(source.clone()))
+                    .build()
+                    .await?,
+                ObjectCopyBuilder::default()
+                    .with_copy_metadata(self.metadata_mode)
+                    .with_copy_tags(self.tag_mode)
+                    .set_client(self.destination_client.clone())
+                    .set_destination(Some(destination.clone()))
+                    .build()
+                    .await?,
             )
-            .set_destination(Some(destination.clone()))
-            .build()
-            .await?;
+        };
 
         let state = source_copy.initialize_state().await?;
 
@@ -694,7 +704,7 @@ pub(crate) mod test {
     async fn copy_settings() -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
 
-        let single_part = vec![mock_single_part_etag_only_rule()];
+        let single_part = mock_single_part_etag_only_rule();
         let multipart = mock_multi_part_etag_only_rule();
 
         let builder = CopyTaskBuilder::default()
