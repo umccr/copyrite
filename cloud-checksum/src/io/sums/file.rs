@@ -3,8 +3,9 @@
 
 use crate::checksum::file::SumsFile;
 use crate::error::Error::ParseError;
-use crate::error::Result;
+use crate::error::{ApiError, Result};
 use crate::io::sums::ObjectSums;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -92,7 +93,7 @@ impl File {
 #[async_trait::async_trait]
 impl ObjectSums for File {
     async fn sums_file(&mut self) -> Result<Option<SumsFile>> {
-        self.get_existing_sums().await
+        Ok(self.get_existing_sums().await?)
     }
 
     async fn reader(&mut self) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
@@ -109,5 +110,9 @@ impl ObjectSums for File {
 
     fn location(&self) -> String {
         self.file.to_string()
+    }
+
+    fn api_errors(&self) -> HashSet<ApiError> {
+        HashSet::new()
     }
 }

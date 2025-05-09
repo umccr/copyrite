@@ -4,7 +4,7 @@
 use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
 use crate::error::Error::GenerateError;
-use crate::error::{Error, Result};
+use crate::error::{ApiError, Error, Result};
 use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder, SharedReader};
 use crate::task::check::{CheckObjects, SumsKey};
@@ -308,6 +308,11 @@ impl GenerateTask {
         )
     }
 
+    /// Get the api errors.
+    pub fn api_errors(&self) -> HashSet<ApiError> {
+        self.object_sums.api_errors()
+    }
+
     /// Return the computed sums file.
     pub fn sums_file(&self) -> &SumsFile {
         &self.output
@@ -423,7 +428,7 @@ pub(crate) mod test {
             .with_group_by(GroupBy::Comparability)
             .build()
             .await?;
-        let (objects, _, _) = check.run().await?.into_inner();
+        let (objects, _, _, _) = check.run().await?.into_inner();
 
         let result = SumCtxPairs::from_comparable(objects)?.unwrap();
 

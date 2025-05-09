@@ -3,7 +3,7 @@
 
 use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
-use crate::error::{Error, Result};
+use crate::error::{ApiError, Error, Result};
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder};
 use crate::stats::{CheckComparison, ChecksumPair};
 use aws_sdk_s3::Client;
@@ -11,7 +11,7 @@ use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -62,7 +62,7 @@ impl CheckTaskBuilder {
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
 
-        let mut objects = join_all(self.files.into_iter().map(|file| {
+        let (objects, errors): (Vec<_>, Vec<_>) = join_all(self.files.into_iter().map(|file| {
             let client = self.client.clone();
 
             async move {
@@ -77,15 +77,28 @@ impl CheckTaskBuilder {
                     .await?
                     .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
 
+                let errors = sums.api_errors();
                 Ok((
-                    SumsKey((existing, sums.location())),
-                    BTreeSet::from_iter(vec![State::ObjectSums(sums)]),
+                    (
+                        SumsKey((existing, sums.location())),
+                        BTreeSet::from_iter(vec![State::ObjectSums(sums)]),
+                    ),
+                    errors,
                 ))
             }
         }))
         .await
         .into_iter()
-        .collect::<Result<BTreeMap<_, _>>>()?;
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .unzip();
+
+        let mut objects = BTreeMap::from_iter(objects);
+        let errors = HashSet::from_iter(
+            errors
+                .into_iter()
+                .flat_map(|err| err.into_iter().collect::<Vec<_>>()),
+        );
 
         for (location, sums) in self.sums_files {
             objects.insert(
@@ -98,6 +111,7 @@ impl CheckTaskBuilder {
             objects: CheckObjects(objects),
             group_by,
             update: self.update,
+            api_errors: errors,
             ..Default::default()
         })
     }
@@ -135,6 +149,14 @@ impl State {
         match self {
             State::ObjectSums(object) => object.sums_file().await,
             State::ExistingSums((_, sums)) => Ok(Some(sums.clone())),
+        }
+    }
+
+    /// Get the api errors.
+    pub fn api_errors(&mut self) -> HashSet<ApiError> {
+        match self {
+            State::ObjectSums(object) => object.api_errors(),
+            _ => HashSet::new(),
         }
     }
 
@@ -256,6 +278,7 @@ pub struct CheckTask {
     compared_directly: Vec<CheckComparison>,
     updated: Vec<String>,
     client: Option<Arc<Client>>,
+    api_errors: HashSet<ApiError>,
 }
 
 impl CheckTask {
@@ -360,6 +383,7 @@ impl CheckTask {
                     let mut location = location.clone();
                     let current = location.sums_file().await?;
 
+                    result.api_errors.extend(location.api_errors());
                     if current.as_ref() != Some(file) {
                         location.write_sums_file(file, client.clone()).await?;
                         updated_sums.push(location.location());
@@ -374,8 +398,20 @@ impl CheckTask {
     }
 
     /// Get the inner values.
-    pub fn into_inner(self) -> (CheckObjects, Vec<CheckComparison>, Vec<String>) {
-        (self.objects, self.compared_directly, self.updated)
+    pub fn into_inner(
+        self,
+    ) -> (
+        CheckObjects,
+        Vec<CheckComparison>,
+        Vec<String>,
+        HashSet<ApiError>,
+    ) {
+        (
+            self.objects,
+            self.compared_directly,
+            self.updated,
+            self.api_errors,
+        )
     }
 
     /// Get the inner state objects.
@@ -386,6 +422,11 @@ impl CheckTask {
     /// Get the comparisons.
     pub fn compared_directly(&self) -> &[CheckComparison] {
         self.compared_directly.as_slice()
+    }
+
+    /// Get the api errors.
+    pub fn api_errors(self) -> HashSet<ApiError> {
+        self.api_errors.clone()
     }
 }
 

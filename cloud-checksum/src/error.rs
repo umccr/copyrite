@@ -1,6 +1,7 @@
 //! Error handling logic.
 //!
 
+use crate::error::Error::AwsError;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError;
 use aws_sdk_s3::operation::copy_object::CopyObjectError;
@@ -23,7 +24,6 @@ use std::{error, fmt, io, result};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
-use crate::error::Error::AwsError;
 
 /// The result type.
 pub type Result<T> = result::Result<T, Error>;
@@ -57,7 +57,7 @@ pub enum Error {
     #[error("aws error: {message}")]
     AwsError {
         message: String,
-        api_error: Option<ApiError>
+        api_error: Option<ApiError>,
     },
 }
 
@@ -70,7 +70,10 @@ impl Debug for Error {
 impl Error {
     /// Create an AWS error from a string.
     pub fn aws_error(err: String) -> Self {
-        AwsError { message: err.to_string(), api_error: None }
+        AwsError {
+            message: err.to_string(),
+            api_error: None,
+        }
     }
 }
 
@@ -88,7 +91,6 @@ where
         err.serialize(serializer)
     }
 }
-
 
 fn serialize_try_from_int<S>(
     err: &TryFromIntError,
@@ -138,7 +140,7 @@ impl From<byte_stream::error::Error> for Error {
 }
 
 /// An API error that could be returned from storage.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialOrd, PartialEq, Ord, Hash)]
 pub struct ApiError {
     /// The error kind, e.g. `AccessDenied`.
     pub(crate) code: String,
@@ -206,7 +208,10 @@ macro_rules! generate_aws_error_impl {
         impl From<SdkError<$t>> for Error {
             fn from(err: SdkError<$t>) -> Self {
                 let err = ApiError::from(&err);
-                Self::AwsError { message: err.to_string(), api_error: Some(err) }
+                Self::AwsError {
+                    message: err.to_string(),
+                    api_error: Some(err),
+                }
             }
         }
     };

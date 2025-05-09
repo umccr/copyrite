@@ -14,6 +14,7 @@ use aws_sdk_s3::Client;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -32,6 +33,7 @@ pub struct CopyTaskBuilder {
     source_client: Option<Arc<Client>>,
     destination_client: Option<Arc<Client>>,
     concurrency: Option<usize>,
+    api_errors: HashSet<ApiError>,
 }
 
 /// Settings that determine the part size and additional checksums to use.
@@ -209,11 +211,11 @@ impl CopyTaskBuilder {
     /// 3. Use the `PART_SIZE_ORDERING` to find the best multipart copy part size if the size
     ///    reaches the `multipart_threshold` or otherwise use single part copies if possible.
     pub async fn use_settings(
-        self,
+        mut self,
         destination: Provider,
         destination_copy: &(dyn ObjectCopy + Send),
         state: &CopyState,
-    ) -> Result<CopySettings> {
+    ) -> Result<(Self, CopySettings)> {
         let size = state.size();
         let max_part_size = destination_copy.max_part_size();
         let max_parts = destination_copy.max_parts();
@@ -221,12 +223,14 @@ impl CopyTaskBuilder {
 
         // Only use the sums file if the size is not set at the source.
         let sums = if self.part_size.is_none() {
-            ObjectSumsBuilder::default()
+            let mut object = ObjectSumsBuilder::default()
                 .set_client(self.source_client.clone())
                 .build(self.source.to_string())
-                .await?
-                .sums_file()
-                .await?
+                .await?;
+
+            self.api_errors.extend(object.api_errors());
+
+            object.sums_file().await?
         } else {
             None
         };
@@ -244,7 +248,7 @@ impl CopyTaskBuilder {
                 destination,
             )?;
             if self.part_size.is_none() {
-                return Ok(settings);
+                return Ok((self, settings));
             } else {
                 Some(settings)
             }
@@ -271,7 +275,10 @@ impl CopyTaskBuilder {
                     max_part_size,
                     min_part_size,
                 ) {
-                    Ok(CopySettings::new(Some(part_size), additional_ctx, size))
+                    Ok((
+                        self,
+                        CopySettings::new(Some(part_size), additional_ctx, size),
+                    ))
                 } else {
                     Err(CopyError(format!(
                         "invalid part size `{}` and threshold `{}` for the object size `{}`",
@@ -281,7 +288,7 @@ impl CopyTaskBuilder {
             }
         }
 
-        let err = || {
+        let err_fn = || {
             CopyError(format!(
                 "failed to find a valid part size for the threshold `{}` with object size `{}`",
                 threshold, size
@@ -294,20 +301,23 @@ impl CopyTaskBuilder {
             });
 
             return if let Some(part_size) = part_size {
-                Ok(CopySettings::new(Some(*part_size), additional_ctx, size))
+                Ok((
+                    self,
+                    CopySettings::new(Some(*part_size), additional_ctx, size),
+                ))
             } else {
-                Err(err())
+                Err(err_fn())
             };
         }
 
         // Otherwise use single part if possible.
         if Self::is_single_part(size, max_part_size) {
-            return Ok(CopySettings::new(None, additional_ctx, size));
+            return Ok((self, CopySettings::new(None, additional_ctx, size)));
         }
 
         // This condition may occur if the size is greater than the possible single part upload
         // limit but lower than the threshold.
-        Err(err())
+        Err(err_fn())
     }
 
     /// Build a generate task.
@@ -370,7 +380,7 @@ impl CopyTaskBuilder {
             .concurrency
             .ok_or_else(|| CopyError("concurrency not set".to_string()))?;
 
-        let settings = self
+        let (this, settings) = self
             .use_settings(destination.clone(), destination_copy.as_ref(), &state)
             .await?;
 
@@ -388,7 +398,7 @@ impl CopyTaskBuilder {
             destination,
             bytes_transferred: 0,
             n_retries: 0,
-            api_errors: vec![],
+            api_errors: this.api_errors,
         };
 
         Ok(copy_task)
@@ -423,7 +433,7 @@ pub struct CopyTask {
     ordered_upload: bool,
     bytes_transferred: u64,
     n_retries: u64,
-    api_errors: Vec<ApiError>,
+    api_errors: HashSet<ApiError>,
 }
 
 impl CopyTask {
@@ -609,7 +619,8 @@ impl CopyTask {
 
         self.bytes_transferred = bytes_transferred;
         self.n_retries = n_retries;
-        self.api_errors = api_errors;
+        self.api_errors
+            .extend::<HashSet<ApiError>>(HashSet::from_iter(api_errors));
 
         Ok(self)
     }
@@ -635,8 +646,8 @@ impl CopyTask {
     }
 
     /// Get the api errors.
-    pub fn api_errors(&self) -> &[ApiError] {
-        self.api_errors.as_slice()
+    pub fn api_errors(&self) -> HashSet<ApiError> {
+        self.api_errors.clone()
     }
 
     /// Get the number of retries.

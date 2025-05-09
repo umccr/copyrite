@@ -19,6 +19,7 @@ use humantime::Duration;
 use parse_size::parse_size;
 use serde::{Deserialize, Serialize};
 use serde_json::{to_string, to_string_pretty};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -248,12 +249,13 @@ impl Generate {
             let mut check_stats = None;
             let mut generate_stats = vec![];
             let mut sums_files = vec![];
+            let mut errors = HashSet::new();
 
             if self.missing {
                 let now = Instant::now();
                 let (ctxs, group_by) =
                     Check::comparable_check(self.input.clone(), client.clone()).await?;
-                let (objects, compared, updated) = ctxs.into_inner();
+                let (objects, compared, updated, api_errors) = ctxs.into_inner();
                 check_stats = Some(CheckStats::new(
                     now.elapsed().as_secs_f64(),
                     group_by,
@@ -261,6 +263,7 @@ impl Generate {
                     objects.to_groups(),
                     updated,
                     None,
+                    api_errors,
                 ));
 
                 let ctxs = SumCtxPairs::from_comparable(objects)?;
@@ -281,6 +284,7 @@ impl Generate {
                             .await?;
 
                         sums_files.push(task.sums_file().clone());
+                        errors.extend(task.api_errors());
                         generate_stats.push(GenerateFileStats::from_task(task));
                     }
                 }
@@ -300,6 +304,7 @@ impl Generate {
                     .run()
                     .await?;
                 sums_files.push(task.sums_file().clone());
+                errors.extend(task.api_errors());
                 generate_stats.push(GenerateFileStats::from_task(task));
             }
 
@@ -309,6 +314,7 @@ impl Generate {
                     now.elapsed().as_secs_f64(),
                     generate_stats,
                     check_stats,
+                    errors,
                 )),
             ))
         }
@@ -603,7 +609,7 @@ impl Copy {
                         skipped: true,
                         sums_mismatch: false,
                         n_retries: 0,
-                        api_errors: vec![],
+                        api_errors: HashSet::new(),
                         check_stats: Some(check_stats),
                     };
                     return Ok(copy_stats);

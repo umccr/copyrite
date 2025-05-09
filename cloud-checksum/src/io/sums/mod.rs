@@ -2,13 +2,14 @@
 //!
 
 use crate::checksum::file::SumsFile;
-use crate::error::Result;
+use crate::error::{ApiError, Result};
 use crate::io::sums::aws::S3Builder;
 use crate::io::sums::file::FileBuilder;
 use crate::io::{default_s3_client, Provider};
 use aws_sdk_s3::Client;
 use dyn_clone::DynClone;
 use futures_util::Stream;
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
@@ -50,6 +51,9 @@ pub trait ObjectSums: DynClone {
 
     /// Get the location of the object.
     fn location(&self) -> String;
+
+    /// Any accumulated recoverable api errors.
+    fn api_errors(&self) -> HashSet<ApiError>;
 }
 
 dyn_clone::clone_trait_object!(ObjectSums);
