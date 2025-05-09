@@ -179,10 +179,10 @@ impl S3 {
     /// The `ETag` is hex encoded.
     fn decode_sum(ctx: &StandardCtx, sum: String) -> Result<Vec<u8>> {
         let sum = sum
+            .trim_matches('"')
             .split("-")
             .next()
-            .unwrap_or_else(|| &sum)
-            .trim_matches('"');
+            .unwrap_or_else(|| &sum);
 
         if Self::is_additional_checksum(ctx) {
             let data = BASE64_STANDARD
@@ -390,7 +390,7 @@ impl S3 {
 
     /// Parse the number of parts and the checksum type from a string.
     pub fn parse_parts_and_type(s: &str) -> Result<(Option<u64>, ChecksumType)> {
-        let split = s.rsplit_once("-");
+        let split = s.trim_matches('\"').rsplit_once("-");
         if let Some((_, parts)) = split {
             let parts = u64::from_str(parts).map_err(|err| {
                 ParseError(format!("failed to parse parts from checksum: {}", err))
@@ -483,6 +483,7 @@ pub(crate) mod test {
     use crate::checksum::standard::test::EXPECTED_MD5_SUM;
     use crate::task::generate::test::generate_for;
     use crate::test::{TEST_FILE_NAME, TEST_FILE_SIZE};
+    use aws_sdk_s3::operation::head_object::builders::HeadObjectOutputBuilder;
     use aws_sdk_s3::types;
     use aws_sdk_s3::types::GetObjectAttributesParts;
     use aws_smithy_mocks_experimental::{mock, mock_client, Rule, RuleMode};
@@ -695,7 +696,18 @@ pub(crate) mod test {
 
         // If an additional checksum is present, then there is no need to call head object as the
         // parts are always in the get object attributes response.
-        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes,])
+        mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            &[
+                &head_object_size_rule(
+                    format!("\"{}\"", EXPECTED_MD5_SUM_4),
+                    Some(4),
+                    Some(EXPECTED_SHA256_SUM_4.to_string())
+                ),
+                &get_object_attributes,
+            ]
+        )
     }
 
     fn mock_multi_part_with_sha256() -> Client {
@@ -756,7 +768,35 @@ pub(crate) mod test {
 
         // If an additional checksum is present, then there is no need to call head object as the
         // parts are always in the get object attributes response.
-        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes,])
+        mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            &[
+                &head_object_size_rule(
+                    format!("\"{}\"", EXPECTED_MD5_SUM_5),
+                    Some(5),
+                    Some(EXPECTED_SHA256_SUM_5.to_string())
+                ),
+                &get_object_attributes,
+            ]
+        )
+    }
+
+    fn head_object_size_rule(
+        e_tag: String,
+        parts_count: Option<i32>,
+        sha256: Option<String>,
+    ) -> Rule {
+        mock!(Client::head_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(move || {
+                HeadObjectOutputBuilder::default()
+                    .e_tag(&e_tag)
+                    .set_parts_count(parts_count)
+                    .set_checksum_sha256(sha256.clone())
+                    .content_length(TEST_FILE_SIZE as i64)
+                    .build()
+            })
     }
 
     fn mock_multi_part_etag_only_different_part_sizes() -> Client {
@@ -778,6 +818,7 @@ pub(crate) mod test {
             aws_sdk_s3,
             RuleMode::Sequential,
             &[
+                &head_object_size_rule(format!("\"{}\"", EXPECTED_MD5_SUM_4), Some(4), None),
                 &get_object_attributes,
                 &head_object_rule(214748365),
                 &head_object_rule(214748365),
@@ -813,6 +854,7 @@ pub(crate) mod test {
             });
 
         vec![
+            head_object_size_rule(format!("\"{}\"", EXPECTED_MD5_SUM_5), Some(5), None),
             get_object_attributes,
             head_object_rule(214748365),
             head_object_rule(214748365),
@@ -837,13 +879,31 @@ pub(crate) mod test {
                     .build()
             });
 
-        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes])
+        mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            &[
+                &head_object_size_rule(
+                    format!("\"{}\"", EXPECTED_MD5_SUM),
+                    None,
+                    Some(EXPECTED_SHA256_SUM.to_string())
+                ),
+                &get_object_attributes
+            ]
+        )
     }
 
     fn mock_single_part_etag_only() -> Client {
         let get_object_attributes = mock_single_part_etag_only_rule();
 
-        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes])
+        mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            &[
+                head_object_size_rule(format!("\"{}\"", EXPECTED_MD5_SUM), None, None),
+                get_object_attributes
+            ]
+        )
     }
 
     pub(crate) fn mock_single_part_etag_only_rule() -> Rule {
