@@ -25,6 +25,7 @@ pub struct CheckTaskBuilder {
     group_by: GroupBy,
     update: bool,
     clients: Vec<Option<Arc<Client>>>,
+    avoid_get_object_attributes: bool,
 }
 
 impl Default for CheckTaskBuilder {
@@ -36,6 +37,7 @@ impl Default for CheckTaskBuilder {
             update: Default::default(),
             // Ensure at least one element in the vector to repeat.
             clients: vec![None],
+            avoid_get_object_attributes: Default::default(),
         }
     }
 }
@@ -77,6 +79,12 @@ impl CheckTaskBuilder {
         self
     }
 
+    /// Avoid `GetObjectAttributes` calls.
+    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
+        self.avoid_get_object_attributes = avoid_get_object_attributes;
+        self
+    }
+
     /// Build a check task.
     pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
@@ -87,6 +95,7 @@ impl CheckTaskBuilder {
                 .zip(self.clients.into_iter().cycle())
                 .map(|(file, client)| async move {
                     let mut sums = ObjectSumsBuilder::default()
+                        .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
                         .set_client(client)
                         .build(file.to_string())
                         .await?;
@@ -186,12 +195,14 @@ impl State {
         &self,
         sums: &SumsFile,
         client: Option<Arc<Client>>,
+        avoid_get_object_attributes: bool,
     ) -> Result<()> {
         match self {
             State::ObjectSums(object) => object.write_sums_file(sums).await,
             State::ExistingSums((location, _)) => {
                 ObjectSumsBuilder::default()
                     .set_client(client)
+                    .with_avoid_get_object_attributes(avoid_get_object_attributes)
                     .build(location.to_string())
                     .await?
                     .write_sums_file(sums)
@@ -299,6 +310,7 @@ pub struct CheckTask {
     updated: Vec<String>,
     client: Option<Arc<Client>>,
     api_errors: HashSet<ApiError>,
+    avoid_get_object_attributes: bool,
 }
 
 impl CheckTask {
@@ -390,6 +402,7 @@ impl CheckTask {
     /// Runs the check task, returning the list of matching files.
     pub async fn run(self) -> Result<Self> {
         let update = self.update && matches!(self.group_by, GroupBy::Equality);
+        let avoid_get_object_attributes = self.avoid_get_object_attributes;
         let client = self.client.clone();
         let mut result = match self.group_by {
             GroupBy::Equality => Ok::<_, Error>(self.merge_same().await?),
@@ -405,7 +418,9 @@ impl CheckTask {
 
                     result.api_errors.extend(location.api_errors());
                     if current.as_ref() != Some(file) {
-                        location.write_sums_file(file, client.clone()).await?;
+                        location
+                            .write_sums_file(file, client.clone(), avoid_get_object_attributes)
+                            .await?;
                         updated_sums.push(location.location());
                     }
                 }

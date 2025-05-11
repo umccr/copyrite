@@ -34,6 +34,7 @@ pub struct CopyTaskBuilder {
     destination_client: Option<Arc<Client>>,
     concurrency: Option<usize>,
     api_errors: HashSet<ApiError>,
+    avoid_get_object_attributes: bool,
 }
 
 /// Settings that determine the part size and additional checksums to use.
@@ -126,6 +127,12 @@ impl CopyTaskBuilder {
     /// Set the S3 client to use for S3 copies.
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = Some(concurrency);
+        self
+    }
+
+    /// Avoid `GetObjectAttributes` calls.
+    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
+        self.avoid_get_object_attributes = avoid_get_object_attributes;
         self
     }
 
@@ -224,6 +231,7 @@ impl CopyTaskBuilder {
         // Only use the sums file if the size is not set at the source.
         let sums = if self.part_size.is_none() {
             let mut object = ObjectSumsBuilder::default()
+                .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
                 .set_client(self.source_client.clone())
                 .build(self.source.to_string())
                 .await?;

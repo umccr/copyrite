@@ -31,6 +31,7 @@ pub struct S3Builder {
     client: Option<Arc<Client>>,
     bucket: Option<String>,
     key: Option<String>,
+    avoid_get_object_attributes: bool,
 }
 
 impl S3Builder {
@@ -52,7 +53,13 @@ impl S3Builder {
         self
     }
 
-    fn get_components(self) -> Result<(Arc<Client>, String, String)> {
+    /// Avoid `GetObjectAttributes` calls.
+    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
+        self.avoid_get_object_attributes = avoid_get_object_attributes;
+        self
+    }
+
+    fn get_components(self) -> Result<(Arc<Client>, String, String, bool)> {
         let error_fn =
             || ParseError("client, bucket and key are required in `S3Builder`".to_string());
 
@@ -60,6 +67,7 @@ impl S3Builder {
             self.client.ok_or_else(error_fn)?,
             self.bucket.ok_or_else(error_fn)?,
             self.key.ok_or_else(error_fn)?,
+            self.avoid_get_object_attributes,
         ))
     }
 
@@ -69,9 +77,11 @@ impl S3Builder {
     }
 }
 
-impl From<(Arc<Client>, String, String)> for S3 {
-    fn from((client, bucket, key): (Arc<Client>, String, String)) -> Self {
-        Self::new(client, bucket, key)
+impl From<(Arc<Client>, String, String, bool)> for S3 {
+    fn from(
+        (client, bucket, key, avoid_get_object_attributes): (Arc<Client>, String, String, bool),
+    ) -> Self {
+        Self::new(client, bucket, key, avoid_get_object_attributes)
     }
 }
 
@@ -84,11 +94,17 @@ pub struct S3 {
     get_object_attributes: Option<GetObjectAttributesOutput>,
     head_object: HashMap<Option<u64>, HeadObjectOutput>,
     api_errors: HashSet<ApiError>,
+    avoid_get_object_attributes: bool,
 }
 
 impl S3 {
     /// Create a new S3 object.
-    pub fn new(client: Arc<Client>, bucket: String, key: String) -> S3 {
+    pub fn new(
+        client: Arc<Client>,
+        bucket: String,
+        key: String,
+        avoid_get_object_attributes: bool,
+    ) -> S3 {
         Self {
             client,
             bucket,
@@ -96,6 +112,7 @@ impl S3 {
             get_object_attributes: None,
             head_object: HashMap::new(),
             api_errors: HashSet::new(),
+            avoid_get_object_attributes,
         }
     }
 
@@ -124,6 +141,10 @@ impl S3 {
     /// Get the `GetObjectAttributes` output for the target file. This caches the result in
     /// memory so that subsequent calls do not repeat the query.
     pub async fn get_object_attributes(&mut self) -> Option<&GetObjectAttributesOutput> {
+        if self.avoid_get_object_attributes {
+            return None;
+        }
+
         if let Some(ref attributes) = self.get_object_attributes {
             return Some(attributes);
         }

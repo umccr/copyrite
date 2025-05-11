@@ -108,7 +108,7 @@ impl Command {
         match self.commands {
             Subcommands::Generate(generate_args) => {
                 let (sums, stats) = generate_args
-                    .generate(self.optimization, vec![client], true)
+                    .generate(self.optimization, &self.credentials, vec![client], true)
                     .await
                     .inspect_err(|err| {
                         Self::print_stats(err, pretty_json).ok();
@@ -122,7 +122,13 @@ impl Command {
             }
             Subcommands::Check(check_args) => {
                 let output = check_args
-                    .check(self.optimization, write_sums_file, false, vec![client])
+                    .check(
+                        self.optimization,
+                        &self.credentials,
+                        write_sums_file,
+                        false,
+                        vec![client],
+                    )
                     .await
                     .inspect_err(|err| {
                         Self::print_stats(err, pretty_json).ok();
@@ -224,6 +230,7 @@ impl Generate {
     pub async fn generate(
         self,
         optimization: Optimization,
+        credentials: &Credentials,
         mut clients: Vec<Arc<Client>>,
         write_sums_file: bool,
     ) -> Result<(Vec<SumsFile>, Option<GenerateStats>)> {
@@ -231,6 +238,7 @@ impl Generate {
             let reader = ChannelReader::new(stdin(), optimization.channel_capacity);
 
             let output = GenerateTaskBuilder::default()
+                .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
                 .with_overwrite(self.force_overwrite)
                 .with_verify(self.verify)
                 .with_context(self.checksum)
@@ -253,8 +261,12 @@ impl Generate {
 
             if self.missing {
                 let now = Instant::now();
-                let (ctxs, group_by) =
-                    Check::comparable_check(self.input.clone(), clients.clone()).await?;
+                let (ctxs, group_by) = Check::comparable_check(
+                    self.input.clone(),
+                    clients.clone(),
+                    credentials.avoid_get_object_attributes,
+                )
+                .await?;
                 let (objects, compared, updated, api_errors) = ctxs.into_inner();
                 check_stats = Some(CheckStats::new(
                     now.elapsed().as_secs_f64(),
@@ -279,6 +291,9 @@ impl Generate {
                     {
                         let (input, ctx) = ctx.into_inner();
                         let task = GenerateTaskBuilder::default()
+                            .with_avoid_get_object_attributes(
+                                credentials.avoid_get_object_attributes,
+                            )
                             .with_overwrite(self.force_overwrite)
                             .with_verify(self.verify)
                             .with_input_file_name(input)
@@ -300,6 +315,7 @@ impl Generate {
 
             for (input, client) in self.input.into_iter().zip(clients.into_iter().cycle()) {
                 let task = GenerateTaskBuilder::default()
+                    .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
                     .with_overwrite(self.force_overwrite)
                     .with_verify(self.verify)
                     .with_input_file_name(input)
@@ -356,11 +372,13 @@ impl Check {
     pub async fn comparable_check(
         input: Vec<String>,
         clients: Vec<Arc<Client>>,
+        avoid_get_object_attributes: bool,
     ) -> Result<(CheckTask, GroupBy)> {
         Ok((
             CheckTaskBuilder::default()
                 .with_input_files(input)
                 .with_group_by(GroupBy::Comparability)
+                .with_avoid_get_object_attributes(avoid_get_object_attributes)
                 .with_clients(clients)
                 .build()
                 .await?
@@ -383,6 +401,7 @@ impl Check {
     pub async fn check(
         self,
         optimization: Optimization,
+        credentials: &Credentials,
         write_sums_file: bool,
         verify: bool,
         clients: Vec<Arc<Client>>,
@@ -392,11 +411,17 @@ impl Check {
 
         let builder = CheckTaskBuilder::default()
             .with_group_by(group_by)
+            .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
             .with_update(self.update)
             .with_clients(clients.clone());
         let mut generate_stats = None;
         let builder = if self.missing {
-            let (ctxs, _) = Check::comparable_check(self.input.clone(), clients.clone()).await?;
+            let (ctxs, _) = Check::comparable_check(
+                self.input.clone(),
+                clients.clone(),
+                credentials.avoid_get_object_attributes,
+            )
+            .await?;
             let checksum = Check::generate_sums(ctxs);
 
             let (sums, stats) = Generate {
@@ -406,7 +431,7 @@ impl Check {
                 force_overwrite: false,
                 verify,
             }
-            .generate(optimization, clients.clone(), write_sums_file)
+            .generate(optimization, credentials, clients.clone(), write_sums_file)
             .await?;
             generate_stats = stats;
 
@@ -560,6 +585,7 @@ impl Copy {
         source_client: Arc<Client>,
         destination_client: Arc<Client>,
         optimization: Optimization,
+        credentials: &Credentials,
         verify: bool,
         write_sums_file: bool,
     ) -> Result<CheckStats> {
@@ -573,6 +599,7 @@ impl Copy {
         }
         .check(
             optimization,
+            credentials,
             write_sums_file,
             verify,
             vec![source_client, destination_client],
@@ -598,6 +625,7 @@ impl Copy {
             // Check if it exists in the first place.
             let file_size = ObjectSumsBuilder::default()
                 .set_client(Some(source_client.clone()))
+                .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
                 .build(self.destination.to_string())
                 .await?
                 .file_size()
@@ -613,6 +641,7 @@ impl Copy {
                         source_client.clone(),
                         destination_client.clone(),
                         optimization.clone(),
+                        &credentials,
                         false,
                         write_sums_file,
                     )
@@ -651,6 +680,7 @@ impl Copy {
             .with_destination(self.destination.to_string())
             .with_metadata_mode(self.metadata_mode)
             .with_multipart_threshold(self.multipart_threshold)
+            .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
             .with_concurrency(self.concurrency)
             .with_part_size(self.part_size)
             .with_copy_mode(copy_mode)
@@ -669,6 +699,7 @@ impl Copy {
                     source_client,
                     destination_client,
                     optimization,
+                    &credentials,
                     sums_mismatch,
                     write_sums_file,
                 )
@@ -818,6 +849,11 @@ pub struct Credentials {
     /// that has an S3-compatible storage API.
     #[arg(global = true, long, env)]
     pub destination_endpoint_url: Option<String>,
+    /// Avoid `GetObjectAttributes` calls when determining sums. `HeadObject` will be used as a
+    /// fallback. `GetObjectAttributes` is preferred over `HeadObject` because it only requires
+    /// a single call rather than a call for each part.
+    #[arg(global = true, long, env)]
+    pub avoid_get_object_attributes: bool,
 }
 
 impl Credentials {

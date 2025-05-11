@@ -33,6 +33,7 @@ pub struct GenerateTaskBuilder {
     capacity: usize,
     write: bool,
     client: Option<Arc<Client>>,
+    avoid_get_object_attributes: bool,
 }
 
 impl GenerateTaskBuilder {
@@ -94,10 +95,17 @@ impl GenerateTaskBuilder {
         self
     }
 
+    /// Avoid `GetObjectAttributes` calls.
+    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
+        self.avoid_get_object_attributes = avoid_get_object_attributes;
+        self
+    }
+
     /// Build a generate task.
     pub async fn build(mut self) -> Result<GenerateTask> {
         let mut sums = ObjectSumsBuilder::default()
             .set_client(self.client)
+            .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
             .build(self.input_file_name.to_string())
             .await?;
 

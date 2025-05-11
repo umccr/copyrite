@@ -26,9 +26,10 @@ pub struct State {
 
 impl State {
     /// Build from a name.
-    pub async fn try_from(name: String) -> Result<Self> {
+    pub async fn try_from(name: String, avoid_get_object_attributes: bool) -> Result<Self> {
         Ok(Self {
             object_sums: ObjectSumsBuilder::default()
+                .with_avoid_get_object_attributes(avoid_get_object_attributes)
                 .build(SumsFile::format_target_file(&name))
                 .await?,
             name,
