@@ -186,11 +186,7 @@ impl S3 {
         let tags = self.tagging(&key, &bucket).await;
 
         // Getting tags could fail, that's okay if using best-effort mode.
-        let tags = if self.tag_mode.is_best_effort()
-            && tags
-                .as_ref()
-                .is_err_and(|err| ApiError::from(err).is_access_denied())
-        {
+        let tags = if self.tag_mode.is_best_effort() {
             None
         } else {
             Some(
@@ -485,11 +481,10 @@ impl S3 {
             .get_object()
             .bucket(&source.bucket)
             .key(&source.key)
-            .set_part_number(
+            .set_range(
                 multi_part
                     .as_ref()
-                    .and_then(|multi_part| multi_part.part_number.map(i32::try_from))
-                    .transpose()?,
+                    .and_then(|multi_part| multi_part.format_range()),
             )
             .send()
             .await?;
@@ -504,7 +499,7 @@ impl S3 {
         state: &CopyState,
     ) -> Result<CopyResult> {
         let destination = self.get_destination()?;
-        let buf = Self::read_content(&mut content).await?;
+        let buf = Self::read_content(&mut content, None).await?;
 
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
         let do_put = |tags, metadata, additional_checksum, buf| async {
@@ -546,12 +541,25 @@ impl S3 {
     }
 
     /// Read the copy content into a buffer.
-    async fn read_content(content: &mut CopyContent) -> Result<Vec<u8>> {
-        let mut buf = vec![];
+    async fn read_content(
+        content: &mut CopyContent,
+        multi_part: Option<&MultiPartOptions>,
+    ) -> Result<Vec<u8>> {
+        if let Some(multi_part) = multi_part {
+            if multi_part.part_number.is_none() {
+                return Ok(Vec::new());
+            }
 
-        content.data.read_to_end(&mut buf).await?;
+            let mut buf = vec![0; usize::try_from(multi_part.bytes_transferred())?];
+            content.data.read_exact(&mut buf).await?;
 
-        Ok(buf)
+            Ok(buf)
+        } else {
+            let mut buf = vec![];
+            content.data.read_to_end(&mut buf).await?;
+
+            Ok(buf)
+        }
     }
 
     /// Upload objects using multi part uploads.
@@ -562,7 +570,7 @@ impl S3 {
         state: &CopyState,
     ) -> Result<CopyResult> {
         let destination = self.get_destination()?;
-        let buf = Self::read_content(&mut content).await?;
+        let buf = Self::read_content(&mut content, Some(&multi_part)).await?;
 
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
         // Create the upload id if it doesn't exist or use the existing one.

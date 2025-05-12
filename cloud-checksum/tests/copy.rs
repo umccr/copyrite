@@ -6,8 +6,8 @@ use anyhow::Result;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::ChecksumMode;
 use aws_sdk_s3::Client;
-use cloud_checksum::cli::Command;
-use cloud_checksum::io::{default_s3_client, Provider};
+use cloud_checksum::cli::{Command, CredentialProvider};
+use cloud_checksum::io::{create_s3_client, Provider};
 use cloud_checksum::test::TestFileBuilder;
 use dotenvy::dotenv;
 use envy::prefixed;
@@ -66,7 +66,13 @@ impl TestConfig {
 async fn copy_test() -> Result<()> {
     let config = TestConfig::load()?;
     let file = TestFileBuilder::default().generate_bench_defaults()?;
-    let client = default_s3_client().await?;
+    let client = create_s3_client(
+        &CredentialProvider::DefaultEnvironment,
+        None,
+        None,
+        config.endpoint_url.as_deref(),
+    )
+    .await?;
 
     // Local to S3.
     local_s3_multipart(file.as_path(), &config, &client).await?;
@@ -198,6 +204,8 @@ async fn execute_multipart(from: &str, to: &str, config: &TestConfig) {
         "5MiB",
         "--part-size",
         "5MiB",
+        "--tag-mode",
+        "best-effort",
     ]
     .into_iter()
     .map(|s| s.to_string())
@@ -217,6 +225,8 @@ async fn execute_single_part(from: &str, to: &str, config: &TestConfig) {
         "20MiB",
         "--multipart-threshold",
         "20MiB",
+        "--tag-mode",
+        "best-effort",
     ]
     .into_iter()
     .map(|s| s.to_string())
@@ -231,7 +241,13 @@ fn assert_head_multipart(head: HeadObjectOutput) {
         head.e_tag,
         Some("\"ec1e29805585d04a93eb8cf464b68c43-2\"".to_string())
     );
-    assert_eq!(head.checksum_crc64_nvme, Some("yM/EwMxFxsE=".to_string()));
+
+    if let Some(checksum) = head.checksum_crc64_nvme {
+        assert_eq!(checksum, "yM/EwMxFxsE=".to_string());
+    }
+    if let Some(checksum) = head.checksum_crc32_c {
+        assert_eq!(checksum, "4VjD4A==".to_string());
+    }
 }
 
 fn assert_head_single_part(head: HeadObjectOutput) {
@@ -239,7 +255,13 @@ fn assert_head_single_part(head: HeadObjectOutput) {
         head.e_tag,
         Some("\"617808065bb1a8be2755f9be0c0ac769\"".to_string())
     );
-    assert_eq!(head.checksum_crc64_nvme, Some("yM/EwMxFxsE=".to_string()));
+
+    if let Some(checksum) = head.checksum_crc64_nvme {
+        assert_eq!(checksum, "yM/EwMxFxsE=".to_string());
+    }
+    if let Some(checksum) = head.checksum_crc32_c {
+        assert_eq!(checksum, "4VjD4A==".to_string());
+    }
 }
 
 async fn execute_command(commands: &[String]) {

@@ -677,9 +677,7 @@ impl Copy {
         }
 
         // The copy mode must be download-upload if not using default credential providers.
-        let copy_mode = if credentials.source_credential_provider.is_default()
-            && credentials.destination_credential_provider.is_default()
-        {
+        let copy_mode = if credentials.is_default() {
             self.copy_mode
         } else {
             CopyMode::DownloadUpload
@@ -689,6 +687,7 @@ impl Copy {
             .with_source(self.source.to_string())
             .with_destination(self.destination.to_string())
             .with_metadata_mode(self.metadata_mode)
+            .with_tag_mode(self.tag_mode)
             .with_multipart_threshold(self.multipart_threshold)
             .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
             .with_concurrency(self.concurrency)
@@ -887,5 +886,12 @@ impl Credentials {
             self.destination_endpoint_url.as_deref(),
         )
         .await
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.source_credential_provider.is_default()
+            && self.destination_credential_provider.is_default()
+            && self.source_endpoint_url.is_none()
+            && self.destination_endpoint_url.is_none()
     }
 }

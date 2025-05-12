@@ -92,7 +92,11 @@ impl File {
     }
 
     /// Write the data to the destination.
-    pub async fn write(&self, mut data: CopyContent) -> Result<u64> {
+    pub async fn write(
+        &self,
+        mut data: CopyContent,
+        multipart: Option<MultiPartOptions>,
+    ) -> Result<u64> {
         let destination = self.get_destination()?;
         // Append to an existing file or create a new one.
         let mut file = if fs::try_exists(&destination)
@@ -108,7 +112,19 @@ impl File {
             fs::File::create(destination).await?
         };
 
-        let total = io::copy(&mut data.data, &mut file).await?;
+        let total = if let Some(multipart) = multipart {
+            if multipart.part_number.is_none() {
+                return Ok(0);
+            }
+
+            io::copy(
+                &mut data.data.take(multipart.bytes_transferred()),
+                &mut file,
+            )
+            .await?
+        } else {
+            io::copy(&mut data.data, &mut file).await?
+        };
 
         Ok(total)
     }
@@ -163,12 +179,12 @@ impl ObjectCopy for File {
     async fn upload(
         &self,
         data: CopyContent,
-        _multipart: Option<MultiPartOptions>,
+        multipart: Option<MultiPartOptions>,
         _state: &CopyState,
     ) -> Result<CopyResult> {
         // It doesn't matter what the part number is for filesystem operations, just append to the
         // end of the file as we assume correct ordering of parts.
-        let bytes = self.write(data).await?;
+        let bytes = self.write(data, multipart).await?;
 
         CopyResult::new(None, None, bytes, vec![])
     }
