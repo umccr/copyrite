@@ -206,8 +206,7 @@ pub struct Generate {
     pub checksum: Vec<Ctx>,
     /// Generate any missing checksums that would be required to confirm whether two files are
     /// identical using the `check` subcommand. Any additional checksums specified using
-    /// `--checksum` will also be generated. If there are no checksums preset, the default
-    /// checksum is generated.
+    /// `--checksum` will also be generated.
     #[arg(short, long, env)]
     pub missing: bool,
     /// Overwrite the sums file. By default, only checksums that are missing are computed and
@@ -233,7 +232,7 @@ impl Generate {
         credentials: &Credentials,
         mut clients: Vec<Arc<Client>>,
         write_sums_file: bool,
-    ) -> Result<(Vec<SumsFile>, Option<GenerateStats>)> {
+    ) -> Result<(Vec<(String, SumsFile)>, Option<GenerateStats>)> {
         if self.input[0] == "-" {
             let reader = ChannelReader::new(stdin(), optimization.channel_capacity);
 
@@ -251,7 +250,7 @@ impl Generate {
                 .into_inner()
                 .0;
 
-            Ok((vec![output], None))
+            Ok((vec![(self.input[0].to_string(), output)], None))
         } else {
             let now = Instant::now();
             let mut check_stats = None;
@@ -296,7 +295,7 @@ impl Generate {
                             )
                             .with_overwrite(self.force_overwrite)
                             .with_verify(self.verify)
-                            .with_input_file_name(input)
+                            .with_input_file_name(input.to_string())
                             .with_context(vec![ctx])
                             .with_capacity(optimization.channel_capacity)
                             .with_client(client)
@@ -306,10 +305,22 @@ impl Generate {
                             .run()
                             .await?;
 
-                        sums_files.push(task.sums_file().clone());
+                        sums_files.push((input, task.sums_file().clone()));
                         errors.extend(task.api_errors());
                         generate_stats.push(GenerateFileStats::from_task(task));
                     }
+                }
+
+                if self.checksum.is_empty() {
+                    return Ok((
+                        sums_files,
+                        Some(GenerateStats::new(
+                            now.elapsed().as_secs_f64(),
+                            generate_stats,
+                            check_stats,
+                            errors,
+                        )),
+                    ));
                 }
             };
 
@@ -318,7 +329,7 @@ impl Generate {
                     .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
                     .with_overwrite(self.force_overwrite)
                     .with_verify(self.verify)
-                    .with_input_file_name(input)
+                    .with_input_file_name(input.to_string())
                     .with_context(self.checksum.clone())
                     .with_capacity(optimization.channel_capacity)
                     .with_client(client)
@@ -327,7 +338,7 @@ impl Generate {
                     .await?
                     .run()
                     .await?;
-                sums_files.push(task.sums_file().clone());
+                sums_files.push((input, task.sums_file().clone()));
                 errors.extend(task.api_errors());
                 generate_stats.push(GenerateFileStats::from_task(task));
             }
@@ -390,7 +401,7 @@ impl Check {
 
     /// Determine sums to generate based on a comparability check
     fn generate_sums(ctxs: CheckTask) -> Vec<Ctx> {
-        if ctxs.compared_directly().is_empty() {
+        if ctxs.is_empty() {
             vec![Ctx::default()]
         } else {
             vec![]
@@ -409,13 +420,14 @@ impl Check {
         let now = Instant::now();
         let group_by = self.group_by;
 
-        let builder = CheckTaskBuilder::default()
+        let mut builder = CheckTaskBuilder::default()
             .with_group_by(group_by)
             .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
+            .with_input_files(self.input.clone())
             .with_update(self.update)
             .with_clients(clients.clone());
         let mut generate_stats = None;
-        let builder = if self.missing {
+        if self.missing {
             let (ctxs, _) = Check::comparable_check(
                 self.input.clone(),
                 clients.clone(),
@@ -435,10 +447,8 @@ impl Check {
             .await?;
             generate_stats = stats;
 
-            builder.with_sums_files(self.input.into_iter().zip(sums).collect())
-        } else {
-            builder.with_input_files(self.input)
-        };
+            builder = builder.with_sums_files(sums);
+        }
 
         let check = builder.build().await?.run().await?;
         if check.compared_directly().is_empty() {

@@ -9,6 +9,7 @@ use aws_sdk_s3::Client;
 use cloud_checksum::cli::Command;
 use cloud_checksum::io::{default_s3_client, Provider};
 use cloud_checksum::test::TestFileBuilder;
+use dotenvy::dotenv;
 use envy::prefixed;
 use serde::Deserialize;
 use std::fs::File;
@@ -20,10 +21,13 @@ use tempfile::TempDir;
 #[derive(Debug, Deserialize)]
 struct TestConfig {
     bucket_uri: String,
+    endpoint_url: Option<String>,
 }
 
 impl TestConfig {
     fn load() -> Result<Self> {
+        dotenv()?;
+
         let mut env: Self = prefixed("CLOUD_CHECKSUM_TEST_").from_env()?;
 
         env.bucket_uri = env
@@ -32,11 +36,28 @@ impl TestConfig {
             .unwrap_or(&env.bucket_uri)
             .to_string();
 
+        env.endpoint_url = env
+            .endpoint_url
+            .map(|url| url.strip_suffix("/").unwrap_or(&url).to_string());
+
         Ok(env)
     }
 
     fn format_uri(&self, path: &str) -> String {
         format!("{}/{}", self.bucket_uri, path)
+    }
+
+    fn set_endpoint_url(&self, mut commands: Vec<String>) -> Vec<String> {
+        if let Some(endpoint_url) = &self.endpoint_url {
+            commands.extend([
+                "--source-endpoint-url".to_string(),
+                endpoint_url.to_string(),
+                "--destination-endpoint-url".to_string(),
+                endpoint_url.to_string(),
+            ]);
+        }
+
+        commands
     }
 }
 
@@ -67,7 +88,7 @@ async fn local_s3_multipart(file: &Path, config: &TestConfig, client: &Client) -
     let uri = config.format_uri("multipart");
     let file = file.to_string_lossy();
 
-    execute_multipart(file.as_ref(), uri.as_ref()).await;
+    execute_multipart(file.as_ref(), uri.as_ref(), config).await;
 
     let head = get_head_object(client, uri.as_ref()).await?;
     assert_head_multipart(head);
@@ -80,7 +101,7 @@ async fn local_s3_single_part(file: &Path, config: &TestConfig, client: &Client)
     let uri = config.format_uri("single_part");
     let file = file.to_string_lossy();
 
-    execute_single_part(file.as_ref(), uri.as_ref()).await;
+    execute_single_part(file.as_ref(), uri.as_ref(), config).await;
 
     let head = get_head_object(client, uri.as_ref()).await?;
     assert_head_single_part(head);
@@ -93,7 +114,7 @@ async fn s3_s3_multipart(config: &TestConfig, client: &Client) -> Result<()> {
     let uri = config.format_uri("multipart");
     let destination = config.format_uri("multipart_copy");
 
-    execute_multipart(uri.as_ref(), destination.as_ref()).await;
+    execute_multipart(uri.as_ref(), destination.as_ref(), config).await;
 
     let head = get_head_object(client, destination.as_ref()).await?;
     assert_head_multipart(head);
@@ -106,7 +127,7 @@ async fn s3_s3_single_part(config: &TestConfig, client: &Client) -> Result<()> {
     let uri = config.format_uri("single_part");
     let destination = config.format_uri("single_part_copy");
 
-    execute_single_part(uri.as_ref(), destination.as_ref()).await;
+    execute_single_part(uri.as_ref(), destination.as_ref(), config).await;
 
     let head = get_head_object(client, destination.as_ref()).await?;
     assert_head_single_part(head);
@@ -120,7 +141,7 @@ async fn s3_local_multipart(original: &Path, config: &TestConfig) -> Result<()> 
     let tmp = TempDir::new()?;
     let copy_to = tmp.path().join("multipart_copy");
 
-    execute_multipart(uri.as_ref(), copy_to.to_string_lossy().as_ref()).await;
+    execute_multipart(uri.as_ref(), copy_to.to_string_lossy().as_ref(), config).await;
     assert_original(
         original.to_str().unwrap(),
         copy_to.to_string_lossy().as_ref(),
@@ -135,7 +156,7 @@ async fn s3_local_single_part(original: &Path, config: &TestConfig) -> Result<()
     let tmp = TempDir::new()?;
     let copy_to = tmp.path().join("single_part_copy");
 
-    execute_single_part(uri.as_ref(), copy_to.to_string_lossy().as_ref()).await;
+    execute_single_part(uri.as_ref(), copy_to.to_string_lossy().as_ref(), config).await;
     assert_original(
         original.to_str().unwrap(),
         copy_to.to_string_lossy().as_ref(),
@@ -167,8 +188,8 @@ async fn get_head_object(client: &Client, url: &str) -> Result<HeadObjectOutput>
     Ok(head)
 }
 
-async fn execute_multipart(from: &str, to: &str) {
-    let commands = [
+async fn execute_multipart(from: &str, to: &str, config: &TestConfig) {
+    let mut commands = [
         "cloud-checksum",
         "copy",
         from,
@@ -177,12 +198,17 @@ async fn execute_multipart(from: &str, to: &str) {
         "5MiB",
         "--part-size",
         "5MiB",
-    ];
+    ]
+    .into_iter()
+    .map(|s| s.to_string())
+    .collect();
+    commands = config.set_endpoint_url(commands);
+
     execute_command(&commands).await;
 }
 
-async fn execute_single_part(from: &str, to: &str) {
-    let commands = [
+async fn execute_single_part(from: &str, to: &str, config: &TestConfig) {
+    let mut commands = [
         "cloud-checksum",
         "copy",
         from,
@@ -191,7 +217,12 @@ async fn execute_single_part(from: &str, to: &str) {
         "20MiB",
         "--multipart-threshold",
         "20MiB",
-    ];
+    ]
+    .into_iter()
+    .map(|s| s.to_string())
+    .collect();
+    commands = config.set_endpoint_url(commands);
+
     execute_command(&commands).await;
 }
 
@@ -211,7 +242,7 @@ fn assert_head_single_part(head: HeadObjectOutput) {
     assert_eq!(head.checksum_crc64_nvme, Some("yM/EwMxFxsE=".to_string()));
 }
 
-async fn execute_command(commands: &[&str]) {
+async fn execute_command(commands: &[String]) {
     let args = Command::parse_from_iter(commands).unwrap();
     args.execute().await.unwrap();
 }

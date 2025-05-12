@@ -86,8 +86,16 @@ impl CheckTaskBuilder {
     }
 
     /// Build a check task.
-    pub async fn build(self) -> Result<CheckTask> {
+    pub async fn build(mut self) -> Result<CheckTask> {
         let group_by = self.group_by;
+
+        // Remove elements that are already set by in-memory sums files.
+        let in_memory = self
+            .sums_files
+            .iter()
+            .map(|(sums, _)| sums)
+            .collect::<Vec<_>>();
+        self.files.retain(|file| !in_memory.contains(&file));
 
         let (objects, errors): (Vec<_>, Vec<_>) = join_all(
             self.files
@@ -462,6 +470,14 @@ impl CheckTask {
     /// Get the api errors.
     pub fn api_errors(self) -> HashSet<ApiError> {
         self.api_errors.clone()
+    }
+
+    /// Does the state of the check task contain no checksums in any sums files.
+    pub fn is_empty(&self) -> bool {
+        self.objects.0.iter().all(|(key, _)| {
+            let SumsKey((sums, _)) = key;
+            sums.is_empty()
+        })
     }
 }
 

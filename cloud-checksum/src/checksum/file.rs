@@ -227,6 +227,11 @@ impl SumsFile {
     pub fn add_checksum(&mut self, ctx: Ctx, checksum: Checksum) {
         self.checksums.insert(ctx, checksum);
     }
+
+    /// Does the sums file contain no checksums.
+    pub fn is_empty(&self) -> bool {
+        self.checksums.is_empty()
+    }
 }
 
 impl TryFrom<&[u8]> for SumsFile {

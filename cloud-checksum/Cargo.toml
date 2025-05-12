@@ -45,6 +45,7 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 anyhow = "1"
 tempfile = "3"
 envy = "0.4"
+dotenvy = "0.15"
 
 aws-smithy-mocks-experimental = "0.2"
 
