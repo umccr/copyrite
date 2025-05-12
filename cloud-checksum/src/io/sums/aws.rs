@@ -6,8 +6,8 @@ use crate::checksum::file::Checksum;
 use crate::checksum::file::SumsFile;
 use crate::checksum::standard::StandardCtx;
 use crate::checksum::Ctx;
-use crate::error::Error::{AwsError, ParseError};
-use crate::error::{Error, Result};
+use crate::error::Error::ParseError;
+use crate::error::{ApiError, Error, Result};
 use crate::io::sums::ObjectSums;
 use crate::io::Provider;
 use aws_sdk_s3::operation::get_object::GetObjectError;
@@ -20,7 +20,7 @@ use aws_sdk_s3::Client;
 use aws_smithy_types::byte_stream::ByteStream;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
@@ -31,6 +31,7 @@ pub struct S3Builder {
     client: Option<Arc<Client>>,
     bucket: Option<String>,
     key: Option<String>,
+    avoid_get_object_attributes: bool,
 }
 
 impl S3Builder {
@@ -52,7 +53,13 @@ impl S3Builder {
         self
     }
 
-    fn get_components(self) -> Result<(Arc<Client>, String, String)> {
+    /// Avoid `GetObjectAttributes` calls.
+    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
+        self.avoid_get_object_attributes = avoid_get_object_attributes;
+        self
+    }
+
+    fn get_components(self) -> Result<(Arc<Client>, String, String, bool)> {
         let error_fn =
             || ParseError("client, bucket and key are required in `S3Builder`".to_string());
 
@@ -60,6 +67,7 @@ impl S3Builder {
             self.client.ok_or_else(error_fn)?,
             self.bucket.ok_or_else(error_fn)?,
             self.key.ok_or_else(error_fn)?,
+            self.avoid_get_object_attributes,
         ))
     }
 
@@ -69,9 +77,11 @@ impl S3Builder {
     }
 }
 
-impl From<(Arc<Client>, String, String)> for S3 {
-    fn from((client, bucket, key): (Arc<Client>, String, String)) -> Self {
-        Self::new(client, bucket, key)
+impl From<(Arc<Client>, String, String, bool)> for S3 {
+    fn from(
+        (client, bucket, key, avoid_get_object_attributes): (Arc<Client>, String, String, bool),
+    ) -> Self {
+        Self::new(client, bucket, key, avoid_get_object_attributes)
     }
 }
 
@@ -82,18 +92,27 @@ pub struct S3 {
     bucket: String,
     key: String,
     get_object_attributes: Option<GetObjectAttributesOutput>,
-    head_object: HashMap<u64, HeadObjectOutput>,
+    head_object: HashMap<Option<u64>, HeadObjectOutput>,
+    api_errors: HashSet<ApiError>,
+    avoid_get_object_attributes: bool,
 }
 
 impl S3 {
     /// Create a new S3 object.
-    pub fn new(client: Arc<Client>, bucket: String, key: String) -> S3 {
+    pub fn new(
+        client: Arc<Client>,
+        bucket: String,
+        key: String,
+        avoid_get_object_attributes: bool,
+    ) -> S3 {
         Self {
             client,
             bucket,
             key,
             get_object_attributes: None,
             head_object: HashMap::new(),
+            api_errors: HashSet::new(),
+            avoid_get_object_attributes,
         }
     }
 
@@ -121,9 +140,13 @@ impl S3 {
 
     /// Get the `GetObjectAttributes` output for the target file. This caches the result in
     /// memory so that subsequent calls do not repeat the query.
-    pub async fn get_object_attributes(&mut self) -> Result<&GetObjectAttributesOutput> {
+    pub async fn get_object_attributes(&mut self) -> Option<&GetObjectAttributesOutput> {
+        if self.avoid_get_object_attributes {
+            return None;
+        }
+
         if let Some(ref attributes) = self.get_object_attributes {
-            return Ok(attributes);
+            return Some(attributes);
         }
 
         let attributes = self
@@ -136,14 +159,20 @@ impl S3 {
             .object_attributes(ObjectAttributes::ObjectSize)
             .object_attributes(ObjectAttributes::ObjectParts)
             .send()
-            .await?;
+            .await;
 
-        Ok(self.get_object_attributes.insert(attributes))
+        match attributes {
+            Ok(attributes) => Some(self.get_object_attributes.insert(attributes)),
+            Err(ref err) => {
+                self.api_errors.insert(ApiError::from(err));
+                None
+            }
+        }
     }
 
     /// Get the `HeadObjectOutput` output for the target file for a specific part. This caches
     /// the result in memory so that subsequent calls do not repeat the query for the same part.
-    pub async fn head_object(&mut self, part_number: u64) -> Result<&HeadObjectOutput> {
+    pub async fn head_object(&mut self, part_number: Option<u64>) -> Result<&HeadObjectOutput> {
         if self.head_object.contains_key(&part_number) {
             return Ok(&self.head_object[&part_number]);
         }
@@ -153,7 +182,7 @@ impl S3 {
             .head_object()
             .bucket(&self.bucket)
             .key(SumsFile::format_target_file(&self.key))
-            .part_number(i32::try_from(part_number)?)
+            .set_part_number(part_number.map(i32::try_from).transpose()?)
             .checksum_mode(ChecksumMode::Enabled)
             .send()
             .await?;
@@ -170,7 +199,11 @@ impl S3 {
     /// checksums (not including the `ETag`) are base64 encoded when returned from the SDK.
     /// The `ETag` is hex encoded.
     fn decode_sum(ctx: &StandardCtx, sum: String) -> Result<Vec<u8>> {
-        let sum = sum.split("-").next().unwrap_or_else(|| &sum);
+        let sum = sum
+            .trim_matches('"')
+            .split("-")
+            .next()
+            .unwrap_or_else(|| &sum);
 
         if Self::is_additional_checksum(ctx) {
             let data = BASE64_STANDARD
@@ -184,20 +217,19 @@ impl S3 {
         }
     }
 
-    /// Get the AWS checksum value from `GetObjectAttributes`.
+    /// Get the AWS checksum value from `HeadObject`.
     pub async fn aws_sums_from_ctx(&mut self, ctx: &StandardCtx) -> Result<Option<String>> {
-        let attributes = self.get_object_attributes().await?;
+        let head = self.head_object(None).await?;
+
         let sum = match ctx {
             // There are no part checksums for e_tags.
-            StandardCtx::MD5(_) => attributes.e_tag(),
+            StandardCtx::MD5(_) => head.e_tag(),
             // Every other checksum has part checksums available if uploaded using multipart uploads.
-            StandardCtx::SHA1(_) => attributes.checksum().and_then(|c| c.checksum_sha1()),
-            StandardCtx::SHA256(_) => attributes.checksum().and_then(|c| c.checksum_sha256()),
-            StandardCtx::CRC32(_, _) => attributes.checksum().and_then(|c| c.checksum_crc32()),
-            StandardCtx::CRC32C(_, _) => attributes.checksum().and_then(|c| c.checksum_crc32_c()),
-            StandardCtx::CRC64NVME(_, _) => {
-                attributes.checksum().and_then(|c| c.checksum_crc64_nvme())
-            }
+            StandardCtx::SHA1(_) => head.checksum_sha1(),
+            StandardCtx::SHA256(_) => head.checksum_sha256(),
+            StandardCtx::CRC32(_, _) => head.checksum_crc32(),
+            StandardCtx::CRC32C(_, _) => head.checksum_crc32_c(),
+            StandardCtx::CRC64NVME(_, _) => head.checksum_crc64_nvme(),
             _ => None,
         };
 
@@ -222,9 +254,11 @@ impl S3 {
 
     /// Get the AWS checksum parts from `GetObjectAttributes` parts output.
     pub async fn aws_parts_from_attributes(&mut self) -> Result<Option<Vec<Option<u64>>>> {
-        let parts = self
-            .get_object_attributes()
-            .await?
+        let Some(parts) = self.get_object_attributes().await else {
+            return Ok(None);
+        };
+
+        let parts = parts
             .object_parts()
             .map(|parts| {
                 let parts = parts
@@ -257,7 +291,7 @@ impl S3 {
         let mut part_sums = vec![];
 
         for part_number in 1..=total_parts {
-            let head_object = self.head_object(part_number).await?;
+            let head_object = self.head_object(Some(part_number)).await?;
 
             // The content length represents the part size. Return early if any of the content
             // lengths are not present, to avoid having empty part checksums.
@@ -282,21 +316,19 @@ impl S3 {
             return Ok(());
         };
 
-        // Get the file size, total part count and checksum type from the attributes. This is in
-        // a separate block to avoid mutably borrowing more than once later.
-        let (file_size, total_parts, checksum_type) = {
-            let attributes = self.get_object_attributes().await?;
-
-            let file_size = attributes.object_size().map(u64::try_from).transpose()?;
-            let (total_parts, checksum_type) = Self::parse_parts_and_type(sum.as_str())?;
-
-            (file_size, total_parts, checksum_type)
-        };
+        // Get the file size, total part count and checksum type from the head.
+        let file_size = self
+            .head_object(None)
+            .await?
+            .content_length()
+            .map(u64::try_from)
+            .transpose()?;
+        let (total_parts, checksum_type) = Self::parse_parts_and_type(sum.as_str())?;
 
         // Determine the parts if they exist.
         let parts = self.aws_parts_from_attributes().await?;
         // If there are no parts, try and find them using the total part count and head object.
-        // This should only trigger on `ETag`s.
+        // This should only trigger on `ETag`s or if `GetObjectAttributes` returns an error.
         let parts = match (parts, total_parts) {
             (Some(parts), _) => Some(parts),
             (None, Some(total_parts)) => self.aws_parts_from_head(total_parts).await?,
@@ -350,8 +382,8 @@ impl S3 {
     /// This is used to add as much information to the output sums file as possible.
     pub async fn sums_from_metadata(&mut self) -> Result<SumsFile> {
         // The target file metadata.
-        let attributes = self.get_object_attributes().await?;
-        let file_size = attributes.object_size().map(u64::try_from).transpose()?;
+        let head = self.head_object(None).await?;
+        let file_size = head.content_length().map(u64::try_from).transpose()?;
         let mut sums_file = SumsFile::default().with_size(file_size);
 
         // Add the individual checksums for each type.
@@ -369,7 +401,7 @@ impl S3 {
             .await?;
 
         if sums_file.checksums.is_empty() {
-            return Err(AwsError(
+            return Err(Error::aws_error(
                 "failed to create sums file from metadata".to_string(),
             ));
         }
@@ -379,7 +411,7 @@ impl S3 {
 
     /// Parse the number of parts and the checksum type from a string.
     pub fn parse_parts_and_type(s: &str) -> Result<(Option<u64>, ChecksumType)> {
-        let split = s.rsplit_once("-");
+        let split = s.trim_matches('\"').rsplit_once("-");
         if let Some((_, parts)) = split {
             let parts = u64::from_str(parts).map_err(|err| {
                 ParseError(format!("failed to parse parts from checksum: {}", err))
@@ -412,9 +444,9 @@ impl S3 {
     /// Get the object file size.
     async fn size(&mut self) -> Result<Option<u64>> {
         Ok(self
-            .get_object_attributes()
+            .head_object(None)
             .await?
-            .object_size
+            .content_length()
             .map(|size| size.try_into())
             .transpose()?)
     }
@@ -460,6 +492,10 @@ impl ObjectSums for S3 {
     fn location(&self) -> String {
         Provider::format_s3(&self.bucket, &self.key)
     }
+
+    fn api_errors(&self) -> HashSet<ApiError> {
+        self.api_errors.clone()
+    }
 }
 
 #[cfg(test)]
@@ -468,6 +504,7 @@ pub(crate) mod test {
     use crate::checksum::standard::test::EXPECTED_MD5_SUM;
     use crate::task::generate::test::generate_for;
     use crate::test::{TEST_FILE_NAME, TEST_FILE_SIZE};
+    use aws_sdk_s3::operation::head_object::builders::HeadObjectOutputBuilder;
     use aws_sdk_s3::types;
     use aws_sdk_s3::types::GetObjectAttributesParts;
     use aws_smithy_mocks_experimental::{mock, mock_client, Rule, RuleMode};
@@ -680,7 +717,18 @@ pub(crate) mod test {
 
         // If an additional checksum is present, then there is no need to call head object as the
         // parts are always in the get object attributes response.
-        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes,])
+        mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            &[
+                &head_object_size_rule(
+                    format!("\"{}\"", EXPECTED_MD5_SUM_4),
+                    Some(4),
+                    Some(EXPECTED_SHA256_SUM_4.to_string())
+                ),
+                &get_object_attributes,
+            ]
+        )
     }
 
     fn mock_multi_part_with_sha256() -> Client {
@@ -741,7 +789,35 @@ pub(crate) mod test {
 
         // If an additional checksum is present, then there is no need to call head object as the
         // parts are always in the get object attributes response.
-        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes,])
+        mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            &[
+                &head_object_size_rule(
+                    format!("\"{}\"", EXPECTED_MD5_SUM_5),
+                    Some(5),
+                    Some(EXPECTED_SHA256_SUM_5.to_string())
+                ),
+                &get_object_attributes,
+            ]
+        )
+    }
+
+    fn head_object_size_rule(
+        e_tag: String,
+        parts_count: Option<i32>,
+        sha256: Option<String>,
+    ) -> Rule {
+        mock!(Client::head_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(move || {
+                HeadObjectOutputBuilder::default()
+                    .e_tag(&e_tag)
+                    .set_parts_count(parts_count)
+                    .set_checksum_sha256(sha256.clone())
+                    .content_length(TEST_FILE_SIZE as i64)
+                    .build()
+            })
     }
 
     fn mock_multi_part_etag_only_different_part_sizes() -> Client {
@@ -763,6 +839,7 @@ pub(crate) mod test {
             aws_sdk_s3,
             RuleMode::Sequential,
             &[
+                &head_object_size_rule(format!("\"{}\"", EXPECTED_MD5_SUM_4), Some(4), None),
                 &get_object_attributes,
                 &head_object_rule(214748365),
                 &head_object_rule(214748365),
@@ -798,6 +875,7 @@ pub(crate) mod test {
             });
 
         vec![
+            head_object_size_rule(format!("\"{}\"", EXPECTED_MD5_SUM_5), Some(5), None),
             get_object_attributes,
             head_object_rule(214748365),
             head_object_rule(214748365),
@@ -822,23 +900,43 @@ pub(crate) mod test {
                     .build()
             });
 
-        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes])
+        mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            &[
+                &head_object_size_rule(
+                    format!("\"{}\"", EXPECTED_MD5_SUM),
+                    None,
+                    Some(EXPECTED_SHA256_SUM.to_string())
+                ),
+                &get_object_attributes
+            ]
+        )
     }
 
     fn mock_single_part_etag_only() -> Client {
         let get_object_attributes = mock_single_part_etag_only_rule();
 
-        mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&get_object_attributes])
+        mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            get_object_attributes.as_slice()
+        )
     }
 
-    pub(crate) fn mock_single_part_etag_only_rule() -> Rule {
-        mock!(Client::get_object_attributes)
-            .match_requests(move |req| req.bucket() == Some("bucket") && req.key() == Some("key"))
-            .then_output(|| {
-                GetObjectAttributesOutput::builder()
-                    .e_tag(EXPECTED_MD5_SUM)
-                    .object_size(TEST_FILE_SIZE as i64)
-                    .build()
-            })
+    pub(crate) fn mock_single_part_etag_only_rule() -> Vec<Rule> {
+        vec![
+            head_object_size_rule(format!("\"{}\"", EXPECTED_MD5_SUM), None, None),
+            mock!(Client::get_object_attributes)
+                .match_requests(move |req| {
+                    req.bucket() == Some("bucket") && req.key() == Some("key")
+                })
+                .then_output(|| {
+                    GetObjectAttributesOutput::builder()
+                        .e_tag(EXPECTED_MD5_SUM)
+                        .object_size(TEST_FILE_SIZE as i64)
+                        .build()
+                }),
+        ]
     }
 }

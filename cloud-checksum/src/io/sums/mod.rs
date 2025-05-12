@@ -2,13 +2,14 @@
 //!
 
 use crate::checksum::file::SumsFile;
-use crate::error::Result;
+use crate::error::{ApiError, Result};
 use crate::io::sums::aws::S3Builder;
 use crate::io::sums::file::FileBuilder;
 use crate::io::{default_s3_client, Provider};
 use aws_sdk_s3::Client;
 use dyn_clone::DynClone;
 use futures_util::Stream;
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
@@ -50,6 +51,9 @@ pub trait ObjectSums: DynClone {
 
     /// Get the location of the object.
     fn location(&self) -> String;
+
+    /// Any accumulated recoverable api errors.
+    fn api_errors(&self) -> HashSet<ApiError>;
 }
 
 dyn_clone::clone_trait_object!(ObjectSums);
@@ -58,6 +62,7 @@ dyn_clone::clone_trait_object!(ObjectSums);
 #[derive(Debug, Default)]
 pub struct ObjectSumsBuilder {
     client: Option<Arc<Client>>,
+    avoid_get_object_attributes: bool,
 }
 
 impl ObjectSumsBuilder {
@@ -76,6 +81,7 @@ impl ObjectSumsBuilder {
                         .with_key(key)
                         .with_bucket(bucket)
                         .with_client(client)
+                        .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
                         .build()?,
                 ))
             }
@@ -85,6 +91,12 @@ impl ObjectSumsBuilder {
     /// Set the S3 client if this is an s3 provider.
     pub fn set_client(mut self, client: Option<Arc<Client>>) -> Self {
         self.client = client;
+        self
+    }
+
+    /// Avoid `GetObjectAttributes` calls.
+    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
+        self.avoid_get_object_attributes = avoid_get_object_attributes;
         self
     }
 }

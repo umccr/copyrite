@@ -1,10 +1,11 @@
 //! Module that handles all file IO
 //!
 
+use crate::cli::CredentialProvider;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
-use aws_config::load_defaults;
-use aws_sdk_s3::Client;
+use aws_config::Region;
+use aws_sdk_s3::{config, Client};
 use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
 
 pub mod copy;
@@ -106,9 +107,41 @@ impl TryFrom<&str> for Provider {
     }
 }
 
+/// Create an S3 client from the credentials provider, profile, region and endpoint url.
+pub async fn create_s3_client(
+    provider: &CredentialProvider,
+    profile: Option<&str>,
+    region: Option<&str>,
+    endpoint_url: Option<&str>,
+) -> Result<Client> {
+    let mut loader = aws_config::defaults(BehaviorVersion::latest());
+
+    if let Some(region) = region {
+        loader = loader.region(Region::new(region.to_string()));
+    }
+    if let Some(endpoint_url) = endpoint_url {
+        loader = loader.endpoint_url(endpoint_url);
+    }
+
+    let loader = match (provider, profile) {
+        (CredentialProvider::DefaultEnvironment, _) => loader,
+        (CredentialProvider::NoCredentials, _) => loader.no_credentials(),
+        (CredentialProvider::AwsProfile, Some(profile)) => loader.profile_name(profile),
+        _ => {
+            return Err(ParseError(
+                "profile must be specified if using aws-profile credential provider".to_string(),
+            ))
+        }
+    };
+
+    let config = config::Builder::from(&loader.load().await).build();
+
+    Ok(Client::from_conf(config))
+}
+
+/// Create the default S3 client.
 pub async fn default_s3_client() -> Result<Client> {
-    let config = load_defaults(BehaviorVersion::latest()).await;
-    Ok(Client::new(&config))
+    create_s3_client(&CredentialProvider::DefaultEnvironment, None, None, None).await
 }
 
 #[cfg(test)]

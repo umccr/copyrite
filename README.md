@@ -82,4 +82,10 @@ using:
 CLOUD_CHECKSUM_TEST_BUCKET_URI="s3://bucket/prefix" cargo test --all-features -- --ignored
 ```
 
+The endpoint URL can also be set for S3-compatible endpoint tests:
+
+```sh
+CLOUD_CHECKSUM_TEST_BUCKET_URI="s3://bucket/prefix" CLOUD_CHECKSUM_TEST_ENDPOINT_URL="https://storage.googleapis.com" cargo test --all-features -- --ignored
+```
+
 

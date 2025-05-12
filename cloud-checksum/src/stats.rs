@@ -4,11 +4,12 @@
 use crate::checksum::file::Checksum;
 use crate::checksum::Ctx;
 use crate::cli::CopyMode;
+use crate::error::ApiError;
 use crate::task::check::{CheckTask, GroupBy};
 use crate::task::copy::CopyTask;
 use crate::task::generate::GenerateTask;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 /// Stats from running a `generate` command.
@@ -22,6 +23,9 @@ pub struct GenerateStats {
     /// Stats from running `check` for comparability when computing sums with `--missing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) check_stats: Option<Box<CheckStats>>,
+    /// The API errors if there was permission issues for object attributes.
+    #[serde(skip_serializing_if = "HashSet::is_empty")]
+    pub(crate) api_errors: HashSet<ApiError>,
 }
 
 impl GenerateStats {
@@ -30,6 +34,7 @@ impl GenerateStats {
         elapsed_seconds: f64,
         stats: Vec<GenerateFileStats>,
         check_stats: Option<CheckStats>,
+        api_errors: HashSet<ApiError>,
     ) -> Self {
         Self {
             elapsed_seconds,
@@ -38,6 +43,7 @@ impl GenerateStats {
                 .filter(|stat| !stat.checksums_generated.0.is_empty())
                 .collect(),
             check_stats: check_stats.map(Box::new),
+            api_errors,
         }
     }
 }
@@ -133,6 +139,9 @@ pub struct CheckStats {
     /// Any generate stats computed if using `--missing`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) generate_stats: Option<GenerateStats>,
+    /// The API errors if there was permission issues for object attributes.
+    #[serde(skip_serializing_if = "HashSet::is_empty")]
+    pub(crate) api_errors: HashSet<ApiError>,
 }
 
 impl CheckStats {
@@ -144,6 +153,7 @@ impl CheckStats {
         groups: Vec<Vec<String>>,
         updated: Vec<String>,
         generate_stats: Option<GenerateStats>,
+        api_errors: HashSet<ApiError>,
     ) -> Self {
         Self {
             elapsed_seconds,
@@ -152,6 +162,7 @@ impl CheckStats {
             groups,
             updated,
             generate_stats,
+            api_errors,
         }
     }
 
@@ -162,7 +173,7 @@ impl CheckStats {
         elapsed: Duration,
         generate_stats: Option<GenerateStats>,
     ) -> Self {
-        let (objects, compared, updated) = task.into_inner();
+        let (objects, compared, updated, api_errors) = task.into_inner();
 
         Self::new(
             elapsed.as_secs_f64(),
@@ -171,23 +182,8 @@ impl CheckStats {
             objects.to_groups(),
             updated,
             generate_stats,
+            api_errors,
         )
-    }
-}
-
-/// An API error that could be returned from storage.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ApiError {
-    /// The error kind, e.g. `AccessDenied`.
-    pub(crate) error: String,
-    /// The error message.
-    pub(crate) message: String,
-}
-
-impl ApiError {
-    /// Create a new error.
-    pub fn new(error: String, message: String) -> Self {
-        Self { error, message }
     }
 }
 
@@ -219,8 +215,8 @@ pub struct CopyStats {
     /// The number of retries if there was permission issues for copying metadata or tags.
     pub(crate) n_retries: u64,
     /// The API errors if there was permission issues for copying metadata or tags.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) api_errors: Vec<ApiError>,
+    #[serde(skip_serializing_if = "HashSet::is_empty")]
+    pub(crate) api_errors: HashSet<ApiError>,
     /// Stats from checking sums to ensure that the copy was successful.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) check_stats: Option<CheckStats>,
@@ -245,7 +241,7 @@ impl CopyStats {
             copy_mode: copy_task.copy_mode(),
             reason: check_stats.as_ref().and_then(Option::<ChecksumPair>::from),
             n_retries: copy_task.n_retries(),
-            api_errors: copy_task.api_errors().to_vec(),
+            api_errors: copy_task.api_errors(),
             check_stats,
         }
     }

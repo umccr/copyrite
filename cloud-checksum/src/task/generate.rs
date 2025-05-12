@@ -4,7 +4,7 @@
 use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
 use crate::error::Error::GenerateError;
-use crate::error::{Error, Result};
+use crate::error::{ApiError, Error, Result};
 use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder, SharedReader};
 use crate::task::check::{CheckObjects, SumsKey};
@@ -33,6 +33,7 @@ pub struct GenerateTaskBuilder {
     capacity: usize,
     write: bool,
     client: Option<Arc<Client>>,
+    avoid_get_object_attributes: bool,
 }
 
 impl GenerateTaskBuilder {
@@ -73,8 +74,13 @@ impl GenerateTaskBuilder {
     }
 
     /// Set the S3 client to use.
-    pub fn with_client(mut self, client: Arc<Client>) -> Self {
-        self.client = Some(client);
+    pub fn with_client(self, client: Arc<Client>) -> Self {
+        self.set_client(Some(client))
+    }
+
+    /// Set the S3 client to use.
+    pub fn set_client(mut self, client: Option<Arc<Client>>) -> Self {
+        self.client = client;
         self
     }
 
@@ -89,10 +95,17 @@ impl GenerateTaskBuilder {
         self
     }
 
+    /// Avoid `GetObjectAttributes` calls.
+    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
+        self.avoid_get_object_attributes = avoid_get_object_attributes;
+        self
+    }
+
     /// Build a generate task.
     pub async fn build(mut self) -> Result<GenerateTask> {
         let mut sums = ObjectSumsBuilder::default()
             .set_client(self.client)
+            .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
             .build(self.input_file_name.to_string())
             .await?;
 
@@ -308,6 +321,11 @@ impl GenerateTask {
         )
     }
 
+    /// Get the api errors.
+    pub fn api_errors(&self) -> HashSet<ApiError> {
+        self.object_sums.api_errors()
+    }
+
     /// Return the computed sums file.
     pub fn sums_file(&self) -> &SumsFile {
         &self.output
@@ -423,7 +441,7 @@ pub(crate) mod test {
             .with_group_by(GroupBy::Comparability)
             .build()
             .await?;
-        let (objects, _, _) = check.run().await?.into_inner();
+        let (objects, _, _, _) = check.run().await?.into_inner();
 
         let result = SumCtxPairs::from_comparable(objects)?.unwrap();
 

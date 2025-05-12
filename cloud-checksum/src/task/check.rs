@@ -3,7 +3,7 @@
 
 use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
-use crate::error::{Error, Result};
+use crate::error::{ApiError, Error, Result};
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder};
 use crate::stats::{CheckComparison, ChecksumPair};
 use aws_sdk_s3::Client;
@@ -11,20 +11,35 @@ use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 /// Build a check task.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CheckTaskBuilder {
     files: Vec<String>,
     sums_files: Vec<(String, SumsFile)>,
     group_by: GroupBy,
     update: bool,
-    client: Option<Arc<Client>>,
+    clients: Vec<Option<Arc<Client>>>,
+    avoid_get_object_attributes: bool,
+}
+
+impl Default for CheckTaskBuilder {
+    fn default() -> Self {
+        Self {
+            files: Default::default(),
+            sums_files: Default::default(),
+            group_by: Default::default(),
+            update: Default::default(),
+            // Ensure at least one element in the vector to repeat.
+            clients: vec![None],
+            avoid_get_object_attributes: Default::default(),
+        }
+    }
 }
 
 impl CheckTaskBuilder {
@@ -37,6 +52,12 @@ impl CheckTaskBuilder {
     /// Set the sums file directly without reading from input files.
     pub fn with_sums_files(mut self, files: Vec<(String, SumsFile)>) -> Self {
         self.sums_files = files;
+        self
+    }
+
+    /// Set the S3 client to use for each input file.
+    pub fn with_clients(mut self, clients: Vec<Arc<Client>>) -> Self {
+        self.clients = clients.into_iter().map(Some).collect();
         self
     }
 
@@ -54,38 +75,67 @@ impl CheckTaskBuilder {
 
     /// Set the S3 client to use.
     pub fn with_client(mut self, client: Arc<Client>) -> Self {
-        self.client = Some(client);
+        self.clients = vec![Some(client)];
+        self
+    }
+
+    /// Avoid `GetObjectAttributes` calls.
+    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
+        self.avoid_get_object_attributes = avoid_get_object_attributes;
         self
     }
 
     /// Build a check task.
-    pub async fn build(self) -> Result<CheckTask> {
+    pub async fn build(mut self) -> Result<CheckTask> {
         let group_by = self.group_by;
 
-        let mut objects = join_all(self.files.into_iter().map(|file| {
-            let client = self.client.clone();
+        // Remove elements that are already set by in-memory sums files.
+        let in_memory = self
+            .sums_files
+            .iter()
+            .map(|(sums, _)| sums)
+            .collect::<Vec<_>>();
+        self.files.retain(|file| !in_memory.contains(&file));
 
-            async move {
-                let mut sums = ObjectSumsBuilder::default()
-                    .set_client(client)
-                    .build(file.to_string())
-                    .await?;
+        let (objects, errors): (Vec<_>, Vec<_>) = join_all(
+            self.files
+                .into_iter()
+                .zip(self.clients.into_iter().cycle())
+                .map(|(file, client)| async move {
+                    let mut sums = ObjectSumsBuilder::default()
+                        .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
+                        .set_client(client)
+                        .build(file.to_string())
+                        .await?;
 
-                let file_size = sums.file_size().await?;
-                let existing = sums
-                    .sums_file()
-                    .await?
-                    .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
+                    let file_size = sums.file_size().await?;
+                    let existing = sums
+                        .sums_file()
+                        .await?
+                        .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
 
-                Ok((
-                    SumsKey((existing, sums.location())),
-                    BTreeSet::from_iter(vec![State::ObjectSums(sums)]),
-                ))
-            }
-        }))
+                    let errors = sums.api_errors();
+                    Ok((
+                        (
+                            SumsKey((existing, sums.location())),
+                            BTreeSet::from_iter(vec![State::ObjectSums(sums)]),
+                        ),
+                        errors,
+                    ))
+                }),
+        )
         .await
         .into_iter()
-        .collect::<Result<BTreeMap<_, _>>>()?;
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .unzip();
+
+        let mut objects = BTreeMap::from_iter(objects);
+        let errors = HashSet::from_iter(
+            errors
+                .into_iter()
+                .flat_map(|err| err.into_iter().collect::<Vec<_>>()),
+        );
 
         for (location, sums) in self.sums_files {
             objects.insert(
@@ -98,6 +148,7 @@ impl CheckTaskBuilder {
             objects: CheckObjects(objects),
             group_by,
             update: self.update,
+            api_errors: errors,
             ..Default::default()
         })
     }
@@ -138,18 +189,28 @@ impl State {
         }
     }
 
+    /// Get the api errors.
+    pub fn api_errors(&mut self) -> HashSet<ApiError> {
+        match self {
+            State::ObjectSums(object) => object.api_errors(),
+            _ => HashSet::new(),
+        }
+    }
+
     /// Write the sums file to the location. If no object sums are used then this creates a new
     /// object sums to write the file.
     pub async fn write_sums_file(
         &self,
         sums: &SumsFile,
         client: Option<Arc<Client>>,
+        avoid_get_object_attributes: bool,
     ) -> Result<()> {
         match self {
             State::ObjectSums(object) => object.write_sums_file(sums).await,
             State::ExistingSums((location, _)) => {
                 ObjectSumsBuilder::default()
                     .set_client(client)
+                    .with_avoid_get_object_attributes(avoid_get_object_attributes)
                     .build(location.to_string())
                     .await?
                     .write_sums_file(sums)
@@ -256,6 +317,8 @@ pub struct CheckTask {
     compared_directly: Vec<CheckComparison>,
     updated: Vec<String>,
     client: Option<Arc<Client>>,
+    api_errors: HashSet<ApiError>,
+    avoid_get_object_attributes: bool,
 }
 
 impl CheckTask {
@@ -347,6 +410,7 @@ impl CheckTask {
     /// Runs the check task, returning the list of matching files.
     pub async fn run(self) -> Result<Self> {
         let update = self.update && matches!(self.group_by, GroupBy::Equality);
+        let avoid_get_object_attributes = self.avoid_get_object_attributes;
         let client = self.client.clone();
         let mut result = match self.group_by {
             GroupBy::Equality => Ok::<_, Error>(self.merge_same().await?),
@@ -360,8 +424,11 @@ impl CheckTask {
                     let mut location = location.clone();
                     let current = location.sums_file().await?;
 
+                    result.api_errors.extend(location.api_errors());
                     if current.as_ref() != Some(file) {
-                        location.write_sums_file(file, client.clone()).await?;
+                        location
+                            .write_sums_file(file, client.clone(), avoid_get_object_attributes)
+                            .await?;
                         updated_sums.push(location.location());
                     }
                 }
@@ -374,8 +441,20 @@ impl CheckTask {
     }
 
     /// Get the inner values.
-    pub fn into_inner(self) -> (CheckObjects, Vec<CheckComparison>, Vec<String>) {
-        (self.objects, self.compared_directly, self.updated)
+    pub fn into_inner(
+        self,
+    ) -> (
+        CheckObjects,
+        Vec<CheckComparison>,
+        Vec<String>,
+        HashSet<ApiError>,
+    ) {
+        (
+            self.objects,
+            self.compared_directly,
+            self.updated,
+            self.api_errors,
+        )
     }
 
     /// Get the inner state objects.
@@ -386,6 +465,19 @@ impl CheckTask {
     /// Get the comparisons.
     pub fn compared_directly(&self) -> &[CheckComparison] {
         self.compared_directly.as_slice()
+    }
+
+    /// Get the api errors.
+    pub fn api_errors(self) -> HashSet<ApiError> {
+        self.api_errors.clone()
+    }
+
+    /// Does the state of the check task contain no checksums in any sums files.
+    pub fn is_empty(&self) -> bool {
+        self.objects.0.iter().all(|(key, _)| {
+            let SumsKey((sums, _)) = key;
+            sums.is_empty()
+        })
     }
 }
 

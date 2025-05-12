@@ -26,9 +26,10 @@ pub struct State {
 
 impl State {
     /// Build from a name.
-    pub async fn try_from(name: String) -> Result<Self> {
+    pub async fn try_from(name: String, avoid_get_object_attributes: bool) -> Result<Self> {
         Ok(Self {
             object_sums: ObjectSumsBuilder::default()
+                .with_avoid_get_object_attributes(avoid_get_object_attributes)
                 .build(SumsFile::format_target_file(&name))
                 .await?,
             name,
@@ -225,6 +226,11 @@ impl SumsFile {
     /// Add a checksum to the sums file.
     pub fn add_checksum(&mut self, ctx: Ctx, checksum: Checksum) {
         self.checksums.insert(ctx, checksum);
+    }
+
+    /// Does the sums file contain no checksums.
+    pub fn is_empty(&self) -> bool {
+        self.checksums.is_empty()
     }
 }
 

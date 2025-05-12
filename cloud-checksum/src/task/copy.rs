@@ -6,15 +6,15 @@ use crate::checksum::file::SumsFile;
 use crate::checksum::Ctx;
 use crate::cli::{CopyMode, MetadataCopy};
 use crate::error::Error::CopyError;
-use crate::error::{Error, Result};
+use crate::error::{ApiError, Error, Result};
 use crate::io::copy::{CopyResult, CopyState, MultiPartOptions, ObjectCopy, ObjectCopyBuilder};
 use crate::io::sums::ObjectSumsBuilder;
 use crate::io::Provider;
-use crate::stats::ApiError;
 use aws_sdk_s3::Client;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -30,8 +30,11 @@ pub struct CopyTaskBuilder {
     metadata_mode: MetadataCopy,
     tag_mode: MetadataCopy,
     copy_mode: CopyMode,
-    client: Option<Arc<Client>>,
+    source_client: Option<Arc<Client>>,
+    destination_client: Option<Arc<Client>>,
     concurrency: Option<usize>,
+    api_errors: HashSet<ApiError>,
+    avoid_get_object_attributes: bool,
 }
 
 /// Settings that determine the part size and additional checksums to use.
@@ -109,15 +112,27 @@ impl CopyTaskBuilder {
         self
     }
 
-    /// Set the S3 client to use for S3 copies.
-    pub fn with_client(mut self, client: Arc<Client>) -> Self {
-        self.client = Some(client);
+    /// Set the source S3 client to use for S3 copies.
+    pub fn with_source_client(mut self, client: Arc<Client>) -> Self {
+        self.source_client = Some(client);
+        self
+    }
+
+    /// Set the destination S3 client to use for S3 copies.
+    pub fn with_destination_client(mut self, client: Arc<Client>) -> Self {
+        self.destination_client = Some(client);
         self
     }
 
     /// Set the S3 client to use for S3 copies.
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = Some(concurrency);
+        self
+    }
+
+    /// Avoid `GetObjectAttributes` calls.
+    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
+        self.avoid_get_object_attributes = avoid_get_object_attributes;
         self
     }
 
@@ -203,24 +218,27 @@ impl CopyTaskBuilder {
     /// 3. Use the `PART_SIZE_ORDERING` to find the best multipart copy part size if the size
     ///    reaches the `multipart_threshold` or otherwise use single part copies if possible.
     pub async fn use_settings(
-        self,
+        mut self,
         destination: Provider,
         destination_copy: &(dyn ObjectCopy + Send),
         state: &CopyState,
-    ) -> Result<CopySettings> {
+    ) -> Result<(Self, CopySettings)> {
         let size = state.size();
         let max_part_size = destination_copy.max_part_size();
         let max_parts = destination_copy.max_parts();
         let min_part_size = destination_copy.min_part_size();
 
-        // Only use the sums file if the size is not set.
+        // Only use the sums file if the size is not set at the source.
         let sums = if self.part_size.is_none() {
-            ObjectSumsBuilder::default()
-                .set_client(self.client.clone())
+            let mut object = ObjectSumsBuilder::default()
+                .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
+                .set_client(self.source_client.clone())
                 .build(self.source.to_string())
-                .await?
-                .sums_file()
-                .await?
+                .await?;
+
+            self.api_errors.extend(object.api_errors());
+
+            object.sums_file().await?
         } else {
             None
         };
@@ -238,7 +256,7 @@ impl CopyTaskBuilder {
                 destination,
             )?;
             if self.part_size.is_none() {
-                return Ok(settings);
+                return Ok((self, settings));
             } else {
                 Some(settings)
             }
@@ -265,7 +283,10 @@ impl CopyTaskBuilder {
                     max_part_size,
                     min_part_size,
                 ) {
-                    Ok(CopySettings::new(Some(part_size), additional_ctx, size))
+                    Ok((
+                        self,
+                        CopySettings::new(Some(part_size), additional_ctx, size),
+                    ))
                 } else {
                     Err(CopyError(format!(
                         "invalid part size `{}` and threshold `{}` for the object size `{}`",
@@ -275,7 +296,7 @@ impl CopyTaskBuilder {
             }
         }
 
-        let err = || {
+        let err_fn = || {
             CopyError(format!(
                 "failed to find a valid part size for the threshold `{}` with object size `{}`",
                 threshold, size
@@ -288,20 +309,23 @@ impl CopyTaskBuilder {
             });
 
             return if let Some(part_size) = part_size {
-                Ok(CopySettings::new(Some(*part_size), additional_ctx, size))
+                Ok((
+                    self,
+                    CopySettings::new(Some(*part_size), additional_ctx, size),
+                ))
             } else {
-                Err(err())
+                Err(err_fn())
             };
         }
 
         // Otherwise use single part if possible.
         if Self::is_single_part(size, max_part_size) {
-            return Ok(CopySettings::new(None, additional_ctx, size));
+            return Ok((self, CopySettings::new(None, additional_ctx, size)));
         }
 
         // This condition may occur if the size is greater than the possible single part upload
         // limit but lower than the threshold.
-        Err(err())
+        Err(err_fn())
     }
 
     /// Build a generate task.
@@ -325,11 +349,11 @@ impl CopyTaskBuilder {
             CopyMode::DownloadUpload
         };
 
-        let (source_copy, destination_copy) = if is_same_provider {
+        let (source_copy, destination_copy) = if copy_mode.is_server_side() {
             let source = ObjectCopyBuilder::default()
                 .with_copy_metadata(self.metadata_mode)
                 .with_copy_tags(self.tag_mode)
-                .set_client(self.client.clone())
+                .set_client(self.source_client.clone())
                 .set_source(Some(source.clone()))
                 .set_destination(Some(destination.clone()))
                 .build()
@@ -341,25 +365,27 @@ impl CopyTaskBuilder {
                 ObjectCopyBuilder::default()
                     .with_copy_metadata(self.metadata_mode)
                     .with_copy_tags(self.tag_mode)
-                    .set_client(self.client.clone())
+                    .set_client(self.source_client.clone())
                     .set_source(Some(source.clone()))
                     .build()
                     .await?,
                 ObjectCopyBuilder::default()
                     .with_copy_metadata(self.metadata_mode)
                     .with_copy_tags(self.tag_mode)
-                    .set_client(self.client.clone())
+                    .set_client(self.destination_client.clone())
                     .set_destination(Some(destination.clone()))
                     .build()
                     .await?,
             )
         };
+
         let state = source_copy.initialize_state().await?;
 
         let concurrency = self
             .concurrency
             .ok_or_else(|| CopyError("concurrency not set".to_string()))?;
-        let settings = self
+
+        let (this, settings) = self
             .use_settings(destination.clone(), destination_copy.as_ref(), &state)
             .await?;
 
@@ -377,7 +403,7 @@ impl CopyTaskBuilder {
             destination,
             bytes_transferred: 0,
             n_retries: 0,
-            api_errors: vec![],
+            api_errors: this.api_errors,
         };
 
         Ok(copy_task)
@@ -412,7 +438,7 @@ pub struct CopyTask {
     ordered_upload: bool,
     bytes_transferred: u64,
     n_retries: u64,
-    api_errors: Vec<ApiError>,
+    api_errors: HashSet<ApiError>,
 }
 
 impl CopyTask {
@@ -598,7 +624,8 @@ impl CopyTask {
 
         self.bytes_transferred = bytes_transferred;
         self.n_retries = n_retries;
-        self.api_errors = api_errors;
+        self.api_errors
+            .extend::<HashSet<ApiError>>(HashSet::from_iter(api_errors));
 
         Ok(self)
     }
@@ -624,8 +651,8 @@ impl CopyTask {
     }
 
     /// Get the api errors.
-    pub fn api_errors(&self) -> &[ApiError] {
-        self.api_errors.as_slice()
+    pub fn api_errors(&self) -> HashSet<ApiError> {
+        self.api_errors.clone()
     }
 
     /// Get the number of retries.
@@ -685,7 +712,7 @@ pub(crate) mod test {
     async fn copy_settings() -> Result<()> {
         let test_file = TestFileBuilder::default().generate_test_defaults()?;
 
-        let single_part = vec![mock_single_part_etag_only_rule()];
+        let single_part = mock_single_part_etag_only_rule();
         let multipart = mock_multi_part_etag_only_rule();
 
         let builder = CopyTaskBuilder::default()
@@ -696,21 +723,21 @@ pub(crate) mod test {
         let lt_threshold = builder
             .clone()
             .with_multipart_threshold(Some(TEST_FILE_SIZE + 1))
-            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
+            .with_source_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
         assert_eq!(lt_threshold.build().await?.part_size, None);
 
         // S3 to S3 will always prefer the original upload settings so even if the size is greater than the
         // threshold, it should still be single part.
         let gt_threshold = builder
             .clone()
-            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
+            .with_source_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
         assert_eq!(gt_threshold.build().await?.part_size, None);
 
         // If it was originally multipart, it should prefer that even if below the threshold.
         let multipart_lt_threshold = builder
             .clone()
             .with_multipart_threshold(Some(TEST_FILE_SIZE + 1))
-            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, multipart.as_slice())));
+            .with_source_client(Arc::new(mock_size(TEST_FILE_SIZE, multipart.as_slice())));
         assert_eq!(
             multipart_lt_threshold.build().await?.part_size,
             Some(214748365)
@@ -718,7 +745,7 @@ pub(crate) mod test {
 
         let multipart_gt_threshold = builder
             .clone()
-            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, multipart.as_slice())));
+            .with_source_client(Arc::new(mock_size(TEST_FILE_SIZE, multipart.as_slice())));
         assert_eq!(
             multipart_gt_threshold.build().await?.part_size,
             Some(214748365)
@@ -728,12 +755,12 @@ pub(crate) mod test {
         let part_size_set = builder
             .clone()
             .with_part_size(Some(5242880))
-            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
+            .with_source_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
         assert_eq!(part_size_set.build().await?.part_size, Some(5242880));
         let part_size_set_multipart = builder
             .clone()
             .with_part_size(Some(5242880))
-            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, multipart.as_slice())));
+            .with_source_client(Arc::new(mock_size(TEST_FILE_SIZE, multipart.as_slice())));
         assert_eq!(
             part_size_set_multipart.build().await?.part_size,
             Some(5242880)
@@ -762,13 +789,13 @@ pub(crate) mod test {
         let part_size_err_max = builder
             .clone()
             .with_part_size(Some(60000000000))
-            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
+            .with_source_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
         assert!(part_size_err_max.build().await.is_err());
         // If the part size exceeds the limits, this should be an error.
         let part_size_err_min = builder
             .clone()
             .with_part_size(Some(1))
-            .with_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
+            .with_source_client(Arc::new(mock_size(TEST_FILE_SIZE, single_part.as_slice())));
         assert!(part_size_err_min.build().await.is_err());
 
         Ok(())

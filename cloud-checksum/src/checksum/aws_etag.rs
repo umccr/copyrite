@@ -3,7 +3,7 @@
 //!
 
 use crate::checksum::standard::StandardCtx;
-use crate::error::Error::{AwsError, ParseError};
+use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use crate::io::Provider;
 use std::cmp::Ordering;
@@ -268,7 +268,7 @@ impl AWSETagCtx {
             let (data, remainder) = data.split_at(usize::try_from(
                 self.current_part_size
                     .checked_sub(self.current_bytes)
-                    .ok_or_else(|| AwsError("part size too large".to_string()))?,
+                    .ok_or_else(|| Error::aws_error("part size too large".to_string()))?,
             )?);
 
             self.ctx.update(Arc::from(data))?;
