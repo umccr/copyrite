@@ -10,6 +10,7 @@ authors.workspace = true
 clap = { version = "4", features = ["derive", "env", "cargo"] }
 thiserror = "2"
 rand = "0.9"
+tracing-subscriber = { version = "0.3", features = [ "std", "env-filter" ] }
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "test-util", "io-util", "io-std", "fs"] }
