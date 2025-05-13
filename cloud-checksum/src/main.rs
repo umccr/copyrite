@@ -1,6 +1,6 @@
-use tracing_subscriber::EnvFilter;
 use cloud_checksum::cli::Command;
 use cloud_checksum::error::Result;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -9,7 +9,7 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .try_init();
-    
+
     let args = Command::parse_args()?;
 
     args.execute().await?;
