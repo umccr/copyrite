@@ -1,15 +1,15 @@
 //! Cli commands and code.
 //!
 
-use crate::checksum::file::SumsFile;
 use crate::checksum::Ctx;
 use crate::error::Error;
-use crate::error::Error::{CheckError, ParseError};
+use crate::error::Error::{CheckError, GenerateError, ParseError};
 use crate::error::Result;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::ObjectSumsBuilder;
 use crate::io::{create_s3_client, default_s3_client, Provider};
-use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateFileStats, GenerateStats};
+use crate::stats;
+use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::CopyTaskBuilder;
 use crate::task::generate::{GenerateTaskBuilder, SumCtxPairs};
@@ -107,17 +107,17 @@ impl Command {
         let write_sums_file = self.output.write_sums_file;
         match self.commands {
             Subcommands::Generate(generate_args) => {
-                let (sums, stats) = generate_args
+                let stats = generate_args
                     .generate(self.optimization, &self.credentials, vec![client], true)
                     .await
                     .inspect_err(|err| {
                         Self::print_stats(err, pretty_json).ok();
                     })?;
-                if let Some(stats) = stats {
-                    Self::print_stats(&stats, pretty_json)?;
-                } else {
+                if let Some(sums) = stats.sums {
                     sums.iter()
                         .try_for_each(|sums| Self::print_stats(&sums, pretty_json))?;
+                } else {
+                    Self::print_stats(&stats, pretty_json)?;
                 }
             }
             Subcommands::Check(check_args) => {
@@ -232,7 +232,7 @@ impl Generate {
         credentials: &Credentials,
         mut clients: Vec<Arc<Client>>,
         write_sums_file: bool,
-    ) -> Result<(Vec<(String, SumsFile)>, Option<GenerateStats>)> {
+    ) -> stats::Result<GenerateStats> {
         if self.input[0] == "-" {
             let reader = ChannelReader::new(stdin(), optimization.channel_capacity);
 
@@ -250,11 +250,14 @@ impl Generate {
                 .into_inner()
                 .0;
 
-            Ok((vec![(self.input[0].to_string(), output)], None))
+            Ok(GenerateStats::from_sums(vec![(
+                self.input[0].to_string(),
+                output,
+            )]))
         } else {
             let now = Instant::now();
             let mut check_stats = None;
-            let mut generate_stats = vec![];
+            let mut generate_stats = GenerateStats::default();
             let mut sums_files = vec![];
             let mut errors = HashSet::new();
 
@@ -303,24 +306,22 @@ impl Generate {
                             .build()
                             .await?
                             .run()
-                            .await?;
+                            .await;
 
-                        sums_files.push((input, task.sums_file().clone()));
-                        errors.extend(task.api_errors());
-                        generate_stats.push(GenerateFileStats::from_task(task));
+                        if let Ok(ref task) = task {
+                            sums_files.push((input, task.sums_file().clone()));
+                            errors.extend(task.api_errors());
+                        }
+                        generate_stats = generate_stats.add_stats(task)?;
                     }
                 }
 
                 if self.checksum.is_empty() {
-                    return Ok((
-                        sums_files,
-                        Some(GenerateStats::new(
-                            now.elapsed().as_secs_f64(),
-                            generate_stats,
-                            check_stats,
-                            errors,
-                        )),
-                    ));
+                    generate_stats.set_check_stats(check_stats);
+                    generate_stats.set_recoverable_errors(errors);
+                    generate_stats.set_elapsed_seconds(now.elapsed().as_secs_f64());
+                    generate_stats.set_sums_files(sums_files);
+                    return Ok(generate_stats);
                 }
             };
 
@@ -337,21 +338,21 @@ impl Generate {
                     .build()
                     .await?
                     .run()
-                    .await?;
-                sums_files.push((input, task.sums_file().clone()));
-                errors.extend(task.api_errors());
-                generate_stats.push(GenerateFileStats::from_task(task));
+                    .await;
+
+                if let Ok(ref task) = task {
+                    sums_files.push((input, task.sums_file().clone()));
+                    errors.extend(task.api_errors());
+                }
+                generate_stats = generate_stats.add_stats(task)?;
             }
 
-            Ok((
-                sums_files,
-                Some(GenerateStats::new(
-                    now.elapsed().as_secs_f64(),
-                    generate_stats,
-                    check_stats,
-                    errors,
-                )),
-            ))
+            generate_stats.set_check_stats(check_stats);
+            generate_stats.set_recoverable_errors(errors);
+            generate_stats.set_elapsed_seconds(now.elapsed().as_secs_f64());
+            generate_stats.set_sums_files(sums_files);
+
+            Ok(generate_stats)
         }
     }
 }
@@ -416,7 +417,7 @@ impl Check {
         write_sums_file: bool,
         verify: bool,
         clients: Vec<Arc<Client>>,
-    ) -> Result<CheckStats> {
+    ) -> stats::Result<CheckStats> {
         let now = Instant::now();
         let group_by = self.group_by;
 
@@ -436,7 +437,7 @@ impl Check {
             .await?;
             let checksum = Check::generate_sums(ctxs);
 
-            let (sums, stats) = Generate {
+            let mut stats = Generate {
                 input: self.input.clone(),
                 checksum,
                 missing: true,
@@ -444,8 +445,13 @@ impl Check {
                 verify,
             }
             .generate(optimization, credentials, clients.clone(), write_sums_file)
-            .await?;
-            generate_stats = stats;
+            .await
+            .map_err(|stats| CheckStats::from_generate_task(group_by, *stats, now.elapsed()))?;
+            let sums = stats
+                .sums
+                .take()
+                .ok_or_else(|| GenerateError("missing sums".to_string()))?;
+            generate_stats = Some(stats);
 
             builder = builder.with_sums_files(sums);
         }
@@ -454,7 +460,8 @@ impl Check {
         if check.compared_directly().is_empty() {
             return Err(CheckError(
                 "nothing to compare in checksums, use `generate` or `--missing` first".to_string(),
-            ));
+            )
+            .into());
         }
 
         Ok(CheckStats::from_task(
@@ -598,7 +605,7 @@ impl Copy {
         credentials: &Credentials,
         verify: bool,
         write_sums_file: bool,
-    ) -> Result<CheckStats> {
+    ) -> stats::Result<CheckStats> {
         let input = vec![self.source.to_string(), self.destination.to_string()];
 
         let result = Check {
@@ -627,7 +634,7 @@ impl Copy {
         credentials: Credentials,
         optimization: Optimization,
         write_sums_file: bool,
-    ) -> Result<CopyStats> {
+    ) -> stats::Result<CopyStats> {
         let now = Instant::now();
 
         let mut exists = false;
@@ -655,7 +662,18 @@ impl Copy {
                         false,
                         write_sums_file,
                     )
-                    .await?;
+                    .await
+                    .map_err(|err| {
+                        CopyStats::from_check_stats(
+                            self.source.to_string(),
+                            self.destination.to_string(),
+                            self.copy_mode,
+                            *err,
+                            now.elapsed(),
+                            false,
+                            false,
+                        )
+                    })?;
 
                 if check_stats.groups.len() == 1 {
                     let copy_stats = CopyStats {
@@ -670,6 +688,7 @@ impl Copy {
                         n_retries: 0,
                         api_errors: HashSet::new(),
                         check_stats: Some(check_stats),
+                        unrecoverable_error: None,
                     };
                     return Ok(copy_stats);
                 }
@@ -712,7 +731,19 @@ impl Copy {
                     sums_mismatch,
                     write_sums_file,
                 )
-                .await?;
+                .await
+                .map_err(|err| {
+                    CopyStats::from_check_stats(
+                        self.source.to_string(),
+                        self.destination.to_string(),
+                        self.copy_mode,
+                        *err,
+                        now.elapsed(),
+                        false,
+                        false,
+                    )
+                })?;
+
             CopyStats::from_task(
                 result,
                 Some(check_stats),

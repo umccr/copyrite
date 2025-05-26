@@ -2,6 +2,7 @@
 //!
 
 use crate::error::Error::AwsError;
+use crate::stats::{CheckStats, CopyStats, GenerateStats};
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError;
 use aws_sdk_s3::operation::copy_object::CopyObjectError;
@@ -19,6 +20,7 @@ use aws_smithy_types::byte_stream;
 use aws_smithy_types::error::display::DisplayErrorContext;
 use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use serde::{Deserialize, Serialize, Serializer};
+use serde_json::to_string;
 use std::fmt::{Debug, Display, Formatter};
 use std::num::TryFromIntError;
 use std::{error, fmt, io, result};
@@ -60,6 +62,8 @@ pub enum Error {
         message: String,
         api_error: Option<ApiError>,
     },
+    #[error("{0}")]
+    Stats(String),
 }
 
 impl Debug for Error {
@@ -137,6 +141,24 @@ impl From<serde_json::Error> for Error {
 impl From<byte_stream::error::Error> for Error {
     fn from(err: byte_stream::error::Error) -> Self {
         Self::IOError(io::Error::other(err))
+    }
+}
+
+impl From<Box<GenerateStats>> for Error {
+    fn from(stats: Box<GenerateStats>) -> Self {
+        Self::Stats(to_string(&stats).unwrap_or_default())
+    }
+}
+
+impl From<Box<CheckStats>> for Error {
+    fn from(stats: Box<CheckStats>) -> Self {
+        Self::Stats(to_string(&stats).unwrap_or_default())
+    }
+}
+
+impl From<Box<CopyStats>> for Error {
+    fn from(stats: Box<CopyStats>) -> Self {
+        Self::Stats(to_string(&stats).unwrap_or_default())
     }
 }
 

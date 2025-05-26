@@ -12,10 +12,10 @@ use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
+use std::{fmt, mem, result};
 
 /// Build a check task.
 #[derive(Debug)]
@@ -148,7 +148,7 @@ impl CheckTaskBuilder {
             objects: CheckObjects(objects),
             group_by,
             update: self.update,
-            api_errors: errors,
+            recoverable_errors: errors,
             ..Default::default()
         })
     }
@@ -308,6 +308,33 @@ impl Hash for CheckObjects {
     }
 }
 
+/// The check type error with the task information when the error occurred.
+pub struct CheckTaskError {
+    pub task: CheckTask,
+    pub error: Error,
+}
+
+impl Debug for CheckTaskError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.error)
+    }
+}
+
+impl From<CheckTaskError> for Error {
+    fn from(error: CheckTaskError) -> Self {
+        error.error
+    }
+}
+
+impl From<(CheckTask, Error)> for CheckTaskError {
+    fn from((task, error): (CheckTask, Error)) -> Self {
+        Self { task, error }
+    }
+}
+
+/// The check task result type.
+pub type CheckTaskResult = result::Result<CheckTask, CheckTaskError>;
+
 /// Execute the check task.
 #[derive(Default, Debug)]
 pub struct CheckTask {
@@ -317,8 +344,8 @@ pub struct CheckTask {
     compared_directly: Vec<CheckComparison>,
     updated: Vec<String>,
     client: Option<Arc<Client>>,
-    api_errors: HashSet<ApiError>,
     avoid_get_object_attributes: bool,
+    recoverable_errors: HashSet<ApiError>,
 }
 
 impl CheckTask {
@@ -329,7 +356,7 @@ impl CheckTask {
     }
 
     /// Groups sums files based on a comparison function.
-    async fn merge_fn<F>(mut self, compare: F) -> Result<Self>
+    async fn merge_fn<F>(&mut self, compare: F)
     where
         for<'a> F: Fn(&'a SumsFile, &'a SumsFile) -> Option<(&'a Ctx, &'a Checksum)>,
     {
@@ -342,7 +369,8 @@ impl CheckTask {
         // until the hash of the previous and current iteration is the same.
         while prev_state != state {
             // BTreeMap files are sorted already.
-            let mut objects = self.objects.0.into_iter().collect::<Vec<_>>();
+            let objects = mem::take(&mut self.objects);
+            let mut objects = objects.0.into_iter().collect::<Vec<_>>();
             let mut reprocess = Vec::with_capacity(objects.len());
 
             // Process a single sums file at a time.
@@ -375,22 +403,19 @@ impl CheckTask {
             prev_state = state;
             state = Self::hash(&self.objects);
         }
-
-        Ok(self)
     }
 
     /// Merges the set of input sums files that are the same until no more merges can
     /// be performed. This can find sums files that are indirectly identical through
     /// other files. E.g. a.sums is equal to b.sums, and b.sums is equal to c.sums, but
     /// a.sums is not directly equal to c.sums because of different checksum types.
-    pub async fn merge_same(mut self) -> Result<Self> {
-        self = self.merge_fn(|a, b| a.is_same(b)).await?;
-        Ok(self)
+    pub async fn merge_same(&mut self) {
+        self.merge_fn(|a, b| a.is_same(b)).await;
     }
 
     /// Determine the set of checksums for all files.
-    pub async fn merge_comparable(mut self) -> Result<Self> {
-        self = self.merge_fn(|a, b| a.comparable(b)).await?;
+    pub async fn merge_comparable(&mut self) {
+        self.merge_fn(|a, b| a.comparable(b)).await;
         // The checksum value doesn't mean much if two sums files are comparable but not equal,
         // so it should be cleared.
         let mut files = BTreeMap::new();
@@ -403,28 +428,25 @@ impl CheckTask {
             files.insert(key, locations);
         }
         self.objects = CheckObjects(files);
-
-        Ok(self)
     }
 
-    /// Runs the check task, returning the list of matching files.
-    pub async fn run(self) -> Result<Self> {
+    async fn do_check(&mut self) -> Result<()> {
         let update = self.update && matches!(self.group_by, GroupBy::Equality);
         let avoid_get_object_attributes = self.avoid_get_object_attributes;
         let client = self.client.clone();
-        let mut result = match self.group_by {
-            GroupBy::Equality => Ok::<_, Error>(self.merge_same().await?),
-            GroupBy::Comparability => Ok(self.merge_comparable().await?),
-        }?;
+        match self.group_by {
+            GroupBy::Equality => self.merge_same().await,
+            GroupBy::Comparability => self.merge_comparable().await,
+        };
 
         let mut updated_sums = vec![];
         if update {
-            for (SumsKey((file, _)), locations) in &result.objects.0 {
+            for (SumsKey((file, _)), locations) in &self.objects.0 {
                 for location in locations {
                     let mut location = location.clone();
                     let current = location.sums_file().await?;
 
-                    result.api_errors.extend(location.api_errors());
+                    self.recoverable_errors.extend(location.api_errors());
                     if current.as_ref() != Some(file) {
                         location
                             .write_sums_file(file, client.clone(), avoid_get_object_attributes)
@@ -435,9 +457,17 @@ impl CheckTask {
             }
         }
 
-        result.updated = updated_sums;
+        self.updated = updated_sums;
 
-        Ok(result)
+        Ok(())
+    }
+
+    /// Runs the check task, returning the list of matching files.
+    pub async fn run(mut self) -> CheckTaskResult {
+        match self.do_check().await {
+            Ok(_) => Ok(self),
+            Err(err) => Err((self, err).into()),
+        }
     }
 
     /// Get the inner values.
@@ -453,7 +483,7 @@ impl CheckTask {
             self.objects,
             self.compared_directly,
             self.updated,
-            self.api_errors,
+            self.recoverable_errors,
         )
     }
 
@@ -469,7 +499,7 @@ impl CheckTask {
 
     /// Get the api errors.
     pub fn api_errors(self) -> HashSet<ApiError> {
-        self.api_errors.clone()
+        self.recoverable_errors.clone()
     }
 
     /// Does the state of the check task contain no checksums in any sums files.
@@ -505,7 +535,8 @@ pub(crate) mod test {
 
         let result: Vec<_> = check
             .run()
-            .await?
+            .await
+            .unwrap()
             .objects
             .0
             .into_keys()
@@ -541,7 +572,8 @@ pub(crate) mod test {
 
         let result: Vec<_> = check
             .run()
-            .await?
+            .await
+            .unwrap()
             .objects
             .0
             .into_keys()
@@ -577,7 +609,8 @@ pub(crate) mod test {
 
         let result: Vec<_> = check
             .run()
-            .await?
+            .await
+            .unwrap()
             .objects
             .0
             .into_keys()
@@ -622,7 +655,8 @@ pub(crate) mod test {
 
         let result: Vec<_> = check
             .run()
-            .await?
+            .await
+            .unwrap()
             .objects
             .0
             .into_keys()

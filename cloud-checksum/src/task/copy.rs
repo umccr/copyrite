@@ -12,11 +12,11 @@ use crate::io::sums::ObjectSumsBuilder;
 use crate::io::Provider;
 use aws_sdk_s3::Client;
 use futures_util::future::join_all;
-use serde::{Deserialize, Serialize};
-use serde_json::to_string;
 use std::collections::HashSet;
+use std::fmt::{Debug, Formatter};
 use std::future::Future;
 use std::sync::Arc;
+use std::{fmt, result};
 
 pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 8 * 1024 * 1024; // 8mib
 
@@ -403,25 +403,39 @@ impl CopyTaskBuilder {
             destination,
             bytes_transferred: 0,
             n_retries: 0,
-            api_errors: this.api_errors,
+            recoverable_errors: this.api_errors,
         };
 
         Ok(copy_task)
     }
 }
 
-/// Output of the copy task.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CopyInfo {
-    total_bytes: Option<u64>,
+/// The copy error with the task information when the error occurred.
+pub struct CopyTaskError {
+    pub task: CopyTask,
+    pub error: Error,
 }
 
-impl CopyInfo {
-    /// Convert to a JSON string.
-    pub fn to_json_string(&self) -> Result<String> {
-        Ok(to_string(&self)?)
+impl Debug for CopyTaskError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.error)
     }
 }
+
+impl From<(CopyTask, Error)> for CopyTaskError {
+    fn from((task, error): (CopyTask, Error)) -> Self {
+        Self { task, error }
+    }
+}
+
+impl From<CopyTaskError> for Error {
+    fn from(error: CopyTaskError) -> Self {
+        error.error
+    }
+}
+
+/// The copy task result type.
+pub type CopyTaskResult = result::Result<CopyTask, CopyTaskError>;
 
 /// Execute the copy task.
 pub struct CopyTask {
@@ -438,7 +452,7 @@ pub struct CopyTask {
     ordered_upload: bool,
     bytes_transferred: u64,
     n_retries: u64,
-    api_errors: HashSet<ApiError>,
+    recoverable_errors: HashSet<ApiError>,
 }
 
 impl CopyTask {
@@ -575,8 +589,7 @@ impl CopyTask {
         Ok((bytes_transferred, n_retries, api_errors))
     }
 
-    /// Runs the copy task and return the output.
-    pub async fn run(mut self) -> Result<Self> {
+    async fn do_copy(&mut self) -> Result<()> {
         self.state.set_additional_ctx(self.additional_sums.clone());
 
         let (bytes_transferred, n_retries, api_errors) = match (self.copy_mode, self.part_size) {
@@ -624,10 +637,18 @@ impl CopyTask {
 
         self.bytes_transferred = bytes_transferred;
         self.n_retries = n_retries;
-        self.api_errors
+        self.recoverable_errors
             .extend::<HashSet<ApiError>>(HashSet::from_iter(api_errors));
 
-        Ok(self)
+        Ok(())
+    }
+
+    /// Runs the copy task and return the output.
+    pub async fn run(mut self) -> CopyTaskResult {
+        match self.do_copy().await {
+            Ok(_) => Ok(self),
+            Err(err) => Err((self, err).into()),
+        }
     }
 
     /// Get the source.
@@ -652,7 +673,7 @@ impl CopyTask {
 
     /// Get the api errors.
     pub fn api_errors(&self) -> HashSet<ApiError> {
-        self.api_errors.clone()
+        self.recoverable_errors.clone()
     }
 
     /// Get the number of retries.
@@ -695,7 +716,8 @@ pub(crate) mod test {
             .build()
             .await?
             .run()
-            .await?;
+            .await
+            .unwrap();
 
         assert_eq!(copy.bytes_transferred, 4);
 
