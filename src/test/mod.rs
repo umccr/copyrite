@@ -1,4 +1,4 @@
-//! Test related functionality used internally within cloud-checksum.
+//! Test related functionality used internally within copyrite.
 //!
 
 #![doc(hidden)]

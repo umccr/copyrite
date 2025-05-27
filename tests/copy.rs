@@ -28,7 +28,7 @@ impl TestConfig {
     fn load() -> Result<Self> {
         dotenv()?;
 
-        let mut env: Self = prefixed("CLOUD_CHECKSUM_TEST_").from_env()?;
+        let mut env: Self = prefixed("COPYRITE_TEST_").from_env()?;
 
         env.bucket_uri = env
             .bucket_uri
@@ -196,7 +196,7 @@ async fn get_head_object(client: &Client, url: &str) -> Result<HeadObjectOutput>
 
 async fn execute_multipart(from: &str, to: &str, config: &TestConfig) {
     let mut commands = [
-        "cloud-checksum",
+        "copyrite",
         "copy",
         from,
         to,
@@ -217,7 +217,7 @@ async fn execute_multipart(from: &str, to: &str, config: &TestConfig) {
 
 async fn execute_single_part(from: &str, to: &str, config: &TestConfig) {
     let mut commands = [
-        "cloud-checksum",
+        "copyrite",
         "copy",
         from,
         to,

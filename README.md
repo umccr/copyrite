@@ -76,17 +76,17 @@ cargo bench --all-features
 ```
 
 Integration tests are ignored by default. They perform operations on an S3 bucket directly, and need to have a
-`CLOUD_CHECKSUM_TEST_BUCKET_URI` environment set, to a bucket and prefix that files can be written to. Run the tests
+`COPYRITE_TEST_BUCKET_URI` environment set, to a bucket and prefix that files can be written to. Run the tests
 using:
 
 ```sh
-CLOUD_CHECKSUM_TEST_BUCKET_URI="s3://bucket/prefix" cargo test --all-features -- --ignored
+COPYRITE_TEST_BUCKET_URI="s3://bucket/prefix" cargo test --all-features -- --ignored
 ```
 
 The endpoint URL can also be set for S3-compatible endpoint tests:
 
 ```sh
-CLOUD_CHECKSUM_TEST_BUCKET_URI="s3://bucket/prefix" CLOUD_CHECKSUM_TEST_ENDPOINT_URL="https://storage.googleapis.com" cargo test --all-features -- --ignored
+COPYRITE_TEST_BUCKET_URI="s3://bucket/prefix" COPYRITE_TEST_ENDPOINT_URL="https://storage.googleapis.com" cargo test --all-features -- --ignored
 ```
 
 
