@@ -1,19 +1,22 @@
 //! Structs related to output statistics.
 //!
 
-use crate::checksum::file::Checksum;
+use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
 use crate::cli::CopyMode;
-use crate::error::ApiError;
-use crate::task::check::{CheckTask, GroupBy};
-use crate::task::copy::CopyTask;
-use crate::task::generate::GenerateTask;
+use crate::error::{ApiError, Error};
+use crate::task::check::{CheckTask, CheckTaskError, GroupBy};
+use crate::task::copy::{CopyTask, CopyTaskError};
+use crate::task::generate::{GenerateTask, GenerateTaskError, GenerateTaskResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
+/// The result type for stats.
+pub type Result<T> = std::result::Result<T, Box<T>>;
+
 /// Stats from running a `generate` command.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct GenerateStats {
     /// Time taken in seconds.
     pub(crate) elapsed_seconds: f64,
@@ -25,26 +28,96 @@ pub struct GenerateStats {
     pub(crate) check_stats: Option<Box<CheckStats>>,
     /// The API errors if there was permission issues for object attributes.
     #[serde(skip_serializing_if = "HashSet::is_empty")]
-    pub(crate) api_errors: HashSet<ApiError>,
+    pub(crate) recoverable_errors: HashSet<ApiError>,
+    /// An unrecoverable error occurred, causing the execution to stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unrecoverable_error: Option<Error>,
+    #[serde(skip)]
+    pub(crate) sums: Option<Vec<(String, SumsFile)>>,
+}
+
+impl From<Error> for Box<GenerateStats> {
+    fn from(err: Error) -> Self {
+        Box::new(GenerateStats {
+            unrecoverable_error: Some(err),
+            ..Default::default()
+        })
+    }
+}
+
+impl From<GenerateTaskError> for Box<GenerateStats> {
+    fn from(err: GenerateTaskError) -> Self {
+        let stats = err.error.into();
+        GenerateStats::default().push_task(err.task);
+        stats
+    }
 }
 
 impl GenerateStats {
     /// Create new generate stats.
-    pub fn new(
-        elapsed_seconds: f64,
-        stats: Vec<GenerateFileStats>,
-        check_stats: Option<CheckStats>,
-        api_errors: HashSet<ApiError>,
-    ) -> Self {
+    pub fn new(stats: Vec<GenerateFileStats>, check_stats: Option<CheckStats>) -> Self {
+        let mut result = Self {
+            elapsed_seconds: 0.0,
+            ..Default::default()
+        };
+
+        stats.into_iter().for_each(|stat| result.push_stats(stat));
+        result.set_check_stats(check_stats);
+
+        result
+    }
+
+    /// Create stats from a sums file.
+    pub fn from_sums(sums: Vec<(String, SumsFile)>) -> Self {
         Self {
-            elapsed_seconds,
-            stats: stats
-                .into_iter()
-                .filter(|stat| !stat.checksums_generated.0.is_empty())
-                .collect(),
-            check_stats: check_stats.map(Box::new),
-            api_errors,
+            sums: Some(sums),
+            ..Default::default()
         }
+    }
+
+    fn push_stats(&mut self, stats: GenerateFileStats) {
+        if !stats.checksums_generated.0.is_empty() {
+            self.stats.push(stats);
+        }
+    }
+
+    fn push_task(&mut self, task: GenerateTask) {
+        self.push_stats(GenerateFileStats::from_task(task));
+    }
+
+    /// Add generate stats for a file.
+    pub fn add_stats(mut self, task: GenerateTaskResult) -> Result<Self> {
+        match task {
+            Ok(task) => {
+                self.push_task(task);
+                Ok(self)
+            }
+            Err(err) => {
+                self.push_task(err.task);
+                Err(Box::new(self))
+            }
+        }
+    }
+
+    /// Set the seconds of the task.
+    pub fn set_sums_files(&mut self, sums: Vec<(String, SumsFile)>) {
+        self.sums = Some(sums);
+    }
+
+    /// Set the check stats.
+    pub fn set_check_stats(&mut self, check_stats: Option<CheckStats>) {
+        self.check_stats = check_stats.map(Box::new);
+    }
+
+    /// Set the recoverable errors.
+    pub fn set_recoverable_errors(&mut self, recoverable_errors: HashSet<ApiError>) {
+        self.recoverable_errors = recoverable_errors;
+    }
+
+    /// Set the number of elapsed seconds.
+    pub fn with_elapsed(mut self, elapsed: Duration) -> Self {
+        self.elapsed_seconds = elapsed.as_secs_f64();
+        self
     }
 }
 
@@ -118,7 +191,7 @@ impl GenerateFileStats {
 }
 
 /// Represents stats from a `check` operation.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct CheckStats {
     /// The time taken in seconds.
     pub(crate) elapsed_seconds: f64,
@@ -142,12 +215,31 @@ pub struct CheckStats {
     /// The API errors if there was permission issues for object attributes.
     #[serde(skip_serializing_if = "HashSet::is_empty")]
     pub(crate) api_errors: HashSet<ApiError>,
+    /// An unrecoverable error occurred, causing the execution to stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unrecoverable_error: Option<Error>,
+}
+
+impl From<Error> for Box<CheckStats> {
+    fn from(err: Error) -> Self {
+        Box::new(CheckStats {
+            unrecoverable_error: Some(err),
+            ..Default::default()
+        })
+    }
+}
+
+impl From<CheckTaskError> for Box<CheckStats> {
+    fn from(err: CheckTaskError) -> Self {
+        let mut stats = CheckStats::from_task(err.task, None);
+        stats.unrecoverable_error = Some(err.error);
+        Box::new(stats)
+    }
 }
 
 impl CheckStats {
     /// Create new check stats.
     pub fn new(
-        elapsed_seconds: f64,
         comparison_type: GroupBy,
         compared: Vec<CheckComparison>,
         groups: Vec<Vec<String>>,
@@ -156,27 +248,35 @@ impl CheckStats {
         api_errors: HashSet<ApiError>,
     ) -> Self {
         Self {
-            elapsed_seconds,
+            elapsed_seconds: 0.0,
             comparison_type,
             compared,
             groups,
             updated,
             generate_stats,
             api_errors,
+            unrecoverable_error: None,
         }
     }
 
+    /// Create check stats from a generate task.
+    pub fn from_generate_task(group_by: GroupBy, generate_stats: GenerateStats) -> Self {
+        Self::new(
+            group_by,
+            vec![],
+            vec![],
+            vec![],
+            Some(generate_stats),
+            Default::default(),
+        )
+    }
+
     /// Create check stats from a task.
-    pub fn from_task(
-        group_by: GroupBy,
-        task: CheckTask,
-        elapsed: Duration,
-        generate_stats: Option<GenerateStats>,
-    ) -> Self {
+    pub fn from_task(task: CheckTask, generate_stats: Option<GenerateStats>) -> Self {
+        let group_by = task.group_by();
         let (objects, compared, updated, api_errors) = task.into_inner();
 
         Self::new(
-            elapsed.as_secs_f64(),
             group_by,
             compared,
             objects.to_groups(),
@@ -185,10 +285,16 @@ impl CheckStats {
             api_errors,
         )
     }
+
+    /// Set the number of elapsed seconds.
+    pub fn with_elapsed(mut self, elapsed: Duration) -> Self {
+        self.elapsed_seconds = elapsed.as_secs_f64();
+        self
+    }
 }
 
 /// Represents stats from a `copy` operation.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct CopyStats {
     /// Time taken in seconds.
     pub(crate) elapsed_seconds: f64,
@@ -214,25 +320,69 @@ pub struct CopyStats {
     pub(crate) reason: Option<ChecksumPair>,
     /// The number of retries if there was permission issues for copying metadata or tags.
     pub(crate) n_retries: u64,
-    /// The API errors if there was permission issues for copying metadata or tags.
-    #[serde(skip_serializing_if = "HashSet::is_empty")]
-    pub(crate) api_errors: HashSet<ApiError>,
     /// Stats from checking sums to ensure that the copy was successful.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) check_stats: Option<CheckStats>,
+    /// The API errors if there was permission issues for copying metadata or tags.
+    #[serde(skip_serializing_if = "HashSet::is_empty")]
+    pub(crate) api_errors: HashSet<ApiError>,
+    /// An unrecoverable error occurred, causing the execution to stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unrecoverable_error: Option<Error>,
+}
+
+impl From<Error> for Box<CopyStats> {
+    fn from(err: Error) -> Self {
+        Box::new(CopyStats {
+            unrecoverable_error: Some(err),
+            ..Default::default()
+        })
+    }
+}
+
+impl From<CopyTaskError> for Box<CopyStats> {
+    fn from(err: CopyTaskError) -> Self {
+        let mut stats = CopyStats::from_task(err.task, None, false, false);
+        stats.unrecoverable_error = Some(err.error);
+        Box::new(stats)
+    }
 }
 
 impl CopyStats {
-    /// Create copy stats from a task.
-    pub fn from_task(
-        copy_task: CopyTask,
-        check_stats: Option<CheckStats>,
-        elapsed: Duration,
+    /// Create check stats from a generate task.
+    pub fn from_check_stats(
+        source: String,
+        destination: String,
+        copy_mode: CopyMode,
+        check_stats: CheckStats,
         skipped: bool,
         sums_mismatch: bool,
     ) -> Self {
         Self {
-            elapsed_seconds: elapsed.as_secs_f64(),
+            elapsed_seconds: 0.0,
+            source,
+            destination,
+            bytes_transferred: 0,
+            skipped,
+            sums_mismatch,
+            copy_mode,
+            reason: Option::<ChecksumPair>::from(&check_stats),
+            n_retries: 0,
+            api_errors: Default::default(),
+            check_stats: Some(check_stats),
+            unrecoverable_error: None,
+        }
+    }
+
+    /// Create copy stats from a task.
+    pub fn from_task(
+        copy_task: CopyTask,
+        check_stats: Option<CheckStats>,
+        skipped: bool,
+        sums_mismatch: bool,
+    ) -> Self {
+        Self {
+            elapsed_seconds: 0.0,
             source: copy_task.source().format(),
             destination: copy_task.destination().format(),
             bytes_transferred: copy_task.bytes_transferred(),
@@ -243,7 +393,14 @@ impl CopyStats {
             n_retries: copy_task.n_retries(),
             api_errors: copy_task.api_errors(),
             check_stats,
+            unrecoverable_error: None,
         }
+    }
+
+    /// Set the number of elapsed seconds.
+    pub fn with_elapsed(mut self, elapsed: Duration) -> Self {
+        self.elapsed_seconds = elapsed.as_secs_f64();
+        self
     }
 }
 

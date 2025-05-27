@@ -1,26 +1,29 @@
 //! Cli commands and code.
 //!
 
-use crate::checksum::file::SumsFile;
 use crate::checksum::Ctx;
 use crate::error::Error;
-use crate::error::Error::{CheckError, ParseError};
+use crate::error::Error::{CheckError, GenerateError, ParseError};
 use crate::error::Result;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::ObjectSumsBuilder;
 use crate::io::{create_s3_client, default_s3_client, Provider};
-use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateFileStats, GenerateStats};
+use crate::stats;
+use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::CopyTaskBuilder;
 use crate::task::generate::{GenerateTaskBuilder, SumCtxPairs};
 use aws_sdk_s3::Client;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use console::style;
 use humantime::Duration;
+use indicatif::HumanDuration;
 use parse_size::parse_size;
 use serde::{Deserialize, Serialize};
 use serde_json::{to_string, to_string_pretty};
 use std::collections::HashSet;
 use std::ffi::OsString;
+use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -71,6 +74,12 @@ impl Command {
     /// Validate commands.
     pub fn validate(args: &Self) -> Result<()> {
         if let Subcommands::Generate(generate) = &args.commands {
+            if generate.input[0] == "-" && args.output.ui {
+                return Err(ParseError(
+                    "cannot use ui mode with an stdout generate command".to_string(),
+                ));
+            }
+
             // For S3 objects, passing no checksums is valid as metadata can be used, otherwise
             // it's an error if not verifying the data.
             if generate.checksum.is_empty()
@@ -101,23 +110,24 @@ impl Command {
 
     /// Execute the command from the args.
     pub async fn execute(self) -> Result<()> {
+        let now = Instant::now();
         let client = Arc::new(self.credentials.source_client().await?);
 
         let pretty_json = self.output.pretty_json;
         let write_sums_file = self.output.write_sums_file;
+        let ui = self.output.ui;
+
         match self.commands {
             Subcommands::Generate(generate_args) => {
-                let (sums, stats) = generate_args
+                let stats = generate_args
                     .generate(self.optimization, &self.credentials, vec![client], true)
                     .await
-                    .inspect_err(|err| {
-                        Self::print_stats(err, pretty_json).ok();
-                    })?;
-                if let Some(stats) = stats {
-                    Self::print_stats(&stats, pretty_json)?;
-                } else {
+                    .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
+                if let Some(sums) = stats.sums {
                     sums.iter()
-                        .try_for_each(|sums| Self::print_stats(&sums, pretty_json))?;
+                        .try_for_each(|sums| Self::print_stats(&sums, pretty_json, false))?;
+                } else {
+                    Self::print_stats(&stats, pretty_json, ui)?;
                 }
             }
             Subcommands::Check(check_args) => {
@@ -130,11 +140,9 @@ impl Command {
                         vec![client],
                     )
                     .await
-                    .inspect_err(|err| {
-                        Self::print_stats(err, pretty_json).ok();
-                    })?;
+                    .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
 
-                Self::print_stats(&output, pretty_json)?;
+                Self::print_stats(&output, pretty_json, ui)?;
             }
             Subcommands::Copy(copy_args) => {
                 let destination_client = Arc::new(self.credentials.destination_client().await?);
@@ -146,13 +154,12 @@ impl Command {
                         self.credentials,
                         self.optimization,
                         write_sums_file,
+                        ui,
                     )
                     .await
-                    .inspect_err(|err| {
-                        Self::print_stats(err, pretty_json).ok();
-                    })?;
+                    .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
 
-                Self::print_stats(&output, pretty_json)?;
+                Self::print_stats(&output, pretty_json, ui)?;
             }
         }
 
@@ -160,14 +167,16 @@ impl Command {
     }
 
     /// Print output statistics
-    pub fn print_stats<T>(stats: &T, pretty_json: bool) -> Result<()>
+    pub fn print_stats<T>(stats: &T, pretty_json: bool, ui: bool) -> Result<()>
     where
         T: Serialize,
     {
-        if pretty_json {
-            println!("{}", to_string_pretty(stats)?);
-        } else {
-            println!("{}", to_string(stats)?);
+        if !ui {
+            if pretty_json {
+                println!("{}", to_string_pretty(stats)?);
+            } else {
+                println!("{}", to_string(stats)?);
+            }
         }
 
         Ok(())
@@ -232,7 +241,7 @@ impl Generate {
         credentials: &Credentials,
         mut clients: Vec<Arc<Client>>,
         write_sums_file: bool,
-    ) -> Result<(Vec<(String, SumsFile)>, Option<GenerateStats>)> {
+    ) -> stats::Result<GenerateStats> {
         if self.input[0] == "-" {
             let reader = ChannelReader::new(stdin(), optimization.channel_capacity);
 
@@ -250,11 +259,14 @@ impl Generate {
                 .into_inner()
                 .0;
 
-            Ok((vec![(self.input[0].to_string(), output)], None))
+            Ok(GenerateStats::from_sums(vec![(
+                self.input[0].to_string(),
+                output,
+            )]))
         } else {
             let now = Instant::now();
             let mut check_stats = None;
-            let mut generate_stats = vec![];
+            let mut generate_stats = GenerateStats::default();
             let mut sums_files = vec![];
             let mut errors = HashSet::new();
 
@@ -267,15 +279,17 @@ impl Generate {
                 )
                 .await?;
                 let (objects, compared, updated, api_errors) = ctxs.into_inner();
-                check_stats = Some(CheckStats::new(
-                    now.elapsed().as_secs_f64(),
-                    group_by,
-                    compared,
-                    objects.to_groups(),
-                    updated,
-                    None,
-                    api_errors,
-                ));
+                check_stats = Some(
+                    CheckStats::new(
+                        group_by,
+                        compared,
+                        objects.to_groups(),
+                        updated,
+                        None,
+                        api_errors,
+                    )
+                    .with_elapsed(now.elapsed()),
+                );
 
                 if clients.is_empty() {
                     clients = vec![Arc::new(default_s3_client().await?)];
@@ -303,24 +317,21 @@ impl Generate {
                             .build()
                             .await?
                             .run()
-                            .await?;
+                            .await;
 
-                        sums_files.push((input, task.sums_file().clone()));
-                        errors.extend(task.api_errors());
-                        generate_stats.push(GenerateFileStats::from_task(task));
+                        if let Ok(ref task) = task {
+                            sums_files.push((input, task.sums_file().clone()));
+                            errors.extend(task.api_errors());
+                        }
+                        generate_stats = generate_stats.add_stats(task)?;
                     }
                 }
 
                 if self.checksum.is_empty() {
-                    return Ok((
-                        sums_files,
-                        Some(GenerateStats::new(
-                            now.elapsed().as_secs_f64(),
-                            generate_stats,
-                            check_stats,
-                            errors,
-                        )),
-                    ));
+                    generate_stats.set_check_stats(check_stats);
+                    generate_stats.set_recoverable_errors(errors);
+                    generate_stats.set_sums_files(sums_files);
+                    return Ok(generate_stats);
                 }
             };
 
@@ -337,21 +348,20 @@ impl Generate {
                     .build()
                     .await?
                     .run()
-                    .await?;
-                sums_files.push((input, task.sums_file().clone()));
-                errors.extend(task.api_errors());
-                generate_stats.push(GenerateFileStats::from_task(task));
+                    .await;
+
+                if let Ok(ref task) = task {
+                    sums_files.push((input, task.sums_file().clone()));
+                    errors.extend(task.api_errors());
+                }
+                generate_stats = generate_stats.add_stats(task)?;
             }
 
-            Ok((
-                sums_files,
-                Some(GenerateStats::new(
-                    now.elapsed().as_secs_f64(),
-                    generate_stats,
-                    check_stats,
-                    errors,
-                )),
-            ))
+            generate_stats.set_check_stats(check_stats);
+            generate_stats.set_recoverable_errors(errors);
+            generate_stats.set_sums_files(sums_files);
+
+            Ok(generate_stats.with_elapsed(now.elapsed()))
         }
     }
 }
@@ -416,7 +426,7 @@ impl Check {
         write_sums_file: bool,
         verify: bool,
         clients: Vec<Arc<Client>>,
-    ) -> Result<CheckStats> {
+    ) -> stats::Result<CheckStats> {
         let now = Instant::now();
         let group_by = self.group_by;
 
@@ -436,7 +446,7 @@ impl Check {
             .await?;
             let checksum = Check::generate_sums(ctxs);
 
-            let (sums, stats) = Generate {
+            let mut stats = Generate {
                 input: self.input.clone(),
                 checksum,
                 missing: true,
@@ -444,8 +454,13 @@ impl Check {
                 verify,
             }
             .generate(optimization, credentials, clients.clone(), write_sums_file)
-            .await?;
-            generate_stats = stats;
+            .await
+            .map_err(|stats| CheckStats::from_generate_task(group_by, *stats))?;
+            let sums = stats
+                .sums
+                .take()
+                .ok_or_else(|| GenerateError("missing sums".to_string()))?;
+            generate_stats = Some(stats);
 
             builder = builder.with_sums_files(sums);
         }
@@ -454,15 +469,11 @@ impl Check {
         if check.compared_directly().is_empty() {
             return Err(CheckError(
                 "nothing to compare in checksums, use `generate` or `--missing` first".to_string(),
-            ));
+            )
+            .into());
         }
 
-        Ok(CheckStats::from_task(
-            group_by,
-            check,
-            now.elapsed(),
-            generate_stats,
-        ))
+        Ok(CheckStats::from_task(check, generate_stats).with_elapsed(now.elapsed()))
     }
 }
 
@@ -499,6 +510,15 @@ pub enum CopyMode {
     ServerSide,
     /// Download the object first and then upload it to the destination.
     DownloadUpload,
+}
+
+impl Display for CopyMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            CopyMode::ServerSide => f.write_str("server-side"),
+            CopyMode::DownloadUpload => f.write_str("download-upload"),
+        }
+    }
 }
 
 impl CopyMode {
@@ -598,7 +618,7 @@ impl Copy {
         credentials: &Credentials,
         verify: bool,
         write_sums_file: bool,
-    ) -> Result<CheckStats> {
+    ) -> stats::Result<CheckStats> {
         let input = vec![self.source.to_string(), self.destination.to_string()];
 
         let result = Check {
@@ -627,11 +647,16 @@ impl Copy {
         credentials: Credentials,
         optimization: Optimization,
         write_sums_file: bool,
-    ) -> Result<CopyStats> {
+        ui: bool,
+    ) -> stats::Result<CopyStats> {
         let now = Instant::now();
 
         let mut exists = false;
         if !self.no_skip {
+            if ui {
+                println!("{} Checking before copying...", style("[1/3]").bold().dim(),);
+            }
+
             // Check if it exists in the first place.
             let file_size = ObjectSumsBuilder::default()
                 .set_client(Some(source_client.clone()))
@@ -655,23 +680,60 @@ impl Copy {
                         false,
                         write_sums_file,
                     )
-                    .await?;
+                    .await
+                    .map_err(|err| {
+                        CopyStats::from_check_stats(
+                            self.source.to_string(),
+                            self.destination.to_string(),
+                            self.copy_mode,
+                            *err,
+                            false,
+                            false,
+                        )
+                        .with_elapsed(now.elapsed())
+                    })?;
 
                 if check_stats.groups.len() == 1 {
+                    let reason = Option::<ChecksumPair>::from(&check_stats);
                     let copy_stats = CopyStats {
-                        elapsed_seconds: now.elapsed().as_secs_f64(),
+                        elapsed_seconds: 0.0,
                         source: self.source,
                         destination: self.destination,
                         bytes_transferred: 0,
                         copy_mode: self.copy_mode,
-                        reason: Option::<ChecksumPair>::from(&check_stats),
+                        reason: reason.clone(),
                         skipped: true,
                         sums_mismatch: false,
                         n_retries: 0,
                         api_errors: HashSet::new(),
                         check_stats: Some(check_stats),
+                        unrecoverable_error: None,
                     };
-                    return Ok(copy_stats);
+
+                    let elapsed = now.elapsed();
+                    if ui {
+                        if let Some(reason) = reason {
+                            println!(
+                                "  {} {} sums match, skipping copy!",
+                                style("·").bold(),
+                                style(reason.kind).green()
+                            );
+                        }
+                        println!("Done in {}", HumanDuration(elapsed));
+                    }
+
+                    return Ok(copy_stats.with_elapsed(now.elapsed()));
+                }
+            }
+
+            if ui {
+                if exists {
+                    println!(
+                        "  {} file exists at source but sums do not match!",
+                        style("·").bold(),
+                    );
+                } else {
+                    println!("  {} file does not exist", style("·").bold(),);
                 }
             }
         }
@@ -692,6 +754,7 @@ impl Copy {
             .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
             .with_concurrency(self.concurrency)
             .with_part_size(self.part_size)
+            .with_ui(ui)
             .with_copy_mode(copy_mode)
             .with_source_client(source_client.clone())
             .with_destination_client(destination_client.clone())
@@ -703,6 +766,10 @@ impl Copy {
         // If the file existed at the start there must be a sums mismatch.
         let sums_mismatch = exists;
         let copy_stats = if !self.no_check {
+            if ui {
+                println!("{} Checking after copying...", style("[3/3]").bold().dim(),);
+            }
+
             let check_stats = self
                 .copy_check(
                     source_client,
@@ -712,19 +779,40 @@ impl Copy {
                     sums_mismatch,
                     write_sums_file,
                 )
-                .await?;
-            CopyStats::from_task(
-                result,
-                Some(check_stats),
-                now.elapsed(),
-                false,
-                sums_mismatch,
-            )
+                .await
+                .map_err(|err| {
+                    CopyStats::from_check_stats(
+                        self.source.to_string(),
+                        self.destination.to_string(),
+                        self.copy_mode,
+                        *err,
+                        false,
+                        false,
+                    )
+                    .with_elapsed(now.elapsed())
+                })?;
+
+            if ui {
+                if let Some(reason) = Option::<ChecksumPair>::from(&check_stats) {
+                    println!(
+                        "  {} {} sums match!",
+                        style("·").bold(),
+                        style(reason.kind).green()
+                    );
+                }
+            }
+
+            CopyStats::from_task(result, Some(check_stats), false, sums_mismatch)
         } else {
-            CopyStats::from_task(result, None, now.elapsed(), false, sums_mismatch)
+            CopyStats::from_task(result, None, false, sums_mismatch)
         };
 
-        Ok(copy_stats)
+        let elapsed = now.elapsed();
+        if ui {
+            println!("Done in {}", HumanDuration(elapsed));
+        }
+
+        Ok(copy_stats.with_elapsed(elapsed))
     }
 }
 
@@ -808,6 +896,9 @@ pub struct Output {
     /// Print the output statistics using indented and multi-line json rather than on a single line.
     #[arg(global = true, long, env)]
     pub pretty_json: bool,
+    /// Print output using a UI-mode for copy operations rather than JSON.
+    #[arg(global = true, long, env)]
+    pub ui: bool,
     /// Write sums files at the location when copying or checking. By default, `copy` operations and
     /// `check` operations with `--missing` will not write any .sums files at the source or
     /// destination.

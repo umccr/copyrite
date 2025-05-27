@@ -12,6 +12,8 @@ use crate::task::generate::Task::{ChecksumTask, ReadTask};
 use aws_sdk_s3::Client;
 use futures_util::future::join_all;
 use std::collections::{BTreeMap, HashSet};
+use std::fmt::{Debug, Formatter};
+use std::result;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
@@ -174,6 +176,33 @@ pub struct GenerateTask {
     checksums_generated: BTreeMap<Ctx, Checksum>,
 }
 
+/// The generate error with the task information when the error occurred.
+pub struct GenerateTaskError {
+    pub task: GenerateTask,
+    pub error: Error,
+}
+
+impl Debug for GenerateTaskError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.error)
+    }
+}
+
+impl From<(GenerateTask, Error)> for GenerateTaskError {
+    fn from((task, error): (GenerateTask, Error)) -> Self {
+        Self { task, error }
+    }
+}
+
+impl From<GenerateTaskError> for Error {
+    fn from(error: GenerateTaskError) -> Self {
+        error.error
+    }
+}
+
+/// The generate task result type.
+pub type GenerateTaskResult = result::Result<GenerateTask, GenerateTaskError>;
+
 impl GenerateTask {
     /// Spawns a task which reads from the buffered reader.
     pub fn add_reader_task(mut self) -> Result<Self> {
@@ -248,8 +277,7 @@ impl GenerateTask {
         Ok(self)
     }
 
-    /// Runs the generate task, returning an output file.
-    pub async fn run(mut self) -> Result<Self> {
+    async fn do_generate(&mut self) -> Result<()> {
         let mut file_size = 0;
         let tasks: Vec<_> = self.tasks.drain(..).collect();
         let checksums = join_all(tasks)
@@ -301,7 +329,15 @@ impl GenerateTask {
 
         self.output = output;
 
-        Ok(self)
+        Ok(())
+    }
+
+    /// Runs the generate task, returning an output file.
+    pub async fn run(mut self) -> GenerateTaskResult {
+        match self.do_generate().await {
+            Ok(_) => Ok(self),
+            Err(err) => Err((self, err).into()),
+        }
     }
 
     /// Get the inner values.
@@ -441,7 +477,7 @@ pub(crate) mod test {
             .with_group_by(GroupBy::Comparability)
             .build()
             .await?;
-        let (objects, _, _, _) = check.run().await?.into_inner();
+        let (objects, _, _, _) = check.run().await.unwrap().into_inner();
 
         let result = SumCtxPairs::from_comparable(objects)?.unwrap();
 
@@ -531,7 +567,8 @@ pub(crate) mod test {
             .build()
             .await?
             .run()
-            .await?
+            .await
+            .unwrap()
             .into_inner()
             .0)
     }
