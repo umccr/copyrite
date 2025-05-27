@@ -47,19 +47,17 @@ impl From<Error> for Box<GenerateStats> {
 
 impl From<GenerateTaskError> for Box<GenerateStats> {
     fn from(err: GenerateTaskError) -> Self {
-        err.error.into()
+        let stats = err.error.into();
+        GenerateStats::default().push_task(err.task);
+        stats
     }
 }
 
 impl GenerateStats {
     /// Create new generate stats.
-    pub fn new(
-        elapsed_seconds: f64,
-        stats: Vec<GenerateFileStats>,
-        check_stats: Option<CheckStats>,
-    ) -> Self {
+    pub fn new(stats: Vec<GenerateFileStats>, check_stats: Option<CheckStats>) -> Self {
         let mut result = Self {
-            elapsed_seconds,
+            elapsed_seconds: 0.0,
             ..Default::default()
         };
 
@@ -102,11 +100,6 @@ impl GenerateStats {
     }
 
     /// Set the seconds of the task.
-    pub fn set_elapsed_seconds(&mut self, elapsed_seconds: f64) {
-        self.elapsed_seconds = elapsed_seconds;
-    }
-
-    /// Set the seconds of the task.
     pub fn set_sums_files(&mut self, sums: Vec<(String, SumsFile)>) {
         self.sums = Some(sums);
     }
@@ -119,6 +112,12 @@ impl GenerateStats {
     /// Set the recoverable errors.
     pub fn set_recoverable_errors(&mut self, recoverable_errors: HashSet<ApiError>) {
         self.recoverable_errors = recoverable_errors;
+    }
+
+    /// Set the number of elapsed seconds.
+    pub fn with_elapsed(mut self, elapsed: Duration) -> Self {
+        self.elapsed_seconds = elapsed.as_secs_f64();
+        self
     }
 }
 
@@ -232,14 +231,15 @@ impl From<Error> for Box<CheckStats> {
 
 impl From<CheckTaskError> for Box<CheckStats> {
     fn from(err: CheckTaskError) -> Self {
-        err.error.into()
+        let mut stats = CheckStats::from_task(err.task, None);
+        stats.unrecoverable_error = Some(err.error);
+        Box::new(stats)
     }
 }
 
 impl CheckStats {
     /// Create new check stats.
     pub fn new(
-        elapsed_seconds: f64,
         comparison_type: GroupBy,
         compared: Vec<CheckComparison>,
         groups: Vec<Vec<String>>,
@@ -248,7 +248,7 @@ impl CheckStats {
         api_errors: HashSet<ApiError>,
     ) -> Self {
         Self {
-            elapsed_seconds,
+            elapsed_seconds: 0.0,
             comparison_type,
             compared,
             groups,
@@ -260,13 +260,8 @@ impl CheckStats {
     }
 
     /// Create check stats from a generate task.
-    pub fn from_generate_task(
-        group_by: GroupBy,
-        generate_stats: GenerateStats,
-        elapsed: Duration,
-    ) -> Self {
+    pub fn from_generate_task(group_by: GroupBy, generate_stats: GenerateStats) -> Self {
         Self::new(
-            elapsed.as_secs_f64(),
             group_by,
             vec![],
             vec![],
@@ -277,16 +272,11 @@ impl CheckStats {
     }
 
     /// Create check stats from a task.
-    pub fn from_task(
-        group_by: GroupBy,
-        task: CheckTask,
-        elapsed: Duration,
-        generate_stats: Option<GenerateStats>,
-    ) -> Self {
+    pub fn from_task(task: CheckTask, generate_stats: Option<GenerateStats>) -> Self {
+        let group_by = task.group_by();
         let (objects, compared, updated, api_errors) = task.into_inner();
 
         Self::new(
-            elapsed.as_secs_f64(),
             group_by,
             compared,
             objects.to_groups(),
@@ -294,6 +284,12 @@ impl CheckStats {
             generate_stats,
             api_errors,
         )
+    }
+
+    /// Set the number of elapsed seconds.
+    pub fn with_elapsed(mut self, elapsed: Duration) -> Self {
+        self.elapsed_seconds = elapsed.as_secs_f64();
+        self
     }
 }
 
@@ -346,7 +342,9 @@ impl From<Error> for Box<CopyStats> {
 
 impl From<CopyTaskError> for Box<CopyStats> {
     fn from(err: CopyTaskError) -> Self {
-        err.error.into()
+        let mut stats = CopyStats::from_task(err.task, None, false, false);
+        stats.unrecoverable_error = Some(err.error);
+        Box::new(stats)
     }
 }
 
@@ -357,12 +355,11 @@ impl CopyStats {
         destination: String,
         copy_mode: CopyMode,
         check_stats: CheckStats,
-        elapsed: Duration,
         skipped: bool,
         sums_mismatch: bool,
     ) -> Self {
         Self {
-            elapsed_seconds: elapsed.as_secs_f64(),
+            elapsed_seconds: 0.0,
             source,
             destination,
             bytes_transferred: 0,
@@ -381,12 +378,11 @@ impl CopyStats {
     pub fn from_task(
         copy_task: CopyTask,
         check_stats: Option<CheckStats>,
-        elapsed: Duration,
         skipped: bool,
         sums_mismatch: bool,
     ) -> Self {
         Self {
-            elapsed_seconds: elapsed.as_secs_f64(),
+            elapsed_seconds: 0.0,
             source: copy_task.source().format(),
             destination: copy_task.destination().format(),
             bytes_transferred: copy_task.bytes_transferred(),
@@ -399,6 +395,12 @@ impl CopyStats {
             check_stats,
             unrecoverable_error: None,
         }
+    }
+
+    /// Set the number of elapsed seconds.
+    pub fn with_elapsed(mut self, elapsed: Duration) -> Self {
+        self.elapsed_seconds = elapsed.as_secs_f64();
+        self
     }
 }
 

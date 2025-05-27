@@ -101,18 +101,18 @@ impl Command {
 
     /// Execute the command from the args.
     pub async fn execute(self) -> Result<()> {
+        let now = Instant::now();
         let client = Arc::new(self.credentials.source_client().await?);
 
         let pretty_json = self.output.pretty_json;
         let write_sums_file = self.output.write_sums_file;
+
         match self.commands {
             Subcommands::Generate(generate_args) => {
                 let stats = generate_args
                     .generate(self.optimization, &self.credentials, vec![client], true)
                     .await
-                    .inspect_err(|err| {
-                        Self::print_stats(err, pretty_json).ok();
-                    })?;
+                    .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
                 if let Some(sums) = stats.sums {
                     sums.iter()
                         .try_for_each(|sums| Self::print_stats(&sums, pretty_json))?;
@@ -130,9 +130,7 @@ impl Command {
                         vec![client],
                     )
                     .await
-                    .inspect_err(|err| {
-                        Self::print_stats(err, pretty_json).ok();
-                    })?;
+                    .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
 
                 Self::print_stats(&output, pretty_json)?;
             }
@@ -148,9 +146,7 @@ impl Command {
                         write_sums_file,
                     )
                     .await
-                    .inspect_err(|err| {
-                        Self::print_stats(err, pretty_json).ok();
-                    })?;
+                    .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
 
                 Self::print_stats(&output, pretty_json)?;
             }
@@ -270,15 +266,17 @@ impl Generate {
                 )
                 .await?;
                 let (objects, compared, updated, api_errors) = ctxs.into_inner();
-                check_stats = Some(CheckStats::new(
-                    now.elapsed().as_secs_f64(),
-                    group_by,
-                    compared,
-                    objects.to_groups(),
-                    updated,
-                    None,
-                    api_errors,
-                ));
+                check_stats = Some(
+                    CheckStats::new(
+                        group_by,
+                        compared,
+                        objects.to_groups(),
+                        updated,
+                        None,
+                        api_errors,
+                    )
+                    .with_elapsed(now.elapsed()),
+                );
 
                 if clients.is_empty() {
                     clients = vec![Arc::new(default_s3_client().await?)];
@@ -319,7 +317,6 @@ impl Generate {
                 if self.checksum.is_empty() {
                     generate_stats.set_check_stats(check_stats);
                     generate_stats.set_recoverable_errors(errors);
-                    generate_stats.set_elapsed_seconds(now.elapsed().as_secs_f64());
                     generate_stats.set_sums_files(sums_files);
                     return Ok(generate_stats);
                 }
@@ -349,10 +346,9 @@ impl Generate {
 
             generate_stats.set_check_stats(check_stats);
             generate_stats.set_recoverable_errors(errors);
-            generate_stats.set_elapsed_seconds(now.elapsed().as_secs_f64());
             generate_stats.set_sums_files(sums_files);
 
-            Ok(generate_stats)
+            Ok(generate_stats.with_elapsed(now.elapsed()))
         }
     }
 }
@@ -446,7 +442,7 @@ impl Check {
             }
             .generate(optimization, credentials, clients.clone(), write_sums_file)
             .await
-            .map_err(|stats| CheckStats::from_generate_task(group_by, *stats, now.elapsed()))?;
+            .map_err(|stats| CheckStats::from_generate_task(group_by, *stats))?;
             let sums = stats
                 .sums
                 .take()
@@ -464,12 +460,7 @@ impl Check {
             .into());
         }
 
-        Ok(CheckStats::from_task(
-            group_by,
-            check,
-            now.elapsed(),
-            generate_stats,
-        ))
+        Ok(CheckStats::from_task(check, generate_stats).with_elapsed(now.elapsed()))
     }
 }
 
@@ -669,15 +660,15 @@ impl Copy {
                             self.destination.to_string(),
                             self.copy_mode,
                             *err,
-                            now.elapsed(),
                             false,
                             false,
                         )
+                        .with_elapsed(now.elapsed())
                     })?;
 
                 if check_stats.groups.len() == 1 {
                     let copy_stats = CopyStats {
-                        elapsed_seconds: now.elapsed().as_secs_f64(),
+                        elapsed_seconds: 0.0,
                         source: self.source,
                         destination: self.destination,
                         bytes_transferred: 0,
@@ -690,7 +681,7 @@ impl Copy {
                         check_stats: Some(check_stats),
                         unrecoverable_error: None,
                     };
-                    return Ok(copy_stats);
+                    return Ok(copy_stats.with_elapsed(now.elapsed()));
                 }
             }
         }
@@ -738,24 +729,18 @@ impl Copy {
                         self.destination.to_string(),
                         self.copy_mode,
                         *err,
-                        now.elapsed(),
                         false,
                         false,
                     )
+                    .with_elapsed(now.elapsed())
                 })?;
 
-            CopyStats::from_task(
-                result,
-                Some(check_stats),
-                now.elapsed(),
-                false,
-                sums_mismatch,
-            )
+            CopyStats::from_task(result, Some(check_stats), false, sums_mismatch)
         } else {
-            CopyStats::from_task(result, None, now.elapsed(), false, sums_mismatch)
+            CopyStats::from_task(result, None, false, sums_mismatch)
         };
 
-        Ok(copy_stats)
+        Ok(copy_stats.with_elapsed(now.elapsed()))
     }
 }
 

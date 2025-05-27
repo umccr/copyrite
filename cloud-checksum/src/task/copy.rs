@@ -457,11 +457,11 @@ pub struct CopyTask {
 
 impl CopyTask {
     async fn run_multipart<FnC, FutC, FnR, FutR, R>(
-        &self,
+        &mut self,
         part_size: u64,
         download_fn: FnC,
         upload_fn: FnR,
-    ) -> Result<(u64, u64, Vec<ApiError>)>
+    ) -> Result<()>
     where
         FnC: FnOnce(MultiPartOptions, CopyState) -> FutC + Clone + Send + 'static,
         FutC: Future<Output = Result<R>> + Send,
@@ -469,10 +469,6 @@ impl CopyTask {
         FutR: Future<Output = Result<CopyResult>> + Send,
         R: Send + 'static,
     {
-        let mut bytes_transferred = 0;
-        let mut n_retries = 0;
-        let mut api_errors = vec![];
-
         let n_parts = self.object_size.div_ceil(part_size);
 
         let mut start = 0;
@@ -486,19 +482,6 @@ impl CopyTask {
         };
 
         let mut upload_id = None;
-        let resolve_result = |upload_id: &mut Option<String>,
-                              parts: &mut Vec<_>,
-                              bytes_transferred: &mut u64,
-                              n_retries: &mut u64,
-                              api_errors: &mut Vec<_>,
-                              result: CopyResult| {
-            *upload_id = result.upload_id;
-            push_part(parts, result.part);
-            *bytes_transferred += result.bytes_transferred;
-            *n_retries += result.n_retries;
-            api_errors.extend(result.api_errors);
-        };
-
         // First part must be run without concurrency to set the upload id for subsequent parts.
         for chunk in [[1].as_slice()].into_iter().chain(
             (2..n_parts + 1)
@@ -535,14 +518,13 @@ impl CopyTask {
                 // If the uploads should be ordered, then wait for each task to finish before uploading.
                 for result in join_all(copy_tasks).await {
                     let (options, result) = result?;
-                    resolve_result(
-                        &mut upload_id,
-                        &mut parts,
-                        &mut bytes_transferred,
-                        &mut n_retries,
-                        &mut api_errors,
-                        upload_fn.clone()(result?, options, self.state.clone()).await?,
-                    );
+                    let result = upload_fn.clone()(result?, options, self.state.clone()).await?;
+                    
+                    upload_id = result.upload_id;
+                    push_part(&mut parts, result.part);
+                    self.bytes_transferred += result.bytes_transferred;
+                    self.n_retries += result.n_retries;
+                    self.recoverable_errors.extend(result.api_errors);
                 }
             } else {
                 // Otherwise, concurrently run the upload tasks.
@@ -558,14 +540,12 @@ impl CopyTask {
 
                     join_all(tasks).await.into_iter().try_for_each(|result| {
                         let result = result??;
-                        resolve_result(
-                            &mut upload_id,
-                            &mut parts,
-                            &mut bytes_transferred,
-                            &mut n_retries,
-                            &mut api_errors,
-                            result,
-                        );
+                        upload_id = result.upload_id;
+                        push_part(&mut parts, result.part);
+                        self.bytes_transferred += result.bytes_transferred;
+                        self.n_retries += result.n_retries;
+                        self.recoverable_errors.extend(result.api_errors);
+                        
                         Ok::<_, Error>(())
                     })?;
                 }
@@ -582,21 +562,23 @@ impl CopyTask {
         };
         let result = download_fn(options.clone(), self.state.clone()).await?;
         let upload = upload_fn(result, options, self.state.clone()).await?;
-        bytes_transferred += upload.bytes_transferred;
-        n_retries += upload.n_retries;
-        api_errors.extend(upload.api_errors);
+        self.bytes_transferred += upload.bytes_transferred;
+        self.n_retries += upload.n_retries;
+        self.recoverable_errors.extend(upload.api_errors);
 
-        Ok((bytes_transferred, n_retries, api_errors))
+        Ok(())
     }
 
     async fn do_copy(&mut self) -> Result<()> {
         self.state.set_additional_ctx(self.additional_sums.clone());
 
-        let (bytes_transferred, n_retries, api_errors) = match (self.copy_mode, self.part_size) {
+        match (self.copy_mode, self.part_size) {
             (CopyMode::ServerSide, None) => {
                 let copy = self.source_copy.copy(None, &self.state).await?;
 
-                (copy.bytes_transferred, copy.n_retries, copy.api_errors)
+                self.bytes_transferred += copy.bytes_transferred;
+                self.n_retries += copy.n_retries;
+                self.recoverable_errors.extend(copy.api_errors);
             }
             (CopyMode::ServerSide, Some(part_size)) => {
                 let source = self.source_copy.clone();
@@ -613,12 +595,10 @@ impl CopyTask {
                     .destination_copy
                     .upload(data, None, &self.state)
                     .await?;
-
-                (
-                    upload.bytes_transferred,
-                    upload.n_retries,
-                    upload.api_errors,
-                )
+                
+                self.bytes_transferred += upload.bytes_transferred;
+                self.n_retries += upload.n_retries;
+                self.recoverable_errors.extend(upload.api_errors);
             }
             (CopyMode::DownloadUpload, Some(part_size)) => {
                 let source = self.source_copy.clone();
@@ -634,11 +614,6 @@ impl CopyTask {
                 .await?
             }
         };
-
-        self.bytes_transferred = bytes_transferred;
-        self.n_retries = n_retries;
-        self.recoverable_errors
-            .extend::<HashSet<ApiError>>(HashSet::from_iter(api_errors));
 
         Ok(())
     }

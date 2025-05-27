@@ -509,6 +509,11 @@ impl CheckTask {
             sums.is_empty()
         })
     }
+
+    /// Get the group by type.
+    pub fn group_by(&self) -> GroupBy {
+        self.group_by
+    }
 }
 
 #[cfg(test)]
