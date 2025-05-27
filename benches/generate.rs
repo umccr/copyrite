@@ -1,6 +1,6 @@
-use cloud_checksum::io::sums::channel::ChannelReader;
-use cloud_checksum::task::generate::GenerateTaskBuilder;
-use cloud_checksum::test::TestFileBuilder;
+use copyrite::io::sums::channel::ChannelReader;
+use copyrite::task::generate::GenerateTaskBuilder;
+use copyrite::test::TestFileBuilder;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::path::Path;
 use tokio::fs::File;

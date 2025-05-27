@@ -1,5 +1,5 @@
-use cloud_checksum::cli::Command;
-use cloud_checksum::error::Result;
+use copyrite::cli::Command;
+use copyrite::error::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -1,8 +1,58 @@
-[workspace]
-members = ["cloud-checksum"]
-resolver = "2"
-
-[workspace.package]
+[package]
+name = "copyrite"
+description = "A tool to calculate multiple checksums concurrently locally and in the cloud."
+version = "0.1.0"
 license = "MIT"
 edition = "2021"
 authors = ["Marko Malenic <mmalenic1@gmail.com>"]
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env", "cargo"] }
+thiserror = "2"
+rand = "0.9"
+
+# Async
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "test-util", "io-util", "io-std", "fs"] }
+futures-util = "0.3"
+async-stream = "0.3"
+async-trait = "0.1"
+dyn-clone = "1.0"
+
+# Checksums
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+crc32fast = "1"
+crc32c = "0.6"
+crc64fast-nvme = "1"
+
+# Value parsing
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+humantime = "2"
+hex = "0.4"
+parse-size = { version = "1.1", features = ["std"] }
+base64 = "0.22"
+
+# AWS
+aws-config = "1.5"
+aws-sdk-s3 = { version = "1.71", features = ["test-util"] }
+aws-smithy-types = "1.2"
+aws-smithy-runtime-api = "1.7.3"
+
+# UI
+indicatif = "0.17"
+console = "0.15"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+anyhow = "1"
+tempfile = "3"
+envy = "0.4"
+dotenvy = "0.15"
+
+aws-smithy-mocks-experimental = "0.2"
+
+[[bench]]
+name = "generate"
+harness = false
