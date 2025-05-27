@@ -732,7 +732,7 @@ pub(crate) mod test {
     use aws_sdk_s3::operation::head_object::HeadObjectOutput;
     use aws_sdk_s3::types::error::NoSuchKey;
     use aws_sdk_s3::Client;
-    use aws_smithy_mocks_experimental::{mock, mock_client, Rule, RuleMode};
+    use aws_smithy_mocks::{mock, mock_client, Rule, RuleMode};
     use tempfile::tempdir;
     use tokio::fs::File;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

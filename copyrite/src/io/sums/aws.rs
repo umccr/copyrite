@@ -507,7 +507,7 @@ pub(crate) mod test {
     use aws_sdk_s3::operation::head_object::builders::HeadObjectOutputBuilder;
     use aws_sdk_s3::types;
     use aws_sdk_s3::types::GetObjectAttributesParts;
-    use aws_smithy_mocks_experimental::{mock, mock_client, Rule, RuleMode};
+    use aws_smithy_mocks::{mock, mock_client, Rule, RuleMode};
 
     const EXPECTED_SHA256_SUM: &str = "Kf+9U8vkMXmrL6YtvZWMDsMLNAq1DOfHheinpLR3Hjk="; // pragma: allowlist secret
 
