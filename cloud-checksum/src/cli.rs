@@ -15,12 +15,15 @@ use crate::task::copy::CopyTaskBuilder;
 use crate::task::generate::{GenerateTaskBuilder, SumCtxPairs};
 use aws_sdk_s3::Client;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use console::style;
 use humantime::Duration;
+use indicatif::HumanDuration;
 use parse_size::parse_size;
 use serde::{Deserialize, Serialize};
 use serde_json::{to_string, to_string_pretty};
 use std::collections::HashSet;
 use std::ffi::OsString;
+use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -71,6 +74,12 @@ impl Command {
     /// Validate commands.
     pub fn validate(args: &Self) -> Result<()> {
         if let Subcommands::Generate(generate) = &args.commands {
+            if generate.input[0] == "-" && args.output.ui {
+                return Err(ParseError(
+                    "cannot use ui mode with an stdout generate command".to_string(),
+                ));
+            }
+
             // For S3 objects, passing no checksums is valid as metadata can be used, otherwise
             // it's an error if not verifying the data.
             if generate.checksum.is_empty()
@@ -106,6 +115,7 @@ impl Command {
 
         let pretty_json = self.output.pretty_json;
         let write_sums_file = self.output.write_sums_file;
+        let ui = self.output.ui;
 
         match self.commands {
             Subcommands::Generate(generate_args) => {
@@ -115,9 +125,9 @@ impl Command {
                     .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
                 if let Some(sums) = stats.sums {
                     sums.iter()
-                        .try_for_each(|sums| Self::print_stats(&sums, pretty_json))?;
+                        .try_for_each(|sums| Self::print_stats(&sums, pretty_json, false))?;
                 } else {
-                    Self::print_stats(&stats, pretty_json)?;
+                    Self::print_stats(&stats, pretty_json, ui)?;
                 }
             }
             Subcommands::Check(check_args) => {
@@ -132,7 +142,7 @@ impl Command {
                     .await
                     .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
 
-                Self::print_stats(&output, pretty_json)?;
+                Self::print_stats(&output, pretty_json, ui)?;
             }
             Subcommands::Copy(copy_args) => {
                 let destination_client = Arc::new(self.credentials.destination_client().await?);
@@ -144,11 +154,12 @@ impl Command {
                         self.credentials,
                         self.optimization,
                         write_sums_file,
+                        ui,
                     )
                     .await
                     .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
 
-                Self::print_stats(&output, pretty_json)?;
+                Self::print_stats(&output, pretty_json, ui)?;
             }
         }
 
@@ -156,14 +167,16 @@ impl Command {
     }
 
     /// Print output statistics
-    pub fn print_stats<T>(stats: &T, pretty_json: bool) -> Result<()>
+    pub fn print_stats<T>(stats: &T, pretty_json: bool, ui: bool) -> Result<()>
     where
         T: Serialize,
     {
-        if pretty_json {
-            println!("{}", to_string_pretty(stats)?);
-        } else {
-            println!("{}", to_string(stats)?);
+        if !ui {
+            if pretty_json {
+                println!("{}", to_string_pretty(stats)?);
+            } else {
+                println!("{}", to_string(stats)?);
+            }
         }
 
         Ok(())
@@ -499,6 +512,15 @@ pub enum CopyMode {
     DownloadUpload,
 }
 
+impl Display for CopyMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            CopyMode::ServerSide => f.write_str("server-side"),
+            CopyMode::DownloadUpload => f.write_str("download-upload"),
+        }
+    }
+}
+
 impl CopyMode {
     /// Is this a download-upload copy operation.
     pub fn is_download_upload(&self) -> bool {
@@ -625,11 +647,16 @@ impl Copy {
         credentials: Credentials,
         optimization: Optimization,
         write_sums_file: bool,
+        ui: bool,
     ) -> stats::Result<CopyStats> {
         let now = Instant::now();
 
         let mut exists = false;
         if !self.no_skip {
+            if ui {
+                println!("{} Checking before copying...", style("[1/3]").bold().dim(),);
+            }
+
             // Check if it exists in the first place.
             let file_size = ObjectSumsBuilder::default()
                 .set_client(Some(source_client.clone()))
@@ -667,13 +694,14 @@ impl Copy {
                     })?;
 
                 if check_stats.groups.len() == 1 {
+                    let reason = Option::<ChecksumPair>::from(&check_stats);
                     let copy_stats = CopyStats {
                         elapsed_seconds: 0.0,
                         source: self.source,
                         destination: self.destination,
                         bytes_transferred: 0,
                         copy_mode: self.copy_mode,
-                        reason: Option::<ChecksumPair>::from(&check_stats),
+                        reason: reason.clone(),
                         skipped: true,
                         sums_mismatch: false,
                         n_retries: 0,
@@ -681,7 +709,31 @@ impl Copy {
                         check_stats: Some(check_stats),
                         unrecoverable_error: None,
                     };
+
+                    let elapsed = now.elapsed();
+                    if ui {
+                        if let Some(reason) = reason {
+                            println!(
+                                "  {} {} sums match, skipping copy!",
+                                style("·").bold(),
+                                style(reason.kind).green()
+                            );
+                        }
+                        println!("Done in {}", HumanDuration(elapsed));
+                    }
+
                     return Ok(copy_stats.with_elapsed(now.elapsed()));
+                }
+            }
+
+            if ui {
+                if exists {
+                    println!(
+                        "  {} file exists at source but sums do not match!",
+                        style("·").bold(),
+                    );
+                } else {
+                    println!("  {} file does not exist", style("·").bold(),);
                 }
             }
         }
@@ -702,6 +754,7 @@ impl Copy {
             .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
             .with_concurrency(self.concurrency)
             .with_part_size(self.part_size)
+            .with_ui(ui)
             .with_copy_mode(copy_mode)
             .with_source_client(source_client.clone())
             .with_destination_client(destination_client.clone())
@@ -713,6 +766,10 @@ impl Copy {
         // If the file existed at the start there must be a sums mismatch.
         let sums_mismatch = exists;
         let copy_stats = if !self.no_check {
+            if ui {
+                println!("{} Checking after copying...", style("[3/3]").bold().dim(),);
+            }
+
             let check_stats = self
                 .copy_check(
                     source_client,
@@ -735,12 +792,27 @@ impl Copy {
                     .with_elapsed(now.elapsed())
                 })?;
 
+            if ui {
+                if let Some(reason) = Option::<ChecksumPair>::from(&check_stats) {
+                    println!(
+                        "  {} {} sums match!",
+                        style("·").bold(),
+                        style(reason.kind).green()
+                    );
+                }
+            }
+
             CopyStats::from_task(result, Some(check_stats), false, sums_mismatch)
         } else {
             CopyStats::from_task(result, None, false, sums_mismatch)
         };
 
-        Ok(copy_stats.with_elapsed(now.elapsed()))
+        let elapsed = now.elapsed();
+        if ui {
+            println!("Done in {}", HumanDuration(elapsed));
+        }
+
+        Ok(copy_stats.with_elapsed(elapsed))
     }
 }
 
@@ -824,6 +896,9 @@ pub struct Output {
     /// Print the output statistics using indented and multi-line json rather than on a single line.
     #[arg(global = true, long, env)]
     pub pretty_json: bool,
+    /// Print output using a UI-mode for copy operations rather than JSON.
+    #[arg(global = true, long, env)]
+    pub ui: bool,
     /// Write sums files at the location when copying or checking. By default, `copy` operations and
     /// `check` operations with `--missing` will not write any .sums files at the source or
     /// destination.

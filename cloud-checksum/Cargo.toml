@@ -40,6 +40,10 @@ aws-sdk-s3 = { version = "1.71", features = ["test-util"] }
 aws-smithy-types = "1.2"
 aws-smithy-runtime-api = "1.7.3"
 
+# UI
+indicatif = "0.17"
+console = "0.15"
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 anyhow = "1"

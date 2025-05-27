@@ -62,6 +62,8 @@ pub enum Error {
         message: String,
         api_error: Option<ApiError>,
     },
+    #[error("ui error: {0}")]
+    UiError(String),
     #[error("{0}")]
     Stats(String),
 }

@@ -11,9 +11,12 @@ use crate::io::copy::{CopyResult, CopyState, MultiPartOptions, ObjectCopy, Objec
 use crate::io::sums::ObjectSumsBuilder;
 use crate::io::Provider;
 use aws_sdk_s3::Client;
+use console::style;
 use futures_util::future::join_all;
+use indicatif::{HumanBytes, ProgressBar, ProgressState, ProgressStyle};
+use std::cmp::min;
 use std::collections::HashSet;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Formatter, Write};
 use std::future::Future;
 use std::sync::Arc;
 use std::{fmt, result};
@@ -35,6 +38,7 @@ pub struct CopyTaskBuilder {
     concurrency: Option<usize>,
     api_errors: HashSet<ApiError>,
     avoid_get_object_attributes: bool,
+    ui: bool,
 }
 
 /// Settings that determine the part size and additional checksums to use.
@@ -91,6 +95,12 @@ impl CopyTaskBuilder {
     /// Set the metadata mode.
     pub fn with_tag_mode(mut self, tag_mode: MetadataCopy) -> Self {
         self.tag_mode = tag_mode;
+        self
+    }
+
+    /// Set UI mode.
+    pub fn with_ui(mut self, ui: bool) -> Self {
+        self.ui = ui;
         self
     }
 
@@ -389,6 +399,46 @@ impl CopyTaskBuilder {
             .use_settings(destination.clone(), destination_copy.as_ref(), &state)
             .await?;
 
+        let pb = if this.ui {
+            println!("{} Copying...", style("[2/3]").bold().dim(),);
+            println!(
+                "  {} Source - {}",
+                style("·").bold(),
+                style(this.source).green(),
+            );
+            println!(
+                "  {} Destination - {}",
+                style("·").bold(),
+                style(this.destination).green(),
+            );
+            let part_mode = if let Some(part_size) = settings.part_size {
+                format!(
+                    "{} with {} part size",
+                    style("multipart").cyan(),
+                    style(HumanBytes(part_size)).cyan()
+                )
+            } else {
+                format!("{}", style("single part").cyan())
+            };
+
+            println!(
+                "  {} Mode - {} {}",
+                style("·").bold(),
+                style(copy_mode).green(),
+                style(part_mode).green(),
+            );
+
+            let pb = ProgressBar::new(settings.object_size);
+            pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                .unwrap()
+                .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
+                .progress_chars("#>-"));
+
+            Some(pb)
+        } else {
+            None
+        };
+
         let copy_task = CopyTask {
             additional_sums: settings.ctx,
             part_size: settings.part_size,
@@ -404,6 +454,7 @@ impl CopyTaskBuilder {
             bytes_transferred: 0,
             n_retries: 0,
             recoverable_errors: this.api_errors,
+            pb,
         };
 
         Ok(copy_task)
@@ -453,9 +504,16 @@ pub struct CopyTask {
     bytes_transferred: u64,
     n_retries: u64,
     recoverable_errors: HashSet<ApiError>,
+    pb: Option<ProgressBar>,
 }
 
 impl CopyTask {
+    fn update_bytes(&mut self, bytes_transferred: u64) {
+        self.bytes_transferred += bytes_transferred;
+        if let Some(pb) = self.pb.as_ref() {
+            pb.set_position(min(self.bytes_transferred, self.object_size));
+        }
+    }
     async fn run_multipart<FnC, FutC, FnR, FutR, R>(
         &mut self,
         part_size: u64,
@@ -519,10 +577,10 @@ impl CopyTask {
                 for result in join_all(copy_tasks).await {
                     let (options, result) = result?;
                     let result = upload_fn.clone()(result?, options, self.state.clone()).await?;
-                    
+
                     upload_id = result.upload_id;
                     push_part(&mut parts, result.part);
-                    self.bytes_transferred += result.bytes_transferred;
+                    self.update_bytes(result.bytes_transferred);
                     self.n_retries += result.n_retries;
                     self.recoverable_errors.extend(result.api_errors);
                 }
@@ -542,10 +600,10 @@ impl CopyTask {
                         let result = result??;
                         upload_id = result.upload_id;
                         push_part(&mut parts, result.part);
-                        self.bytes_transferred += result.bytes_transferred;
+                        self.update_bytes(result.bytes_transferred);
                         self.n_retries += result.n_retries;
                         self.recoverable_errors.extend(result.api_errors);
-                        
+
                         Ok::<_, Error>(())
                     })?;
                 }
@@ -562,7 +620,7 @@ impl CopyTask {
         };
         let result = download_fn(options.clone(), self.state.clone()).await?;
         let upload = upload_fn(result, options, self.state.clone()).await?;
-        self.bytes_transferred += upload.bytes_transferred;
+        self.update_bytes(upload.bytes_transferred);
         self.n_retries += upload.n_retries;
         self.recoverable_errors.extend(upload.api_errors);
 
@@ -576,7 +634,7 @@ impl CopyTask {
             (CopyMode::ServerSide, None) => {
                 let copy = self.source_copy.copy(None, &self.state).await?;
 
-                self.bytes_transferred += copy.bytes_transferred;
+                self.update_bytes(copy.bytes_transferred);
                 self.n_retries += copy.n_retries;
                 self.recoverable_errors.extend(copy.api_errors);
             }
@@ -595,8 +653,8 @@ impl CopyTask {
                     .destination_copy
                     .upload(data, None, &self.state)
                     .await?;
-                
-                self.bytes_transferred += upload.bytes_transferred;
+
+                self.update_bytes(upload.bytes_transferred);
                 self.n_retries += upload.n_retries;
                 self.recoverable_errors.extend(upload.api_errors);
             }
@@ -614,6 +672,10 @@ impl CopyTask {
                 .await?
             }
         };
+
+        if let Some(pb) = self.pb.as_ref() {
+            pb.finish_with_message("done");
+        }
 
         Ok(())
     }
