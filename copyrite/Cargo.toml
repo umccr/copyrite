@@ -1,6 +1,6 @@
 [package]
 name = "copyrite"
-description = "A tool to calculate multiple checksums concurrently locally and in the cloud."
+description = "A CLI tool for efficient checksum copy operations across object stores"
 version = "0.1.0"
 license.workspace = true
 edition.workspace = true

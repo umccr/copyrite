@@ -1,6 +1,6 @@
 # copyrite
 
-A CLI tool for efficient checksum/copy operations across object stores
+A CLI tool for efficient checksum/copy operations across object stores.
 
 ## Usage
 
