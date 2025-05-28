@@ -693,7 +693,7 @@ pub(crate) mod test {
     }
 
     pub(crate) async fn write_test_files_one_group(tmp: TempDir) -> Result<Vec<String>, Error> {
-        let path = tmp.into_path();
+        let path = tmp.keep();
 
         let mut names = write_test_files(&path).await?;
 
@@ -719,7 +719,7 @@ pub(crate) mod test {
     pub(crate) async fn write_test_files_not_comparable(
         tmp: TempDir,
     ) -> Result<Vec<String>, Error> {
-        let path = tmp.into_path();
+        let path = tmp.keep();
 
         let mut names = write_test_files(&path).await?;
 
@@ -745,7 +745,7 @@ pub(crate) mod test {
     pub(crate) async fn write_test_files_multiple_groups(
         tmp: TempDir,
     ) -> Result<Vec<String>, Error> {
-        let path = tmp.into_path();
+        let path = tmp.keep();
 
         let mut names = write_test_files(&path).await?;
 

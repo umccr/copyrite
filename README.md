@@ -1,6 +1,19 @@
 # copyrite
 
-A CLI tool for efficient checksum/copy operations across object stores
+A CLI tool for efficient checksum and copy operations across object stores.
+
+copyrite can calculate checksums on files in object stores and copy them to other locations.
+
+The aims of copyrite are to:
+* Calculate multiple checksums in parallel as efficiently as possible.
+  * Multiple checksums are supported which can be computed by reading through the data once.
+* Copy files across object stores with verifiable integrity.
+  * Files are copied concurrently, and verified with part sizes that are as optimal as possible.
+* Avoid doing unnecessary work.
+  * If checksums exists natively in object stores, they are not computed again.
+  * Checksums are saved and propagated through a [`.sums` file][sums] for future operations on the same file.
+* Have a wide range of configurable options for copying tags, metadata, or part sizes.
+* Output detailed statistics on operations that can be consumed by other processes.
 
 ## Usage
 
@@ -76,17 +89,17 @@ cargo bench --all-features
 ```
 
 Integration tests are ignored by default. They perform operations on an S3 bucket directly, and need to have a
-`CLOUD_CHECKSUM_TEST_BUCKET_URI` environment set, to a bucket and prefix that files can be written to. Run the tests
+`COPYRITE_TEST_BUCKET_URI` environment set, to a bucket and prefix that files can be written to. Run the tests
 using:
 
 ```sh
-CLOUD_CHECKSUM_TEST_BUCKET_URI="s3://bucket/prefix" cargo test --all-features -- --ignored
+COPYRITE_TEST_BUCKET_URI="s3://bucket/prefix" cargo test --all-features -- --ignored
 ```
 
 The endpoint URL can also be set for S3-compatible endpoint tests:
 
 ```sh
-CLOUD_CHECKSUM_TEST_BUCKET_URI="s3://bucket/prefix" CLOUD_CHECKSUM_TEST_ENDPOINT_URL="https://storage.googleapis.com" cargo test --all-features -- --ignored
+COPYRITE_TEST_BUCKET_URI="s3://bucket/prefix" COPYRITE_TEST_ENDPOINT_URL="https://storage.googleapis.com" cargo test --all-features -- --ignored
 ```
 
-
+[sums]: docs/ARCHITECTURE.md#the-sums-file

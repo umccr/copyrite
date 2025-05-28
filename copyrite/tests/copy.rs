@@ -6,9 +6,9 @@ use anyhow::Result;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::ChecksumMode;
 use aws_sdk_s3::Client;
-use cloud_checksum::cli::{Command, CredentialProvider};
-use cloud_checksum::io::{create_s3_client, Provider};
-use cloud_checksum::test::TestFileBuilder;
+use copyrite::cli::{Command, CredentialProvider};
+use copyrite::io::{create_s3_client, Provider};
+use copyrite::test::TestFileBuilder;
 use dotenvy::dotenv;
 use envy::prefixed;
 use serde::Deserialize;
@@ -28,7 +28,7 @@ impl TestConfig {
     fn load() -> Result<Self> {
         dotenv()?;
 
-        let mut env: Self = prefixed("CLOUD_CHECKSUM_TEST_").from_env()?;
+        let mut env: Self = prefixed("COPYRITE_TEST_").from_env()?;
 
         env.bucket_uri = env
             .bucket_uri
@@ -196,7 +196,7 @@ async fn get_head_object(client: &Client, url: &str) -> Result<HeadObjectOutput>
 
 async fn execute_multipart(from: &str, to: &str, config: &TestConfig) {
     let mut commands = [
-        "cloud-checksum",
+        "copyrite",
         "copy",
         from,
         to,
@@ -217,7 +217,7 @@ async fn execute_multipart(from: &str, to: &str, config: &TestConfig) {
 
 async fn execute_single_part(from: &str, to: &str, config: &TestConfig) {
     let mut commands = [
-        "cloud-checksum",
+        "copyrite",
         "copy",
         from,
         to,

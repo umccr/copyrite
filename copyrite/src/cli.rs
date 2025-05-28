@@ -38,7 +38,7 @@ pub struct Command {
     /// checksum will be saved to the partial checksum file.
     #[arg(global = true, short, long, env)]
     pub timeout: Option<Duration>,
-    /// The subcommands for cloud-checksum.
+    /// The subcommands for copyrite.
     #[command(subcommand)]
     pub commands: Subcommands,
     /// Options related to optimizing IO and CPU tasks.
@@ -816,7 +816,7 @@ impl Copy {
     }
 }
 
-/// The subcommands for cloud-checksum.
+/// The subcommands for copyrite.
 #[derive(Subcommand, Debug)]
 pub enum Subcommands {
     /// Generate a checksum.
