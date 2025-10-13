@@ -1,0 +1,24 @@
+name: debian
+on: push
+
+# TODO: Uncomment after PR merge
+#on:
+#  push:
+#    branches:
+#      - main
+
+jobs:
+  build-debs:
+    permissions:
+      contents: read
+      pull-requests: write
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jtdor/build-deb-action@v1
+        env:
+          DEB_BUILD_OPTIONS: noautodbgsym
+        with:
+          buildpackage-opts: --build=binary --no-sign
+

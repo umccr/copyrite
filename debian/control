@@ -1,0 +1,12 @@
+Source: copyrite
+Section: utils
+Priority: optional
+Maintainer: Marko Malenic <mmalenic1@gmail.com>
+Build-Depends: debhelper-compat (= 13), rustc:native, cargo:native, pkg-config, libssl-dev
+Standards-Version: 4.6.2
+
+Package: copyrite
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: A CLI tool for efficient checksum and copy operations across object stores
+ This tool calculates checksums and copies files across object stores efficiently.
