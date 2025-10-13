@@ -2,7 +2,7 @@ Source: copyrite
 Section: utils
 Priority: optional
 Maintainer: Marko Malenic <mmalenic1@gmail.com>
-Build-Depends: debhelper-compat (= 13), rustc:native, cargo:native, pkg-config, libssl-dev
+Build-Depends: debhelper-compat (= 13), rustc:native, cargo:native, pkg-config, libssl-dev, ca-certificates
 Standards-Version: 4.6.2
 
 Package: copyrite
