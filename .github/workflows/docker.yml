@@ -2,8 +2,8 @@ name: docker
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - '*'
 
 jobs:
   docker:
@@ -28,16 +28,24 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Get release tag
+        id: tag
+        uses: devops-actions/action-get-tag@v1.0.3
+        with:
+          strip_v: true # Optional: Remove 'v' character from version
+          default: v0.0.0 # Optional: Default version when tag not found
       - name: Docker GitHub release
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/Dockerfile
+          file: pkg/docker/Dockerfile
           provenance: false
           platforms: ${{ matrix.platforms }}
           push: true
           tags: |
-            ghcr.io/umccr/copyrite:latest
+            ghcr.io/umccr/copyrite:${{steps.tag.outputs.tag}}
+
+
 
 ## SOCI (Seekable OCI) support. Only enable when and if docker layers surpass 10MB in the future, see:
 # https://github.com/awslabs/soci-snapshotter/issues/100
