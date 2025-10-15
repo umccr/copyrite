@@ -13,8 +13,11 @@ jobs:
       - uses: taiki-e/create-gh-release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
   upload-assets:
+    permissions:
+      contents: read
+      pull-requests: write
+      packages: write
     needs: create-release
     strategy:
       matrix:
@@ -29,11 +32,20 @@ jobs:
             os: macos-13
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: copyrite
 #          tar: none
           target: ${{ matrix.target }}
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: build-debian-package
+        uses: jtdor/build-deb-action@v1
+        env:
+          DEB_BUILD_OPTIONS: noautodbgsym
+        with:
+          source-dir: ./pkg/debian
+          buildpackage-opts: --build=binary --no-sign
+      - name: Release debian assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./pkg/*.deb 
