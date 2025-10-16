@@ -32,6 +32,8 @@ jobs:
             os: macos-13
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: copyrite
