@@ -14,10 +14,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
   upload-assets:
-    permissions:
-      contents: read
-      pull-requests: write
-      packages: write
+    permissions: write-all
     needs: create-release
     strategy:
       matrix:
