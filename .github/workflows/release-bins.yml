@@ -73,7 +73,9 @@ jobs:
 #         uses: softprops/action-gh-release@v2
 #         with:
 #           files: ./pkg/*.deb
+      - name: Setup arch path
+        run: echo "RPM_ARCH_PATH=rpmbuild/RPMS/$ARCH" >> $GITHUB_ENV
       - name: Release rpm assets
         uses: softprops/action-gh-release@v2
         with:
-          files: rpmbuild/RPMS/$ARCH/*.rpm
+          files: ${{ RPM_ARCH_PATH }}/*.rpm
