@@ -13,7 +13,7 @@ jobs:
       - uses: taiki-e/create-gh-release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-  upload-assets:
+  release-binary-assets:
     permissions: write-all
     needs: create-release
     strategy:
@@ -27,6 +27,7 @@ jobs:
             os: macos-latest
           - target: x86_64-apple-darwin
             os: macos-13
+
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
@@ -37,6 +38,21 @@ jobs:
 #          tar: none
           target: ${{ matrix.target }}
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  release-linux-packages:
+    permissions: write-all
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
       - name: build RPM package
         id: rpm_build
         uses: naveenrajm7/rpmbuild@master
