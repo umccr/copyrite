@@ -10,6 +10,8 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  rustc
 BuildRequires:  cargo
 
+%global debug_package %{nil}
+
 %description
 A CLI tool for efficient checksum and copy operations across object stores.
 
