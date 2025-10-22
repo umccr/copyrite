@@ -73,9 +73,19 @@ jobs:
 #         uses: softprops/action-gh-release@v2
 #         with:
 #           files: ./pkg/*.deb
+      - name: Determine arch and rpm path
+        id: rpm_info
+        run: |
+          arch=$(uname -m)
+          echo "arch=$arch" >> $GITHUB_OUTPUT
+          echo "rpm_path=rpmbuild/RPMS/$arch" >> $GITHUB_OUTPUT
+      - name: Builder/runner arch is...
+        run: echo "runner.arch=${{ runner.arch }}, uname=${{ steps.rpm_info.outputs.arch }}"
       - name: Setup arch path
         run: echo "RPM_ARCH_PATH=rpmbuild/RPMS/$ARCH" >> $GITHUB_ENV
       - name: Release rpm assets
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ RPM_ARCH_PATH }}/*.rpm
+          files: ${{ steps.rpm_info.outputs.rpm_path }}/*.rpm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
