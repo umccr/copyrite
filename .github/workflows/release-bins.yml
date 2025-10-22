@@ -44,7 +44,20 @@ jobs:
         with:
           source-dir: ./pkg/debian
           buildpackage-opts: --build=binary --no-sign
-      - name: Release debian assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ./pkg/*.deb 
+       - name: Create source tarball
+         run: tar -czf copyrite-0.1.0.tar.gz --exclude=.git --exclude=target --exclude=.github --exclude=pkg .
+       - name: Move source to rpm dir
+         run: mv copyrite-0.1.0.tar.gz pkg/rpm/
+       - name: build-rpm-package
+         uses: jtdor/build-rpm-action@v1
+         with:
+           source-dir: ./pkg/rpm
+           buildpackage-opts: --build=binary --no-sign
+       - name: Release debian assets
+         uses: softprops/action-gh-release@v2
+         with:
+           files: ./pkg/*.deb
+       - name: Release rpm assets
+         uses: softprops/action-gh-release@v2
+         with:
+           files: ./pkg/*.rpm
