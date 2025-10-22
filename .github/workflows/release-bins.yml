@@ -37,27 +37,23 @@ jobs:
 #          tar: none
           target: ${{ matrix.target }}
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: build-debian-package
-        uses: jtdor/build-deb-action@v1
-        env:
-          DEB_BUILD_OPTIONS: noautodbgsym
+      - name: build RPM package
+        id: rpm_build
+        uses: naveenrajm7/rpmbuild@master
         with:
-          source-dir: ./pkg/debian
-          buildpackage-opts: --build=binary --no-sign
-       - name: Create source tarball
-         run: tar -czf copyrite-0.1.0.tar.gz --exclude=.git --exclude=target --exclude=.github --exclude=pkg .
-       - name: Move source to rpm dir
-         run: mv copyrite-0.1.0.tar.gz pkg/rpm/
-       - name: build-rpm-package
-         uses: jtdor/build-rpm-action@v1
-         with:
-           source-dir: ./pkg/rpm
-           buildpackage-opts: --build=binary --no-sign
-       - name: Release debian assets
-         uses: softprops/action-gh-release@v2
-         with:
-           files: ./pkg/*.deb
-       - name: Release rpm assets
-         uses: softprops/action-gh-release@v2
-         with:
-           files: ./pkg/*.rpm
+          spec_file: "./pkg/rpm/copyrite.spec"
+#      - name: build-debian-package
+#        uses: jtdor/build-deb-action@v1
+#        env:
+#          DEB_BUILD_OPTIONS: noautodbgsym
+#        with:
+#          source-dir: ./pkg/debian
+#          buildpackage-opts: --build=binary --no-sign
+#       - name: Release debian assets
+#         uses: softprops/action-gh-release@v2
+#         with:
+#           files: ./pkg/*.deb
+#       - name: Release rpm assets
+#         uses: softprops/action-gh-release@v2
+#         with:
+#           files: ./pkg/*.rpm

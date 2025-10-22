@@ -1,7 +1,7 @@
 Name:           copyrite
 Version:        0.1.0
 Release:        1%{?dist}
-Summary:        A CLI tool for efficient checksum and copy operations across object stores
+Summary:        CLI tool for efficient checksum and copy operations across object stores
 
 License:        MIT
 URL:            https://github.com/mmalenic/copyrite
