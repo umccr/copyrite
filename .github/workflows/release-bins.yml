@@ -62,17 +62,18 @@ jobs:
         uses: naveenrajm7/rpmbuild@master
         with:
           spec_file: "./pkg/rpm/copyrite.spec"
-#      - name: build-debian-package
-#        uses: jtdor/build-deb-action@v1
-#        env:
-#          DEB_BUILD_OPTIONS: noautodbgsym
-#        with:
-#          source-dir: ./pkg/debian
-#          buildpackage-opts: --build=binary --no-sign
-#       - name: Release debian assets
-#         uses: softprops/action-gh-release@v2
-#         with:
-#           files: ./pkg/*.deb
+      # See https://github.com/jtdor/build-deb-action/issues/17#issuecomment-3434202578
+      - run: cp -r pkg/debian .
+      - name: build-debian-package
+        uses: jtdor/build-deb-action@v1
+        env:
+          DEB_BUILD_OPTIONS: noautodbgsym
+        with:
+          buildpackage-opts: --build=binary --no-sign
+      - name: Release debian assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./pkg/*.deb
       - name: Determine arch and rpm path
         id: rpm_info
         run: |
