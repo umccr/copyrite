@@ -40,7 +40,7 @@ jobs:
           context: .
           file: pkg/docker/Dockerfile
           provenance: false
-          platforms: ${{ matrix.platforms }}
+          platforms: "linux/amd64,linux/arm64"
           push: true
           tags: |
             ghcr.io/umccr/copyrite:${{steps.tag.outputs.tag}}
