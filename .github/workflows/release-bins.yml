@@ -75,7 +75,7 @@ jobs:
       - name: Release debian assets
         uses: softprops/action-gh-release@v2
         with:
-          files: ./*.deb
+          files: ./debian/artifacts/*.deb
       - name: Determine arch and rpm path
         id: rpm_info
         run: |
