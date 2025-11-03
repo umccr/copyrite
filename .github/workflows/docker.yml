@@ -46,7 +46,6 @@ jobs:
             ghcr.io/umccr/copyrite:${{steps.tag.outputs.tag}}
 
 
-
 ## SOCI (Seekable OCI) support. Only enable when and if docker layers surpass 10MB in the future, see:
 # https://github.com/awslabs/soci-snapshotter/issues/100
 #      - name: Install aws SOCI

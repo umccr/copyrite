@@ -6,6 +6,9 @@ LABEL org.opencontainers.image.description="CLI tool for efficient checksum and 
 LABEL org.opencontainers.image.licenses=MIT
 LABEL org.opencontainers.image.authors="Marko Malenic <mmalenic1@gmail.com>"
 
+ARG TARGETOS
+ARG TARGETARCH
+
 WORKDIR /build
 
 RUN cargo install cargo-strip

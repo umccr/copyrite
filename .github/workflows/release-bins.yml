@@ -70,6 +70,8 @@ jobs:
           DEB_BUILD_OPTIONS: noautodbgsym
         with:
           buildpackage-opts: --build=binary --no-sign
+      - name: find .deb assets
+        run: echo $PWD && find . -iname '*.deb'
       - name: Release debian assets
         uses: softprops/action-gh-release@v2
         with:
