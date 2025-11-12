@@ -2,7 +2,7 @@ name: docker
 
 on:
   workflow_run:
-    workflows: release-binaries
+    workflows: ["release-binaries"]
     types:
       - completed
 
