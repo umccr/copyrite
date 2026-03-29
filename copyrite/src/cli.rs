@@ -533,8 +533,9 @@ pub enum CredentialProvider {
     /// An AWS profile name.
     AwsProfile,
     /// An AWS Secrets Manager secret with keys `access_key_id`, `secret_access_key`, and
-    /// optionally `session_token`. This uses the default credential chain to authenticate with
-    /// Secrets Manager, and then passes the secret values along.
+    /// optionally `session_token` or `account_id` (for account-based endpoints). This uses the
+    /// default credential chain to authenticate with Secrets Manager, and then passes the secret
+    /// values along.
     AwsSecret,
 }
 

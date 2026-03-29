@@ -115,6 +115,7 @@ pub struct SecretsManagerCredentials {
     access_key_id: String,
     secret_access_key: String,
     session_token: Option<String>,
+    account_id: Option<String>,
 }
 
 impl SecretsManagerCredentials {
@@ -155,13 +156,19 @@ impl SecretsManagerCredentials {
 
     /// Convert into AWS config compatible credentials.
     pub fn into_credentials(self) -> Credentials {
-        Credentials::new(
-            self.access_key_id,
-            self.secret_access_key,
-            self.session_token,
-            None,
-            "copyrite-aws-secret",
-        )
+        let mut builder = Credentials::builder()
+            .access_key_id(self.access_key_id)
+            .secret_access_key(self.secret_access_key)
+            .provider_name("copyrite-aws-secret");
+
+        if let Some(session_token) = self.session_token {
+            builder = builder.session_token(session_token);
+        }
+        if let Some(account_id) = self.account_id {
+            builder = builder.account_id(account_id);
+        }
+
+        builder.build()
     }
 }
 
