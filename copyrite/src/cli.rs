@@ -94,28 +94,6 @@ impl Command {
             }
         }
 
-        let credentials = &args.credentials;
-        if (credentials.source_credential_provider.is_aws() && credentials.source_profile.is_none())
-            || (credentials.destination_credential_provider.is_aws()
-                && credentials.destination_profile.is_none())
-        {
-            return Err(ParseError(
-                "a profile must be specified when using the `aws-profile` credential provider"
-                    .to_string(),
-            ));
-        }
-
-        if (credentials.source_credential_provider.is_secret()
-            && credentials.source_secret.is_none())
-            || (credentials.destination_credential_provider.is_secret()
-                && credentials.destination_secret.is_none())
-        {
-            return Err(ParseError(
-                "a secret must be specified when using the `aws-secret` credential provider"
-                    .to_string(),
-            ));
-        }
-
         Ok(())
     }
 
@@ -554,10 +532,9 @@ pub enum CredentialProvider {
     NoCredentials,
     /// An AWS profile name.
     AwsProfile,
-    /// An AWS Secrets Manager secret with keys name `access_key_id`, `secret_access_key`,
-    /// and optionally `session_token`, corresponding to the equivalent AWS credential values.
-    /// This will use the default credential chain to authenticate with Secrets Manager, and then
-    /// pass the secret values along.
+    /// An AWS Secrets Manager secret with keys `access_key_id`, `secret_access_key`, and
+    /// optionally `session_token`. This uses the default credential chain to authenticate with
+    /// Secrets Manager, and then passes the secret values along.
     AwsSecret,
 }
 
@@ -941,19 +918,26 @@ pub struct Credentials {
         long,
         env,
         default_value = "default-environment",
-        alias = "credential-provider"
+        alias = "credential-provider",
+        requires_if("aws-profile", "source_profile"),
+        requires_if("aws-secret", "source_secret")
     )]
     pub source_credential_provider: CredentialProvider,
     /// The destination credentials to use. This only affects the credentials used for the
     /// destination of a `copy` operation.
-    #[arg(global = true, long, env, default_value = "default-environment")]
+    #[arg(
+        global = true,
+        long,
+        env,
+        default_value = "default-environment",
+        requires_if("aws-profile", "destination_profile"),
+        requires_if("aws-secret", "destination_secret")
+    )]
     pub destination_credential_provider: CredentialProvider,
     /// The source profile to use if the source credential provider is `aws-profile`.
-    /// This must be specified if using `aws-profile`.
     #[arg(global = true, long, env, alias = "profile")]
     pub source_profile: Option<String>,
     /// The destination profile to use if the destination credential provider is `aws-profile`.
-    /// This must be specified if using `aws-profile`.
     #[arg(global = true, long, env)]
     pub destination_profile: Option<String>,
     /// The source secret name or ARN to use if the source credential provider is `aws-secret`.
@@ -961,9 +945,8 @@ pub struct Credentials {
     /// `session_token`.
     #[arg(global = true, long, env, alias = "secret")]
     pub source_secret: Option<String>,
-    /// The source secret name or ARN to use if the source credential provider is `aws-secret`.
-    /// The secret must contain `access_key_id` and `secret_access_key` keys, and optionally
-    /// `session_token`.
+    /// The destination secret name or ARN to use if the destination credential provider is
+    /// `aws-secret`.
     #[arg(global = true, long, env)]
     pub destination_secret: Option<String>,
     /// Set the region for the source credential provider.
