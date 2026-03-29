@@ -5,8 +5,10 @@ use crate::cli::CredentialProvider;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use aws_config::Region;
+use aws_credential_types::Credentials;
 use aws_sdk_s3::{config, Client};
 use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
+use serde::Deserialize;
 
 pub mod copy;
 pub mod sums;
@@ -107,12 +109,69 @@ impl TryFrom<&str> for Provider {
     }
 }
 
+/// The expected structure of credentials from Secrets Manager.
+#[derive(Deserialize)]
+pub struct SecretsManagerCredentials {
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: Option<String>,
+}
+
+impl SecretsManagerCredentials {
+    /// Construct credentials by fetching from an AWS Secrets Manager secret. Uses the default
+    /// credential chain to authenticate with Secrets Manager, then parses the secret's values.
+    pub async fn new(secret_id: &str) -> Result<SecretsManagerCredentials> {
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
+        let sm_client = aws_sdk_secretsmanager::Client::new(&config);
+
+        let output = sm_client
+            .get_secret_value()
+            .secret_id(secret_id)
+            .send()
+            .await
+            .map_err(|err| {
+                Error::aws_error(format!("failed to fetch secret `{}`: {}", secret_id, err))
+            })?;
+
+        let secret_json = if let Some(secret_string) = output.secret_string() {
+            secret_string.to_string()
+        } else if let Some(secret_binary) = output.secret_binary() {
+            String::from_utf8(secret_binary.as_ref().to_vec()).map_err(|err| {
+                ParseError(format!(
+                    "secret `{}` binary is invalid UTF-8: {}",
+                    secret_id, err
+                ))
+            })?
+        } else {
+            return Err(ParseError(format!(
+                "secret `{}` has no string or binary value",
+                secret_id
+            )));
+        };
+
+        serde_json::from_str(&secret_json)
+            .map_err(|err| ParseError(format!("failed to parse secret `{}`: {}", secret_id, err)))
+    }
+
+    /// Convert into AWS config compatible credentials.
+    pub fn into_credentials(self) -> Credentials {
+        Credentials::new(
+            self.access_key_id,
+            self.secret_access_key,
+            self.session_token,
+            None,
+            "copyrite-aws-secret",
+        )
+    }
+}
+
 /// Create an S3 client from the credentials provider, profile, region and endpoint url.
 pub async fn create_s3_client(
     provider: &CredentialProvider,
     profile: Option<&str>,
     region: Option<&str>,
     endpoint_url: Option<&str>,
+    secret: Option<&str>,
 ) -> Result<Client> {
     let mut loader = aws_config::defaults(BehaviorVersion::latest());
 
@@ -123,13 +182,24 @@ pub async fn create_s3_client(
         loader = loader.endpoint_url(endpoint_url);
     }
 
-    let loader = match (provider, profile) {
-        (CredentialProvider::DefaultEnvironment, _) => loader,
-        (CredentialProvider::NoCredentials, _) => loader.no_credentials(),
-        (CredentialProvider::AwsProfile, Some(profile)) => loader.profile_name(profile),
-        _ => {
+    let loader = match (provider, profile, secret) {
+        (CredentialProvider::DefaultEnvironment, _, _) => loader,
+        (CredentialProvider::NoCredentials, _, _) => loader.no_credentials(),
+        (CredentialProvider::AwsProfile, Some(profile), _) => loader.profile_name(profile),
+        (CredentialProvider::AwsSecret, _, Some(secret)) => {
+            let credentials = SecretsManagerCredentials::new(secret)
+                .await?
+                .into_credentials();
+            loader.credentials_provider(credentials)
+        }
+        (CredentialProvider::AwsProfile, None, _) => {
             return Err(ParseError(
                 "profile must be specified if using aws-profile credential provider".to_string(),
+            ))
+        }
+        (CredentialProvider::AwsSecret, _, None) => {
+            return Err(ParseError(
+                "secret must be specified if using aws-secret credential provider".to_string(),
             ))
         }
     };
@@ -141,7 +211,14 @@ pub async fn create_s3_client(
 
 /// Create the default S3 client.
 pub async fn default_s3_client() -> Result<Client> {
-    create_s3_client(&CredentialProvider::DefaultEnvironment, None, None, None).await
+    create_s3_client(
+        &CredentialProvider::DefaultEnvironment,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 #[cfg(test)]

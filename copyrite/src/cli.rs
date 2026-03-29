@@ -105,6 +105,17 @@ impl Command {
             ));
         }
 
+        if (credentials.source_credential_provider.is_secret()
+            && credentials.source_secret.is_none())
+            || (credentials.destination_credential_provider.is_secret()
+                && credentials.destination_secret.is_none())
+        {
+            return Err(ParseError(
+                "a secret must be specified when using the `aws-secret` credential provider"
+                    .to_string(),
+            ));
+        }
+
         Ok(())
     }
 
@@ -543,6 +554,11 @@ pub enum CredentialProvider {
     NoCredentials,
     /// An AWS profile name.
     AwsProfile,
+    /// An AWS Secrets Manager secret with keys name `access_key_id`, `secret_access_key`,
+    /// and optionally `session_token`, corresponding to the equivalent AWS credential values.
+    /// This will use the default credential chain to authenticate with Secrets Manager, and then
+    /// pass the secret values along.
+    AwsSecret,
 }
 
 impl CredentialProvider {
@@ -559,6 +575,11 @@ impl CredentialProvider {
     /// Is this a default credential provider.
     pub fn is_default(&self) -> bool {
         matches!(self, CredentialProvider::DefaultEnvironment)
+    }
+
+    /// Is this an aws-secret credential provider.
+    pub fn is_secret(&self) -> bool {
+        matches!(self, CredentialProvider::AwsSecret)
     }
 }
 
@@ -935,6 +956,16 @@ pub struct Credentials {
     /// This must be specified if using `aws-profile`.
     #[arg(global = true, long, env)]
     pub destination_profile: Option<String>,
+    /// The source secret name or ARN to use if the source credential provider is `aws-secret`.
+    /// The secret must contain `access_key_id` and `secret_access_key` keys, and optionally
+    /// `session_token`.
+    #[arg(global = true, long, env, alias = "secret")]
+    pub source_secret: Option<String>,
+    /// The source secret name or ARN to use if the source credential provider is `aws-secret`.
+    /// The secret must contain `access_key_id` and `secret_access_key` keys, and optionally
+    /// `session_token`.
+    #[arg(global = true, long, env)]
+    pub destination_secret: Option<String>,
     /// Set the region for the source credential provider.
     #[arg(global = true, long, env, alias = "region")]
     pub source_region: Option<String>,
@@ -964,6 +995,7 @@ impl Credentials {
             self.source_profile.as_deref(),
             self.source_region.as_deref(),
             self.source_endpoint_url.as_deref(),
+            self.source_secret.as_deref(),
         )
         .await
     }
@@ -975,6 +1007,7 @@ impl Credentials {
             self.destination_profile.as_deref(),
             self.destination_region.as_deref(),
             self.destination_endpoint_url.as_deref(),
+            self.destination_secret.as_deref(),
         )
         .await
     }
