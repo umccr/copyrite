@@ -114,7 +114,6 @@ fn construct_credentials(
     access_key_id: impl Into<String>,
     secret_access_key: impl Into<String>,
     session_token: Option<impl Into<String>>,
-    account_id: Option<impl Into<String>>,
 ) -> Credentials {
     let mut builder = Credentials::builder()
         .access_key_id(access_key_id)
@@ -123,9 +122,6 @@ fn construct_credentials(
 
     if let Some(session_token) = session_token {
         builder = builder.session_token(session_token);
-    }
-    if let Some(account_id) = account_id {
-        builder = builder.account_id(account_id);
     }
 
     builder.build()
@@ -137,7 +133,6 @@ pub struct SecretsManagerCredentials {
     access_key_id: String,
     secret_access_key: String,
     session_token: Option<String>,
-    account_id: Option<String>,
 }
 
 impl SecretsManagerCredentials {
@@ -187,7 +182,6 @@ impl SecretsManagerCredentials {
             self.access_key_id,
             self.secret_access_key,
             self.session_token,
-            self.account_id,
         )
     }
 }
@@ -197,7 +191,6 @@ pub struct CredentialOverrides {
     access_key_id: Option<String>,
     secret_access_key: Option<String>,
     session_token: Option<String>,
-    account_id: Option<String>,
 }
 
 impl CredentialOverrides {
@@ -206,13 +199,11 @@ impl CredentialOverrides {
         access_key_id: Option<String>,
         secret_access_key: Option<String>,
         session_token: Option<String>,
-        account_id: Option<String>,
     ) -> Self {
         Self {
             access_key_id,
             secret_access_key,
             session_token,
-            account_id,
         }
     }
 
@@ -221,7 +212,6 @@ impl CredentialOverrides {
         self.access_key_id.is_some()
             || self.secret_access_key.is_some()
             || self.session_token.is_some()
-            || self.account_id.is_some()
     }
 
     /// Merge overrides with base credentials. Each override takes precedence over the corresponding
@@ -248,10 +238,6 @@ impl CredentialOverrides {
             .session_token
             .as_deref()
             .or_else(|| base.and_then(|base| base.session_token()));
-        let account_id = self
-            .account_id
-            .as_deref()
-            .or_else(|| base.and_then(|base| base.account_id().map(|id| id.as_str())));
 
         // There's no need to preserve base.expiry() as overrides imply no expiry and control given
         // to user supplied credentials.
@@ -259,7 +245,6 @@ impl CredentialOverrides {
             access_key_id,
             secret_access_key,
             session_token,
-            account_id,
         ))
     }
 }
@@ -332,7 +317,6 @@ pub async fn default_s3_client() -> Result<Client> {
         access_key_id: None,
         secret_access_key: None,
         session_token: None,
-        account_id: None,
     };
     create_s3_client(
         &CredentialProvider::DefaultEnvironment,
@@ -382,24 +366,19 @@ mod tests {
 
     #[test]
     fn merge_with_overrides() {
-        let overrides = CredentialOverrides::new(None, None, None, None);
+        let overrides = CredentialOverrides::new(None, None, None);
         let base = base_credentials();
         let merged = overrides.merge_with(Some(&base)).unwrap();
 
         assert_eq!(merged.access_key_id(), "access_key");
         assert_eq!(merged.secret_access_key(), "secret_access_key");
         assert_eq!(merged.session_token(), Some("session_token"));
-        assert_eq!(
-            merged.account_id().map(|id| id.as_str()),
-            Some("account_id")
-        );
         assert!(merged.expiry().is_none());
 
         let overrides = CredentialOverrides::new(
             Some("override_access_key".to_string()),
             Some("override_secret_key".to_string()),
             Some("override_session_token".to_string()),
-            Some("override_account_id".to_string()),
         );
         let base = base_credentials();
         let merged = overrides.merge_with(Some(&base)).unwrap();
@@ -407,30 +386,21 @@ mod tests {
         assert_eq!(merged.access_key_id(), "override_access_key");
         assert_eq!(merged.secret_access_key(), "override_secret_key");
         assert_eq!(merged.session_token(), Some("override_session_token"));
-        assert_eq!(
-            merged.account_id().map(|id| id.as_str()),
-            Some("override_account_id")
-        );
         assert!(merged.expiry().is_none());
 
         let overrides =
-            CredentialOverrides::new(Some("override_access_key".to_string()), None, None, None);
+            CredentialOverrides::new(Some("override_access_key".to_string()), None, None);
         let base = base_credentials();
         let merged = overrides.merge_with(Some(&base)).unwrap();
 
         assert_eq!(merged.access_key_id(), "override_access_key");
         assert_eq!(merged.secret_access_key(), "secret_access_key");
         assert_eq!(merged.session_token(), Some("session_token"));
-        assert_eq!(
-            merged.account_id().map(|id| id.as_str()),
-            Some("account_id")
-        );
         assert!(merged.expiry().is_none());
 
         let overrides = CredentialOverrides::new(
             Some("override_access_key".to_string()),
             Some("override_secret_key".to_string()),
-            None,
             None,
         );
         let merged = overrides.merge_with(None).unwrap();
@@ -438,17 +408,14 @@ mod tests {
         assert_eq!(merged.access_key_id(), "override_access_key");
         assert_eq!(merged.secret_access_key(), "override_secret_key");
         assert_eq!(merged.session_token(), None);
-        assert_eq!(merged.account_id(), None);
         assert!(merged.expiry().is_none());
 
-        let result =
-            CredentialOverrides::new(None, Some("override_secret_key".to_string()), None, None)
-                .merge_with(None);
+        let result = CredentialOverrides::new(None, Some("override_secret_key".to_string()), None)
+            .merge_with(None);
         assert!(result.is_err());
 
-        let result =
-            CredentialOverrides::new(Some("override_access_key".to_string()), None, None, None)
-                .merge_with(None);
+        let result = CredentialOverrides::new(Some("override_access_key".to_string()), None, None)
+            .merge_with(None);
         assert!(result.is_err());
     }
 
@@ -457,8 +424,7 @@ mod tests {
         let json = json!({
             "access_key_id": "access_key",
             "secret_access_key": "secret_access_key", // pragma: allowlist secret
-            "session_token": "session_token",
-            "account_id": "123456789012"
+            "session_token": "session_token"
         });
         let creds = SecretsManagerCredentials::deserialize_from(&json.to_string())
             .unwrap()
@@ -467,10 +433,6 @@ mod tests {
         assert_eq!(creds.access_key_id(), "access_key");
         assert_eq!(creds.secret_access_key(), "secret_access_key");
         assert_eq!(creds.session_token(), Some("session_token"));
-        assert_eq!(
-            creds.account_id().map(|id| id.as_str()),
-            Some("123456789012")
-        );
 
         let json = json!({
             "access_key_id": "access_key",
@@ -483,7 +445,6 @@ mod tests {
         assert_eq!(creds.access_key_id(), "access_key");
         assert_eq!(creds.secret_access_key(), "secret_access_key");
         assert_eq!(creds.session_token(), None);
-        assert_eq!(creds.account_id(), None);
 
         assert!(SecretsManagerCredentials::deserialize_from(
             &json!({"secret_access_key": "secret_access_key"}).to_string() // pragma: allowlist secret
@@ -509,7 +470,6 @@ mod tests {
             .access_key_id("access_key")
             .secret_access_key("secret_access_key") // pragma: allowlist secret
             .session_token("session_token")
-            .account_id("account_id")
             .expiry(
                 SystemTime::now()
                     .checked_add(Duration::from_mins(1))

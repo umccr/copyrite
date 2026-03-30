@@ -66,7 +66,7 @@ impl TestConfig {
 async fn copy_test() -> Result<()> {
     let config = TestConfig::load()?;
     let file = TestFileBuilder::default().generate_bench_defaults()?;
-    let no_overrides = CredentialOverrides::new(None, None, None, None);
+    let no_overrides = CredentialOverrides::new(None, None, None);
     let client = create_s3_client(
         &CredentialProvider::DefaultEnvironment,
         None,

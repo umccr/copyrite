@@ -1019,11 +1019,10 @@ pub struct Credentials {
     ///   {
     ///     "access_key_id": "...",
     ///     "secret_access_key": "...",
-    ///     "session_token": "...",
-    ///     "account_id": "..."
+    ///     "session_token": "..."
     ///   }
     ///
-    /// The `session_token` and `account_id` (for account-based endpoints) are optional.
+    /// The `session_token` is optional.
     ///
     /// The default credential chain is used to authenticate with Secrets Manager.
     #[arg(
@@ -1082,8 +1081,10 @@ pub struct Credentials {
     pub destination_endpoint_url: Option<String>,
     /// Avoid `GetObjectAttributes` calls when determining sums.
     ///
-    /// `HeadObject` will be used as a fallback. `GetObjectAttributes` is preferred over
-    /// `HeadObject` because it only requires a single call rather than a call for each part.
+    /// `HeadObject` will be used as a fallback. This is an option because some S3-compatible
+    /// endpoints do not support `GetObjectAttributes`. If available, `GetObjectAttributes` is
+    /// preferred over `HeadObject` because it only requires a single call rather than a call for
+    /// each part.
     #[arg(
         global = true,
         long,
@@ -1119,16 +1120,6 @@ pub struct Credentials {
         hide_short_help = true
     )]
     pub source_session_token: Option<String>,
-    /// The source AWS account ID for account-based endpoints. Overrides the value from the
-    /// selected credential provider.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_SOURCE_ACCOUNT_ID",
-        alias = "account-id",
-        hide_short_help = true
-    )]
-    pub source_account_id: Option<String>,
     /// The destination AWS access key ID. Overrides the value from the selected credential
     /// provider.
     #[arg(
@@ -1156,15 +1147,6 @@ pub struct Credentials {
         hide_short_help = true
     )]
     pub destination_session_token: Option<String>,
-    /// The destination AWS account ID for account-based endpoints. Overrides the value from the
-    /// selected credential provider.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_ACCOUNT_ID",
-        hide_short_help = true
-    )]
-    pub destination_account_id: Option<String>,
 }
 
 impl Credentials {
@@ -1174,7 +1156,6 @@ impl Credentials {
             self.source_access_key_id.clone(),
             self.source_secret_access_key.clone(),
             self.source_session_token.clone(),
-            self.source_account_id.clone(),
         );
         create_s3_client(
             &self.source_credential_provider,
@@ -1193,7 +1174,6 @@ impl Credentials {
             self.destination_access_key_id.clone(),
             self.destination_secret_access_key.clone(),
             self.destination_session_token.clone(),
-            self.destination_account_id.clone(),
         );
         create_s3_client(
             &self.destination_credential_provider,
@@ -1221,7 +1201,6 @@ impl Credentials {
             self.source_access_key_id.clone(),
             self.source_secret_access_key.clone(),
             self.source_session_token.clone(),
-            self.source_account_id.clone(),
         )
     }
 
@@ -1230,7 +1209,6 @@ impl Credentials {
             self.destination_access_key_id.clone(),
             self.destination_secret_access_key.clone(),
             self.destination_session_token.clone(),
-            self.destination_account_id.clone(),
         )
     }
 }
