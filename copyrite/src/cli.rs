@@ -604,7 +604,7 @@ pub struct Copy {
     /// are the same.
     #[arg(long, env = "COPYRITE_COPY_MODE", default_value = "server-side")]
     pub copy_mode: CopyMode,
-    /// The threshold at which a file uses multipart uploads when copying to S3.This can be
+    /// The threshold at which a file uses multipart uploads when copying to S3. This can be
     /// specified with a size unit, e.g. 8mib.
     ///
     /// By default, a multipart copy will occur when the source file was uploaded using multipart,
