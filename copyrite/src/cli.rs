@@ -956,7 +956,14 @@ pub struct Credentials {
     /// The `session_token` and `account_id` (for account-based endpoints) are optional.
     ///
     /// The default credential chain is used to authenticate with Secrets Manager.
-    #[arg(global = true, long, env, alias = "secret", hide_short_help = true, verbatim_doc_comment)]
+    #[arg(
+        global = true,
+        long,
+        env,
+        alias = "secret",
+        hide_short_help = true,
+        verbatim_doc_comment
+    )]
     pub source_secret: Option<String>,
     /// The destination secret name or ARN to use if the destination credential provider is
     /// `aws-secret`. See `--source-secret` for the expected JSON format.
@@ -970,7 +977,13 @@ pub struct Credentials {
     pub destination_region: Option<String>,
     /// Set the source endpoint URL for AWS calls. This allows using a different endpoint that
     /// has an S3-compatible storage API.
-    #[arg(global = true, long, env, alias = "endpoint-url", hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env,
+        alias = "endpoint-url",
+        hide_short_help = true
+    )]
     pub source_endpoint_url: Option<String>,
     /// Set the destination endpoint URL for AWS calls. This allows using a different endpoint
     /// that has an S3-compatible storage API.
@@ -982,14 +995,32 @@ pub struct Credentials {
     #[arg(global = true, long, env, hide_short_help = true)]
     pub avoid_get_object_attributes: bool,
     /// The source AWS access key ID. Overrides the value from the selected credential provider.
-    #[arg(global = true, long, env, alias = "access-key-id", hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env,
+        alias = "access-key-id",
+        hide_short_help = true
+    )]
     pub source_access_key_id: Option<String>,
     /// The source AWS secret access key. Overrides the value from the selected credential
     /// provider.
-    #[arg(global = true, long, env, alias = "secret-access-key", hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env,
+        alias = "secret-access-key",
+        hide_short_help = true
+    )]
     pub source_secret_access_key: Option<String>,
     /// The source AWS session token. Overrides the value from the selected credential provider.
-    #[arg(global = true, long, env, alias = "session-token", hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env,
+        alias = "session-token",
+        hide_short_help = true
+    )]
     pub source_session_token: Option<String>,
     /// The source AWS account ID for account-based endpoints. Overrides the value from the
     /// selected credential provider.

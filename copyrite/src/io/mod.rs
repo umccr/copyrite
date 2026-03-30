@@ -172,8 +172,13 @@ impl SecretsManagerCredentials {
             )));
         };
 
-        serde_json::from_str(&secret_json)
-            .map_err(|err| ParseError(format!("failed to parse secret `{}`: {}", secret_id, err)))
+        Self::deserialize_from(&secret_json)
+    }
+
+    /// Deserialize from a JSON secret.
+    pub fn deserialize_from(secret_json: &str) -> Result<SecretsManagerCredentials> {
+        serde_json::from_str(secret_json)
+            .map_err(|err| ParseError(format!("failed to parse secret: {}", err)))
     }
 
     /// Convert into AWS config compatible credentials.
@@ -342,8 +347,11 @@ pub async fn default_s3_client() -> Result<Client> {
 
 #[cfg(test)]
 mod tests {
-    use crate::io::Provider;
+    use crate::io::{CredentialOverrides, Provider, SecretsManagerCredentials};
     use anyhow::Result;
+    use aws_credential_types::Credentials;
+    use serde_json::json;
+    use std::time::{Duration, SystemTime};
 
     #[tokio::test]
     pub async fn test_parse_url() -> Result<()> {
@@ -372,11 +380,142 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn merge_with_overrides() {
+        let overrides = CredentialOverrides::new(None, None, None, None);
+        let base = base_credentials();
+        let merged = overrides.merge_with(Some(&base)).unwrap();
+
+        assert_eq!(merged.access_key_id(), "access_key");
+        assert_eq!(merged.secret_access_key(), "secret_access_key");
+        assert_eq!(merged.session_token(), Some("session_token"));
+        assert_eq!(
+            merged.account_id().map(|id| id.as_str()),
+            Some("account_id")
+        );
+        assert!(merged.expiry().is_none());
+
+        let overrides = CredentialOverrides::new(
+            Some("override_access_key".to_string()),
+            Some("override_secret_key".to_string()),
+            Some("override_session_token".to_string()),
+            Some("override_account_id".to_string()),
+        );
+        let base = base_credentials();
+        let merged = overrides.merge_with(Some(&base)).unwrap();
+
+        assert_eq!(merged.access_key_id(), "override_access_key");
+        assert_eq!(merged.secret_access_key(), "override_secret_key");
+        assert_eq!(merged.session_token(), Some("override_session_token"));
+        assert_eq!(
+            merged.account_id().map(|id| id.as_str()),
+            Some("override_account_id")
+        );
+        assert!(merged.expiry().is_none());
+
+        let overrides =
+            CredentialOverrides::new(Some("override_access_key".to_string()), None, None, None);
+        let base = base_credentials();
+        let merged = overrides.merge_with(Some(&base)).unwrap();
+
+        assert_eq!(merged.access_key_id(), "override_access_key");
+        assert_eq!(merged.secret_access_key(), "secret_access_key");
+        assert_eq!(merged.session_token(), Some("session_token"));
+        assert_eq!(
+            merged.account_id().map(|id| id.as_str()),
+            Some("account_id")
+        );
+        assert!(merged.expiry().is_none());
+
+        let overrides = CredentialOverrides::new(
+            Some("override_access_key".to_string()),
+            Some("override_secret_key".to_string()),
+            None,
+            None,
+        );
+        let merged = overrides.merge_with(None).unwrap();
+
+        assert_eq!(merged.access_key_id(), "override_access_key");
+        assert_eq!(merged.secret_access_key(), "override_secret_key");
+        assert_eq!(merged.session_token(), None);
+        assert_eq!(merged.account_id(), None);
+        assert!(merged.expiry().is_none());
+
+        let result =
+            CredentialOverrides::new(None, Some("override_secret_key".to_string()), None, None)
+                .merge_with(None);
+        assert!(result.is_err());
+
+        let result =
+            CredentialOverrides::new(Some("override_access_key".to_string()), None, None, None)
+                .merge_with(None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn secrets_manager_deserialize() {
+        let json = json!({
+            "access_key_id": "access_key",
+            "secret_access_key": "secret_access_key", // pragma: allowlist secret
+            "session_token": "session_token",
+            "account_id": "123456789012"
+        });
+        let creds = SecretsManagerCredentials::deserialize_from(&json.to_string())
+            .unwrap()
+            .into_credentials();
+
+        assert_eq!(creds.access_key_id(), "access_key");
+        assert_eq!(creds.secret_access_key(), "secret_access_key");
+        assert_eq!(creds.session_token(), Some("session_token"));
+        assert_eq!(
+            creds.account_id().map(|id| id.as_str()),
+            Some("123456789012")
+        );
+
+        let json = json!({
+            "access_key_id": "access_key",
+            "secret_access_key": "secret_access_key" // pragma: allowlist secret
+        });
+        let creds = SecretsManagerCredentials::deserialize_from(&json.to_string())
+            .unwrap()
+            .into_credentials();
+
+        assert_eq!(creds.access_key_id(), "access_key");
+        assert_eq!(creds.secret_access_key(), "secret_access_key");
+        assert_eq!(creds.session_token(), None);
+        assert_eq!(creds.account_id(), None);
+
+        assert!(SecretsManagerCredentials::deserialize_from(
+            &json!({"secret_access_key": "secret_access_key"}).to_string() // pragma: allowlist secret
+        )
+        .is_err());
+        assert!(SecretsManagerCredentials::deserialize_from(
+            &json!({"access_key_id": "access_key"}).to_string()
+        )
+        .is_err());
+        assert!(SecretsManagerCredentials::deserialize_from(&json!({}).to_string()).is_err());
+    }
+
     fn provider_s3(url: &str) -> Result<(String, String)> {
         Ok(Provider::try_from(url)?.into_s3()?)
     }
 
     fn provider_file(url: &str) -> Result<String> {
         Ok(Provider::try_from(url)?.into_file()?)
+    }
+
+    fn base_credentials() -> Credentials {
+        Credentials::builder()
+            .access_key_id("access_key")
+            .secret_access_key("secret_access_key") // pragma: allowlist secret
+            .session_token("session_token")
+            .account_id("account_id")
+            .expiry(
+                SystemTime::now()
+                    .checked_add(Duration::from_mins(1))
+                    .unwrap(),
+            )
+            .provider_name("test")
+            .build()
     }
 }
