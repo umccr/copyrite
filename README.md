@@ -20,7 +20,7 @@ The aims of copyrite are to:
 Run the help command:
 
 ```
-copyrite --help
+copyrite -h
 ```
 
 Generate checksums for an input file:
@@ -62,6 +62,13 @@ copyrite copy local_file1 local_file2
 copyrite copy s3://bucket/key1 local_file
 # Local to S3
 copyrite copy local_file s3://bucket/key1
+```
+
+The credentials used for the source and destination side are customizable through different providers and environment
+variables. See the "Credentials" section in the long help:
+
+```sh
+copyrite --help
 ```
 
 ## Design
