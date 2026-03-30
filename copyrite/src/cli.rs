@@ -7,7 +7,7 @@ use crate::error::Error::{CheckError, GenerateError, ParseError};
 use crate::error::Result;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::ObjectSumsBuilder;
-use crate::io::{create_s3_client, default_s3_client, Provider};
+use crate::io::{create_s3_client, default_s3_client, CredentialOverrides, Provider};
 use crate::stats;
 use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
@@ -969,37 +969,102 @@ pub struct Credentials {
     /// a single call rather than a call for each part.
     #[arg(global = true, long, env)]
     pub avoid_get_object_attributes: bool,
+    /// The source AWS access key ID. Overrides the value from the selected credential provider.
+    #[arg(global = true, long, env, alias = "access-key-id")]
+    pub source_access_key_id: Option<String>,
+    /// The source AWS secret access key. Overrides the value from the selected credential
+    /// provider.
+    #[arg(global = true, long, env, alias = "secret-access-key")]
+    pub source_secret_access_key: Option<String>,
+    /// The source AWS session token. Overrides the value from the selected credential provider.
+    #[arg(global = true, long, env, alias = "session-token")]
+    pub source_session_token: Option<String>,
+    /// The source AWS account ID for account-based endpoints. Overrides the value from the
+    /// selected credential provider.
+    #[arg(global = true, long, env, alias = "account-id")]
+    pub source_account_id: Option<String>,
+    /// The destination AWS access key ID. Overrides the value from the selected credential
+    /// provider.
+    #[arg(global = true, long, env)]
+    pub destination_access_key_id: Option<String>,
+    /// The destination AWS secret access key. Overrides the value from the selected credential
+    /// provider.
+    #[arg(global = true, long, env)]
+    pub destination_secret_access_key: Option<String>,
+    /// The destination AWS session token. Overrides the value from the selected credential
+    /// provider.
+    #[arg(global = true, long, env)]
+    pub destination_session_token: Option<String>,
+    /// The destination AWS account ID for account-based endpoints. Overrides the value from the
+    /// selected credential provider.
+    #[arg(global = true, long, env)]
+    pub destination_account_id: Option<String>,
 }
 
 impl Credentials {
     /// Construct the source client from the credentials.
     pub async fn source_client(&self) -> Result<Client> {
+        let overrides = CredentialOverrides::new(
+            self.source_access_key_id.clone(),
+            self.source_secret_access_key.clone(),
+            self.source_session_token.clone(),
+            self.source_account_id.clone(),
+        );
         create_s3_client(
             &self.source_credential_provider,
             self.source_profile.as_deref(),
             self.source_region.as_deref(),
             self.source_endpoint_url.as_deref(),
             self.source_secret.as_deref(),
+            overrides,
         )
         .await
     }
 
     /// Construct the destination client from the credentials.
     pub async fn destination_client(&self) -> Result<Client> {
+        let overrides = CredentialOverrides::new(
+            self.destination_access_key_id.clone(),
+            self.destination_secret_access_key.clone(),
+            self.destination_session_token.clone(),
+            self.destination_account_id.clone(),
+        );
         create_s3_client(
             &self.destination_credential_provider,
             self.destination_profile.as_deref(),
             self.destination_region.as_deref(),
             self.destination_endpoint_url.as_deref(),
             self.destination_secret.as_deref(),
+            overrides,
         )
         .await
     }
 
+    /// Check if the default credentials are being used without any overrides.
     pub fn is_default(&self) -> bool {
         self.source_credential_provider.is_default()
             && self.destination_credential_provider.is_default()
             && self.source_endpoint_url.is_none()
             && self.destination_endpoint_url.is_none()
+            && !self.source_overrides().any()
+            && !self.destination_overrides().any()
+    }
+
+    fn source_overrides(&self) -> CredentialOverrides {
+        CredentialOverrides::new(
+            self.source_access_key_id.clone(),
+            self.source_secret_access_key.clone(),
+            self.source_session_token.clone(),
+            self.source_account_id.clone(),
+        )
+    }
+
+    fn destination_overrides(&self) -> CredentialOverrides {
+        CredentialOverrides::new(
+            self.destination_access_key_id.clone(),
+            self.destination_secret_access_key.clone(),
+            self.destination_session_token.clone(),
+            self.destination_account_id.clone(),
+        )
     }
 }

@@ -5,6 +5,7 @@ use crate::cli::CredentialProvider;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use aws_config::Region;
+use aws_credential_types::provider::ProvideCredentials;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{config, Client};
 use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
@@ -109,6 +110,27 @@ impl TryFrom<&str> for Provider {
     }
 }
 
+fn construct_credentials(
+    access_key_id: impl Into<String>,
+    secret_access_key: impl Into<String>,
+    session_token: Option<impl Into<String>>,
+    account_id: Option<impl Into<String>>,
+) -> Credentials {
+    let mut builder = Credentials::builder()
+        .access_key_id(access_key_id)
+        .secret_access_key(secret_access_key)
+        .provider_name("copyrite");
+
+    if let Some(session_token) = session_token {
+        builder = builder.session_token(session_token);
+    }
+    if let Some(account_id) = account_id {
+        builder = builder.account_id(account_id);
+    }
+
+    builder.build()
+}
+
 /// The expected structure of credentials from Secrets Manager.
 #[derive(Deserialize)]
 pub struct SecretsManagerCredentials {
@@ -156,29 +178,96 @@ impl SecretsManagerCredentials {
 
     /// Convert into AWS config compatible credentials.
     pub fn into_credentials(self) -> Credentials {
-        let mut builder = Credentials::builder()
-            .access_key_id(self.access_key_id)
-            .secret_access_key(self.secret_access_key)
-            .provider_name("copyrite-aws-secret");
+        construct_credentials(
+            self.access_key_id,
+            self.secret_access_key,
+            self.session_token,
+            self.account_id,
+        )
+    }
+}
 
-        if let Some(session_token) = self.session_token {
-            builder = builder.session_token(session_token);
-        }
-        if let Some(account_id) = self.account_id {
-            builder = builder.account_id(account_id);
-        }
+/// Credential overrides from CLI args or environment variables.
+pub struct CredentialOverrides {
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    session_token: Option<String>,
+    account_id: Option<String>,
+}
 
-        builder.build()
+impl CredentialOverrides {
+    /// Create new credential overrides.
+    pub fn new(
+        access_key_id: Option<String>,
+        secret_access_key: Option<String>,
+        session_token: Option<String>,
+        account_id: Option<String>,
+    ) -> Self {
+        Self {
+            access_key_id,
+            secret_access_key,
+            session_token,
+            account_id,
+        }
+    }
+
+    /// Returns true if any override is set.
+    pub fn any(&self) -> bool {
+        self.access_key_id.is_some()
+            || self.secret_access_key.is_some()
+            || self.session_token.is_some()
+            || self.account_id.is_some()
+    }
+
+    /// Merge overrides with base credentials. Each override takes precedence over the corresponding
+    /// field in the base credentials.
+    pub fn merge_with(&self, base: Option<&Credentials>) -> Result<Credentials> {
+        let access_key_id = self
+            .access_key_id
+            .as_deref()
+            .or_else(|| base.map(|base| base.access_key_id()))
+            .ok_or_else(|| {
+                ParseError(
+                    "access-key-id must be provided as an override or by the credential provider"
+                        .to_string(),
+                )
+            })?;
+        let secret_access_key = self
+            .secret_access_key
+            .as_deref()
+            .or_else(|| base.map(|base| base.secret_access_key()))
+            .ok_or_else(|| {
+                ParseError("secret-access-key must be provided as an override or by the credential provider".to_string())
+            })?;
+        let session_token = self
+            .session_token
+            .as_deref()
+            .or_else(|| base.and_then(|base| base.session_token()));
+        let account_id = self
+            .account_id
+            .as_deref()
+            .or_else(|| base.and_then(|base| base.account_id().map(|id| id.as_str())));
+
+        // There's no need to preserve base.expiry() as overrides imply no expiry and control given
+        // to user supplied credentials.
+        Ok(construct_credentials(
+            access_key_id,
+            secret_access_key,
+            session_token,
+            account_id,
+        ))
     }
 }
 
 /// Create an S3 client from the credentials provider, profile, region and endpoint url.
+/// Any fields set in `overrides` take precedence over the resolved credential provider values.
 pub async fn create_s3_client(
     provider: &CredentialProvider,
     profile: Option<&str>,
     region: Option<&str>,
     endpoint_url: Option<&str>,
     secret: Option<&str>,
+    overrides: CredentialOverrides,
 ) -> Result<Client> {
     let mut loader = aws_config::defaults(BehaviorVersion::latest());
 
@@ -211,19 +300,42 @@ pub async fn create_s3_client(
         }
     };
 
-    let config = config::Builder::from(&loader.load().await).build();
+    let sdk_config = loader.load().await;
 
-    Ok(Client::from_conf(config))
+    let s3_config = if overrides.any() {
+        // Allow no credentials to be set with only overrides.
+        let base = if let Some(creds_provider) = sdk_config.credentials_provider() {
+            creds_provider.provide_credentials().await.ok()
+        } else {
+            None
+        };
+
+        let merged = overrides.merge_with(base.as_ref())?;
+        config::Builder::from(&sdk_config)
+            .credentials_provider(merged)
+            .build()
+    } else {
+        config::Builder::from(&sdk_config).build()
+    };
+
+    Ok(Client::from_conf(s3_config))
 }
 
 /// Create the default S3 client.
 pub async fn default_s3_client() -> Result<Client> {
+    let no_overrides = CredentialOverrides {
+        access_key_id: None,
+        secret_access_key: None,
+        session_token: None,
+        account_id: None,
+    };
     create_s3_client(
         &CredentialProvider::DefaultEnvironment,
         None,
         None,
         None,
         None,
+        no_overrides,
     )
     .await
 }
