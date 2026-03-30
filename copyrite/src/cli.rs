@@ -36,7 +36,7 @@ use tokio::io::stdin;
 pub struct Command {
     /// The amount of time to calculate checksums for. Once this timeout is reached the partial
     /// checksum will be saved to the partial checksum file.
-    #[arg(global = true, short, long, env)]
+    #[arg(global = true, short, long, env = "COPYRITE_TIMEOUT")]
     pub timeout: Option<Duration>,
     /// The subcommands for copyrite.
     #[command(subcommand)]
@@ -175,9 +175,10 @@ impl Command {
 /// The generate subcommand components.provenance: false
 #[derive(Debug, Args)]
 pub struct Generate {
-    /// The input file to calculate the checksum for. By default, accepts a file name.
-    /// use - to accept input from stdin. If using stdin, the output will be written to stdout.
-    /// Multiple files can be specified.
+    /// The input file to calculate the checksum for.
+    ///
+    /// By default, accepts a file name. use - to accept input from stdin. If using stdin,
+    /// the output will be written to stdout. Multiple files can be specified.
     #[arg(value_delimiter = ',', required = true)]
     pub input: Vec<String>,
     /// Checksums to use. Can be specified multiple times or comma-separated.
@@ -203,22 +204,36 @@ pub struct Generate {
     #[arg(value_delimiter = ',', short, long)]
     pub checksum: Vec<Ctx>,
     /// Generate any missing checksums that would be required to confirm whether two files are
-    /// identical using the `check` subcommand. Any additional checksums specified using
-    /// `--checksum` will also be generated.
-    #[arg(short, long, env)]
+    /// identical using the `check` subcommand.
+    ///
+    /// Any additional checksums specified using `--checksum` will also be generated.
+    #[arg(short, long, env = "COPYRITE_MISSING")]
     pub missing: bool,
-    /// Overwrite the sums file. By default, only checksums that are missing are computed and
-    /// added to an existing sums file. Any existing checksums are preserved (even if not
-    /// specified in --checksums). This option allows overwriting any existing sums file. This
-    /// will recompute all checksums specified.
-    #[arg(short, long, env, conflicts_with = "verify")]
+    /// Overwrite the sums file.
+    ///
+    /// By default, only checksums that are missing are computed and added to an existing sums
+    /// file. Any existing checksums are preserved (even if not specified in --checksums). This
+    /// option allows overwriting any existing sums file. This will recompute all checksums
+    /// specified.
+    #[arg(
+        short,
+        long,
+        env = "COPYRITE_FORCE_OVERWRITE",
+        conflicts_with = "verify"
+    )]
     pub force_overwrite: bool,
-    /// Verify the contents of existing sums files when generating checksums. By default,
-    /// existing checksum files are assumed to contain checksums that have correct values. This
-    /// option allows computing existing sums file checksums and updating the file to ensure
-    /// that it is correct. This option will also read objects on S3 to compute checksums, even
-    /// if the metadata for that checksum exists.
-    #[arg(short, long, env, conflicts_with = "force_overwrite")]
+    /// Verify the contents of existing sums files when generating checksums.
+    ///
+    /// By default, existing checksum files are assumed to contain checksums that have correct
+    /// values. This option allows computing existing sums file checksums and updating the file to
+    /// ensure that it is correct. This option will also read objects on S3 to compute checksums,
+    /// even if the metadata for that checksum exists.
+    #[arg(
+        short,
+        long,
+        env = "COPYRITE_VERIFY",
+        conflicts_with = "force_overwrite"
+    )]
     pub verify: bool,
 }
 
@@ -361,19 +376,23 @@ pub struct Check {
     /// The input file to check a checksum. Requires at least two files.
     #[arg(value_delimiter = ',', required = true, num_args = 2..)]
     pub input: Vec<String>,
-    /// Update existing sums files when running the `check` subcommand. This will add checksums to
-    /// any sums files that are confirmed to be identical through other sums files.
-    #[arg(short, long, env)]
+    /// Update existing sums files when running the `check` subcommand.
+    ///
+    /// This will add checksums to any sums files that are confirmed to be identical through other
+    /// sums files.
+    #[arg(short, long, env = "COPYRITE_UPDATE")]
     pub update: bool,
-    /// Group outputted checksums by equality or comparability. Equality determines the groups
-    /// of sums files that are equal, and comparability determines the groups of sums files
-    /// that can be compared, but aren't necessarily equal.
-    #[arg(short, long, env, default_value = "equality")]
+    /// Group outputted checksums by equality or comparability.
+    ///
+    /// Equality determines the groups of sums files that are equal, and comparability determines
+    /// the groups of sums files that can be compared, but aren't necessarily equal.
+    #[arg(short, long, env = "COPYRITE_GROUP_BY", default_value = "equality")]
     pub group_by: GroupBy,
-    /// Generate missing sums for the check. This is equivalent to `--missing` on the `generate`
-    /// command except that it does not write .sums to the input location unless `--write-sums-file`
-    /// is also specified.
-    #[arg(short, long, env)]
+    /// Generate missing sums for the check.
+    ///
+    /// This is equivalent to `--missing` on the `generate` command except that it does not write
+    /// .sums to the input location unless `--write-sums-file` is also specified.
+    #[arg(short, long, env = "COPYRITE_MISSING")]
     pub missing: bool,
 }
 
@@ -569,39 +588,52 @@ pub struct Copy {
     /// be a directory.
     #[arg(required = true)]
     pub destination: String,
-    /// Controls how tags are copied. By default, this will copy all tags and fail if the tags
-    /// could not be copied.
-    #[arg(long, env, default_value = "copy")]
+    /// Controls how tags are copied.
+    ///
+    /// By default, this will copy all tags and fail if the tags could not be copied.
+    #[arg(long, env = "COPYRITE_TAG_MODE", default_value = "copy")]
     pub tag_mode: MetadataCopy,
-    /// Controls how metadata is copied. By default, this will copy all metadata and fail if the
-    /// metadata could not be copied.
-    #[arg(long, env, default_value = "copy")]
+    /// Controls how metadata is copied.
+    ///
+    /// By default, this will copy all metadata and fail if the metadata could not be copied.
+    #[arg(long, env = "COPYRITE_METADATA_MODE", default_value = "copy")]
     pub metadata_mode: MetadataCopy,
-    #[arg(long, env, default_value = "server-side")]
+    /// The copy mode.
+    ///
+    /// By default, this will attempt server-side copy if the source and destination credentials
+    /// are the same.
+    #[arg(long, env = "COPYRITE_COPY_MODE", default_value = "server-side")]
     pub copy_mode: CopyMode,
-    /// The threshold at which a file uses multipart uploads when copying to S3. This can be
-    /// specified with a size unit, e.g. 8mib. By default, a multipart copy will occur when the
-    /// source file was uploaded using multipart, in order to match sums. This can be used to
-    /// override that.
-    #[arg(short, long, env, value_parser = |s: &str| parse_size(s))]
+    /// The threshold at which a file uses multipart uploads when copying to S3.This can be
+    /// specified with a size unit, e.g. 8mib.
+    ///
+    /// By default, a multipart copy will occur when the source file was uploaded using multipart,
+    /// in order to match sums. This can be used to override that.
+    #[arg(short, long, env = "COPYRITE_MULTIPART_THRESHOLD", value_parser = |s: &str| parse_size(s))]
     pub multipart_threshold: Option<u64>,
     /// The part size to use when copying files using multipart uploads. This can be specified with
-    /// a size unit, e.g. 8mib. By default, the part size will be automatically determined based on
-    /// how the source was uploaded. This can be used to override that.
-    #[arg(short, long, env, value_parser = |s: &str| parse_size(s))]
+    /// a size unit, e.g. 8mib.
+    ///
+    /// By default, the part size will be automatically determined based on how the source was
+    /// uploaded. This can be used to override that.
+    #[arg(short, long, env = "COPYRITE_PART_SIZE", value_parser = |s: &str| parse_size(s))]
     pub part_size: Option<u64>,
-    /// The number of simultaneous copy tasks to run when using multipart copies. This controls
-    /// how many simultaneous connections are made to copy files.
-    #[arg(long, env, default_value_t = 10)]
+    /// The number of simultaneous copy tasks to run when using multipart copies.
+    ///
+    /// This controls how many simultaneous connections are made to copy files.
+    #[arg(long, env = "COPYRITE_CONCURRENCY", default_value_t = 10)]
     pub concurrency: usize,
-    /// Do not check the checksums of the copied files after copying. By default, all copy
-    /// operations will generate checksums for a check and then verify that the copy was correct.
-    #[arg(long, env)]
+    /// Do not check the checksums of the copied files after copying.
+    ///
+    /// By default, all copy operations will generate checksums for a check and then verify that
+    /// the copy was correct.
+    #[arg(long, env = "COPYRITE_NO_CHECK")]
     pub no_check: bool,
-    /// Always perform the copy and do not skip if sums match. By default, a copy is performed only
-    /// if the file is not at the destination or if the sums of the source and destination do not
-    /// match.
-    #[arg(long, env)]
+    /// Always perform the copy and do not skip if sums match.
+    ///
+    /// By default, a copy is performed only if the file is not at the destination or if the sums
+    /// of the source and destination do not match.
+    #[arg(long, env = "COPYRITE_NO_SKIP")]
     pub no_skip: bool,
 }
 
@@ -873,32 +905,59 @@ impl Display for Endianness {
 /// Commands related to optimizing IO and CPU tasks.
 #[derive(Args, Debug, Clone)]
 #[group(required = false)]
+#[command(next_help_heading = "Optimization")]
 pub struct Optimization {
-    /// The capacity of the sender channel for the channel reader. This controls the
-    /// number of elements that can be stored in the reader channel for waiting for checksum
-    /// processes to catch up.
-    #[arg(global = true, long, env, default_value_t = 100)]
+    /// The capacity of the sender channel for the channel reader.
+    ///
+    /// This controls the number of elements that can be stored in the reader channel for waiting
+    /// for checksum processes to catch up.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_CHANNEL_CAPACITY",
+        default_value_t = 100,
+        hide_short_help = true
+    )]
     pub channel_capacity: usize,
-    /// The chunk size of the channel reader in bytes. This controls how many bytes are read
-    /// by the reader before they are passed into the channel.
-    #[arg(global = true, long, env, default_value_t = 1048576)]
+    /// The chunk size of the channel reader in bytes.
+    ///
+    /// This controls how many bytes are read by the reader before they are passed into the channel.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_READER_CHUNK_SIZE",
+        default_value_t = 1048576,
+        hide_short_help = true
+    )]
     pub reader_chunk_size: usize,
 }
 
 /// Options related to outputting information from the CLI.
 #[derive(Args, Debug)]
 #[group(required = false)]
+#[command(next_help_heading = "Output")]
 pub struct Output {
     /// Print the output statistics using indented and multi-line json rather than on a single line.
-    #[arg(global = true, long, env)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_PRETTY_JSON",
+        hide_short_help = true
+    )]
     pub pretty_json: bool,
     /// Print output using a UI-mode for copy operations rather than JSON.
-    #[arg(global = true, long, env)]
+    #[arg(global = true, long, env = "COPYRITE_UI", hide_short_help = true)]
     pub ui: bool,
-    /// Write sums files at the location when copying or checking. By default, `copy` operations and
-    /// `check` operations with `--missing` will not write any .sums files at the source or
-    /// destination.
-    #[arg(global = true, long, env)]
+    /// Write sums files at the location when copying or checking.
+    ///
+    /// By default, `copy` operations and `check` operations with `--missing` will not write any
+    /// .sums files at the source or destination.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_WRITE_SUMS_FILE",
+        hide_short_help = true
+    )]
     pub write_sums_file: bool,
 }
 
@@ -915,7 +974,7 @@ pub struct Credentials {
     #[arg(
         global = true,
         long,
-        env,
+        env = "COPYRITE_SOURCE_CREDENTIAL_PROVIDER",
         default_value = "default-environment",
         alias = "credential-provider",
         requires_if("aws-profile", "source_profile"),
@@ -928,7 +987,7 @@ pub struct Credentials {
     #[arg(
         global = true,
         long,
-        env,
+        env = "COPYRITE_DESTINATION_CREDENTIAL_PROVIDER",
         default_value = "default-environment",
         requires_if("aws-profile", "destination_profile"),
         requires_if("aws-secret", "destination_secret"),
@@ -936,10 +995,21 @@ pub struct Credentials {
     )]
     pub destination_credential_provider: CredentialProvider,
     /// The source profile to use if the source credential provider is `aws-profile`.
-    #[arg(global = true, long, env, alias = "profile", hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_PROFILE",
+        alias = "profile",
+        hide_short_help = true
+    )]
     pub source_profile: Option<String>,
     /// The destination profile to use if the destination credential provider is `aws-profile`.
-    #[arg(global = true, long, env, hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_PROFILE",
+        hide_short_help = true
+    )]
     pub destination_profile: Option<String>,
     /// The source secret name or ARN to use if the source credential provider is `aws-secret`.
     ///
@@ -959,7 +1029,7 @@ pub struct Credentials {
     #[arg(
         global = true,
         long,
-        env,
+        env = "COPYRITE_SOURCE_SECRET",
         alias = "secret",
         hide_short_help = true,
         verbatim_doc_comment
@@ -967,38 +1037,65 @@ pub struct Credentials {
     pub source_secret: Option<String>,
     /// The destination secret name or ARN to use if the destination credential provider is
     /// `aws-secret`. See `--source-secret` for the expected JSON format.
-    #[arg(global = true, long, env, hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_SECRET",
+        hide_short_help = true
+    )]
     pub destination_secret: Option<String>,
     /// Set the region for the source credential provider.
-    #[arg(global = true, long, env, alias = "region", hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_REGION",
+        alias = "region",
+        hide_short_help = true
+    )]
     pub source_region: Option<String>,
     /// Set the region for the destination credential provider.
-    #[arg(global = true, long, env, hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_REGION",
+        hide_short_help = true
+    )]
     pub destination_region: Option<String>,
     /// Set the source endpoint URL for AWS calls. This allows using a different endpoint that
     /// has an S3-compatible storage API.
     #[arg(
         global = true,
         long,
-        env,
+        env = "COPYRITE_SOURCE_ENDPOINT_URL",
         alias = "endpoint-url",
         hide_short_help = true
     )]
     pub source_endpoint_url: Option<String>,
     /// Set the destination endpoint URL for AWS calls. This allows using a different endpoint
     /// that has an S3-compatible storage API.
-    #[arg(global = true, long, env, hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_ENDPOINT_URL",
+        hide_short_help = true
+    )]
     pub destination_endpoint_url: Option<String>,
-    /// Avoid `GetObjectAttributes` calls when determining sums. `HeadObject` will be used as a
-    /// fallback. `GetObjectAttributes` is preferred over `HeadObject` because it only requires
-    /// a single call rather than a call for each part.
-    #[arg(global = true, long, env, hide_short_help = true)]
+    /// Avoid `GetObjectAttributes` calls when determining sums.
+    ///
+    /// `HeadObject` will be used as a fallback. `GetObjectAttributes` is preferred over
+    /// `HeadObject` because it only requires a single call rather than a call for each part.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_AVOID_GET_OBJECT_ATTRIBUTES",
+        hide_short_help = true
+    )]
     pub avoid_get_object_attributes: bool,
     /// The source AWS access key ID. Overrides the value from the selected credential provider.
     #[arg(
         global = true,
         long,
-        env,
+        env = "COPYRITE_SOURCE_ACCESS_KEY_ID",
         alias = "access-key-id",
         hide_short_help = true
     )]
@@ -1008,7 +1105,7 @@ pub struct Credentials {
     #[arg(
         global = true,
         long,
-        env,
+        env = "COPYRITE_SOURCE_SECRET_ACCESS_KEY",
         alias = "secret-access-key",
         hide_short_help = true
     )]
@@ -1017,30 +1114,56 @@ pub struct Credentials {
     #[arg(
         global = true,
         long,
-        env,
+        env = "COPYRITE_SOURCE_SESSION_TOKEN",
         alias = "session-token",
         hide_short_help = true
     )]
     pub source_session_token: Option<String>,
     /// The source AWS account ID for account-based endpoints. Overrides the value from the
     /// selected credential provider.
-    #[arg(global = true, long, env, alias = "account-id", hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_ACCOUNT_ID",
+        alias = "account-id",
+        hide_short_help = true
+    )]
     pub source_account_id: Option<String>,
     /// The destination AWS access key ID. Overrides the value from the selected credential
     /// provider.
-    #[arg(global = true, long, env, hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_ACCESS_KEY_ID",
+        hide_short_help = true
+    )]
     pub destination_access_key_id: Option<String>,
     /// The destination AWS secret access key. Overrides the value from the selected credential
     /// provider.
-    #[arg(global = true, long, env, hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_SECRET_ACCESS_KEY",
+        hide_short_help = true
+    )]
     pub destination_secret_access_key: Option<String>,
     /// The destination AWS session token. Overrides the value from the selected credential
     /// provider.
-    #[arg(global = true, long, env, hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_SESSION_TOKEN",
+        hide_short_help = true
+    )]
     pub destination_session_token: Option<String>,
     /// The destination AWS account ID for account-based endpoints. Overrides the value from the
     /// selected credential provider.
-    #[arg(global = true, long, env, hide_short_help = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_ACCOUNT_ID",
+        hide_short_help = true
+    )]
     pub destination_account_id: Option<String>,
 }
 

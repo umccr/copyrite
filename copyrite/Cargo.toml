@@ -7,7 +7,7 @@ edition.workspace = true
 authors.workspace = true
 
 [dependencies]
-clap = { version = "4", features = ["derive", "env", "cargo"] }
+clap = { version = "4", features = ["derive", "env", "cargo", "wrap_help"] }
 thiserror = "2"
 rand = "0.9"
 
