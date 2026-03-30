@@ -275,6 +275,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-secretsmanager"
+version = "1.76.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb99bf4d3be2b4598ad26eed5da8d0c930b8d47d76b279a03e47d160151eb0fb"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sso"
 version = "1.71.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -852,6 +874,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+ "terminal_size",
 ]
 
 [[package]]
@@ -914,7 +937,9 @@ dependencies = [
  "async-stream",
  "async-trait",
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-s3",
+ "aws-sdk-secretsmanager",
  "aws-smithy-mocks",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
@@ -2850,6 +2875,16 @@ dependencies = [
  "fastrand",
  "getrandom 0.3.3",
  "once_cell",
+ "rustix 1.0.7",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45c6481c4829e4cc63825e62c49186a34538b7b2750b73b266581ffb612fb5ed"
+dependencies = [
  "rustix 1.0.7",
  "windows-sys 0.59.0",
 ]
