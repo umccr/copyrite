@@ -259,7 +259,7 @@ pub(crate) mod test {
     use super::*;
     use crate::checksum::aws_etag::test::expected_md5_1gib;
     use crate::checksum::standard::test::EXPECTED_MD5_SUM;
-    use serde_json::{from_value, json, to_value, Value};
+    use serde_json::{Value, from_value, json, to_value};
 
     const EXPECTED_ETAG: &str = "1c3490f45b0cdc4299a128410def3a1d-b";
 

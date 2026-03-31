@@ -5,9 +5,9 @@ use crate::cli::CredentialProvider;
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use aws_config::Region;
-use aws_credential_types::provider::ProvideCredentials;
 use aws_credential_types::Credentials;
-use aws_sdk_s3::{config, Client};
+use aws_credential_types::provider::ProvideCredentials;
+use aws_sdk_s3::{Client, config};
 use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
 use serde::Deserialize;
 
@@ -281,12 +281,12 @@ pub async fn create_s3_client(
         (CredentialProvider::AwsProfile, None, _) => {
             return Err(ParseError(
                 "profile must be specified if using aws-profile credential provider".to_string(),
-            ))
+            ));
         }
         (CredentialProvider::AwsSecret, _, None) => {
             return Err(ParseError(
                 "secret must be specified if using aws-secret credential provider".to_string(),
-            ))
+            ));
         }
     };
 
@@ -446,14 +446,18 @@ mod tests {
         assert_eq!(creds.secret_access_key(), "secret_access_key");
         assert_eq!(creds.session_token(), None);
 
-        assert!(SecretsManagerCredentials::deserialize_from(
-            &json!({"secret_access_key": "secret_access_key"}).to_string() // pragma: allowlist secret
-        )
-        .is_err());
-        assert!(SecretsManagerCredentials::deserialize_from(
-            &json!({"access_key_id": "access_key"}).to_string()
-        )
-        .is_err());
+        assert!(
+            SecretsManagerCredentials::deserialize_from(
+                &json!({"secret_access_key": "secret_access_key"}).to_string() // pragma: allowlist secret
+            )
+            .is_err()
+        );
+        assert!(
+            SecretsManagerCredentials::deserialize_from(
+                &json!({"access_key_id": "access_key"}).to_string()
+            )
+            .is_err()
+        );
         assert!(SecretsManagerCredentials::deserialize_from(&json!({}).to_string()).is_err());
     }
 

@@ -5,10 +5,10 @@
 
 pub mod error;
 
-use crate::test::error::Error::FileGenerate;
+use crate::test::error::Error::{FileGenerate, IoError};
 use crate::test::error::Result;
-use rand::rngs::StdRng;
-use rand::{RngCore, SeedableRng};
+use rand::rngs::{StdRng, SysRng};
+use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -46,20 +46,19 @@ pub struct TestFileBuilder {
     constant_value: Option<u8>,
 }
 
-impl Default for TestFileBuilder {
-    fn default() -> Self {
-        Self {
+impl TestFileBuilder {
+    /// Create a new default `TestFileBuilder`.
+    pub fn new() -> Result<Self> {
+        Ok(Self {
             directory: DIRECTORY.parse().expect("expected valid directory"),
-            rng: StdRng::from_os_rng(),
+            rng: StdRng::try_from_rng(&mut SysRng).map_err(|err| IoError(err.into()))?,
             file_size: TEST_FILE_SIZE,
             file_name: TEST_FILE_NAME.to_string(),
             overwrite: false,
             constant_value: None,
-        }
+        })
     }
-}
 
-impl TestFileBuilder {
     /// Add the random seed to generate the file with.
     pub fn with_random_seed(mut self, seed: u64) -> Self {
         self.rng = StdRng::seed_from_u64(seed);

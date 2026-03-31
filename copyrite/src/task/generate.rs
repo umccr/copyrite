@@ -1,8 +1,8 @@
 //! Generate checksums for files.
 //!
 
-use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
+use crate::checksum::file::{Checksum, SumsFile};
 use crate::error::Error::GenerateError;
 use crate::error::{ApiError, Error, Result};
 use crate::io::sums::channel::ChannelReader;
@@ -408,7 +408,7 @@ impl SumCtxPairs {
         let file_ctx = files
             .0
             .iter()
-            .flat_map(|(file, _)| file.0 .0.checksums.keys().cloned())
+            .flat_map(|(file, _)| file.0.0.checksums.keys().cloned())
             .fold(BTreeMap::new(), |mut map, val| {
                 // Count occurrences
                 map.entry(val).and_modify(|count| *count += 1).or_insert(1);
@@ -452,16 +452,16 @@ impl From<Vec<SumCtxPair>> for SumCtxPairs {
 pub(crate) mod test {
     use super::*;
     use crate::checksum::aws_etag::test::expected_md5_1gib;
+    use crate::checksum::standard::StandardCtx;
     use crate::checksum::standard::test::{
-        EXPECTED_CRC32C_BE_SUM, EXPECTED_CRC32_BE_SUM, EXPECTED_MD5_SUM, EXPECTED_SHA1_SUM,
+        EXPECTED_CRC32_BE_SUM, EXPECTED_CRC32C_BE_SUM, EXPECTED_MD5_SUM, EXPECTED_SHA1_SUM,
         EXPECTED_SHA256_SUM,
     };
-    use crate::checksum::standard::StandardCtx;
     use crate::io::sums::channel::test::channel_reader;
     use crate::io::sums::file::FileBuilder;
     use crate::task::check::test::write_test_files_not_comparable;
     use crate::task::check::{CheckTaskBuilder, GroupBy};
-    use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
+    use crate::test::{TEST_FILE_SIZE, TestFileBuilder};
     use anyhow::Result;
     use std::path::Path;
     use tempfile::tempdir;
@@ -544,7 +544,7 @@ pub(crate) mod test {
         overwrite: bool,
         verify: bool,
     ) -> Result<SumsFile> {
-        let test_file = TestFileBuilder::default().generate_test_defaults()?;
+        let test_file = TestFileBuilder::new()?.generate_test_defaults()?;
 
         let file = File::open(test_file).await?;
         let reader = channel_reader(file).await;

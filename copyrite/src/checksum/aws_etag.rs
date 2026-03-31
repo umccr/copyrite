@@ -77,7 +77,9 @@ pub const fn part_size_position(part_size: u64) -> Option<usize> {
         }
     }
 
-    get_position!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18);
+    get_position!(
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+    );
 
     None
 }
@@ -235,10 +237,10 @@ impl AWSETagCtx {
         }
 
         // Remove the elements after iterating the counter.
-        if let Some(remove_from) = remove_from {
-            if let Some((keep, _)) = part_sizes.split_at_checked(remove_from) {
-                *part_sizes = keep.to_vec();
-            }
+        if let Some(remove_from) = remove_from
+            && let Some((keep, _)) = part_sizes.split_at_checked(remove_from)
+        {
+            *part_sizes = keep.to_vec();
         }
 
         // Add back in whatever is left in the counter to ensure that the following code works
@@ -423,7 +425,9 @@ impl AWSETagCtx {
         match self.part_mode {
             PartMode::PartNumber(part_number) => {
                 if self.file_size.is_none() && self.n_checksums == 0 {
-                    panic!("cannot format part number without the file size and without finalizing the checksum");
+                    panic!(
+                        "cannot format part number without the file size and without finalizing the checksum"
+                    );
                 }
 
                 // Get the file size if it exists or default to the total bytes.

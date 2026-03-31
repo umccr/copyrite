@@ -69,7 +69,7 @@ impl File {
     }
 
     /// Get the reader to the sums file.
-    pub async fn sums_reader(&self) -> Result<impl AsyncRead> {
+    pub async fn sums_reader(&self) -> Result<impl AsyncRead + 'static> {
         let path = SumsFile::format_target_file(&self.file);
         Ok(fs::File::open(&path).await?)
     }
@@ -96,7 +96,7 @@ impl ObjectSums for File {
         Ok(self.get_existing_sums().await?)
     }
 
-    async fn reader(&mut self) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+    async fn reader(&mut self) -> Result<Box<dyn AsyncRead + Unpin + Send + 'static>> {
         Ok(Box::new(self.sums_reader().await?))
     }
 

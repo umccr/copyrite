@@ -6,6 +6,7 @@ use crate::cli::MetadataCopy;
 use crate::error::Error::{CopyError, ParseError};
 use crate::error::{ApiError, Error, Result};
 use crate::io::copy::{CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part};
+use aws_sdk_s3::Client;
 use aws_sdk_s3::operation::get_object_tagging::{GetObjectTaggingError, GetObjectTaggingOutput};
 use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
 use aws_sdk_s3::operation::upload_part::UploadPartOutput;
@@ -13,7 +14,6 @@ use aws_sdk_s3::types::{
     ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart, CopyPartResult, MetadataDirective,
     TaggingDirective,
 };
-use aws_sdk_s3::Client;
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_types::byte_stream::ByteStream;
@@ -470,10 +470,10 @@ impl S3 {
     pub async fn get_object(&self, multi_part: Option<MultiPartOptions>) -> Result<CopyContent> {
         let source = self.get_source()?;
 
-        if let Some(multipart) = &multi_part {
-            if multipart.part_number.is_none() {
-                return Ok(Default::default());
-            }
+        if let Some(multipart) = &multi_part
+            && multipart.part_number.is_none()
+        {
+            return Ok(Default::default());
         }
 
         let result = self

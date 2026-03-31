@@ -1,15 +1,15 @@
 //! The copy command task implementation.
 //!
 
+use crate::checksum::Ctx;
 use crate::checksum::aws_etag::PREFERRED_PART_SIZES;
 use crate::checksum::file::SumsFile;
-use crate::checksum::Ctx;
 use crate::cli::{CopyMode, MetadataCopy};
 use crate::error::Error::CopyError;
 use crate::error::{ApiError, Error, Result};
+use crate::io::Provider;
 use crate::io::copy::{CopyResult, CopyState, MultiPartOptions, ObjectCopy, ObjectCopyBuilder};
 use crate::io::sums::ObjectSumsBuilder;
-use crate::io::Provider;
 use aws_sdk_s3::Client;
 use console::style;
 use futures_util::future::join_all;
@@ -284,26 +284,20 @@ impl CopyTaskBuilder {
             .unwrap_or(DEFAULT_MULTIPART_THRESHOLD);
 
         // If the part size is set, use that.
-        if let Some(part_size) = self.part_size {
-            if size > threshold {
-                return if Self::is_multipart(
-                    size,
-                    part_size,
-                    max_parts,
-                    max_part_size,
-                    min_part_size,
-                ) {
-                    Ok((
-                        self,
-                        CopySettings::new(Some(part_size), additional_ctx, size),
-                    ))
-                } else {
-                    Err(CopyError(format!(
-                        "invalid part size `{}` and threshold `{}` for the object size `{}`",
-                        part_size, threshold, size
-                    )))
-                };
-            }
+        if let Some(part_size) = self.part_size
+            && size > threshold
+        {
+            return if Self::is_multipart(size, part_size, max_parts, max_part_size, min_part_size) {
+                Ok((
+                    self,
+                    CopySettings::new(Some(part_size), additional_ctx, size),
+                ))
+            } else {
+                Err(CopyError(format!(
+                    "invalid part size `{}` and threshold `{}` for the object size `{}`",
+                    part_size, threshold, size
+                )))
+            };
         }
 
         let err_fn = || {
@@ -725,14 +719,14 @@ pub(crate) mod test {
     use crate::io::sums::aws::test::{
         mock_multi_part_etag_only_rule, mock_single_part_etag_only_rule,
     };
-    use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
+    use crate::test::{TEST_FILE_SIZE, TestFileBuilder};
     use anyhow::Result;
+    use aws_sdk_s3::Client;
     use aws_sdk_s3::operation::get_object::GetObjectError;
     use aws_sdk_s3::operation::get_object_tagging::GetObjectTaggingOutput;
     use aws_sdk_s3::operation::head_object::HeadObjectOutput;
     use aws_sdk_s3::types::error::NoSuchKey;
-    use aws_sdk_s3::Client;
-    use aws_smithy_mocks::{mock, mock_client, Rule, RuleMode};
+    use aws_smithy_mocks::{Rule, RuleMode, mock, mock_client};
     use tempfile::tempdir;
     use tokio::fs::File;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -769,7 +763,7 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn copy_settings() -> Result<()> {
-        let test_file = TestFileBuilder::default().generate_test_defaults()?;
+        let test_file = TestFileBuilder::new()?.generate_test_defaults()?;
 
         let builder = CopyTaskBuilder::default()
             .with_concurrency(10)

@@ -5,9 +5,9 @@ use crate::checksum::Ctx;
 use crate::error::Error;
 use crate::error::Error::{CheckError, GenerateError, ParseError};
 use crate::error::Result;
-use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::ObjectSumsBuilder;
-use crate::io::{create_s3_client, default_s3_client, CredentialOverrides, Provider};
+use crate::io::sums::channel::ChannelReader;
+use crate::io::{CredentialOverrides, Provider, create_s3_client, default_s3_client};
 use crate::stats;
 use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
@@ -820,14 +820,12 @@ impl Copy {
                     .with_elapsed(now.elapsed())
                 })?;
 
-            if ui {
-                if let Some(reason) = Option::<ChecksumPair>::from(&check_stats) {
-                    println!(
-                        "  {} {} sums match!",
-                        style("·").bold(),
-                        style(reason.kind).green()
-                    );
-                }
+            if ui && let Some(reason) = Option::<ChecksumPair>::from(&check_stats) {
+                println!(
+                    "  {} {} sums match!",
+                    style("·").bold(),
+                    style(reason.kind).green()
+                );
             }
 
             CopyStats::from_task(result, Some(check_stats), false, sums_mismatch)

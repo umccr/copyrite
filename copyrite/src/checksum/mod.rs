@@ -10,7 +10,7 @@ use crate::checksum::standard::StandardCtx;
 use crate::error::{Error, Result};
 use crate::io::Provider;
 use aws_sdk_s3::types::ChecksumAlgorithm;
-use futures_util::{pin_mut, Stream, StreamExt};
+use futures_util::{Stream, StreamExt, pin_mut};
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Debug, Display, Formatter};
@@ -172,15 +172,15 @@ impl FromStr for Ctx {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::io::sums::channel::test::channel_reader;
     use crate::io::sums::SharedReader;
-    use crate::test::{TestFileBuilder, TEST_FILE_SIZE};
+    use crate::io::sums::channel::test::channel_reader;
+    use crate::test::{TEST_FILE_SIZE, TestFileBuilder};
     use anyhow::Result;
     use tokio::fs::File;
     use tokio::join;
 
     pub(crate) async fn test_checksum(checksum: &str, expected: &str) -> Result<()> {
-        let test_file = TestFileBuilder::default().generate_test_defaults()?;
+        let test_file = TestFileBuilder::new()?.generate_test_defaults()?;
         let mut reader = channel_reader(File::open(test_file).await?).await;
 
         let mut checksum = Ctx::from_str(checksum)?;

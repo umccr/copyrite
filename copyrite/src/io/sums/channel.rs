@@ -2,10 +2,9 @@
 //!
 
 use crate::error::Result;
-use crate::io::sums::SharedReader;
+use crate::io::sums::{ReaderStream, SharedReader};
 use async_stream::stream;
 use futures_util::Stream;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -37,7 +36,7 @@ where
     }
 
     /// Subscribe to the channel returning a stream of elements polled from the sender channel
-    pub fn subscribe_stream(&mut self) -> impl Stream<Item = Result<Arc<[u8]>>> {
+    pub fn subscribe_stream(&mut self) -> impl Stream<Item = Result<Arc<[u8]>>> + 'static {
         let (tx, mut rx) = mpsc::channel(self.capacity);
         self.txs.push(tx);
 
@@ -84,13 +83,13 @@ where
 #[async_trait::async_trait]
 impl<R> SharedReader for ChannelReader<R>
 where
-    R: AsyncRead + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send,
 {
     async fn read_chunks(&mut self) -> Result<u64> {
         self.send_to_end().await
     }
 
-    fn as_stream(&mut self) -> Pin<Box<dyn Stream<Item = Result<Arc<[u8]>>> + Send>> {
+    fn as_stream(&mut self) -> ReaderStream {
         Box::pin(self.subscribe_stream())
     }
 }
@@ -101,12 +100,12 @@ pub(crate) mod test {
     use crate::test::TestFileBuilder;
     use anyhow::Result;
     use futures_util::StreamExt;
-    use rand::RngCore;
+    use rand::Rng;
     use std::io::Cursor;
 
     #[tokio::test]
     async fn test_stream() -> Result<()> {
-        let mut rng = TestFileBuilder::default().with_constant_seed().into_rng();
+        let mut rng = TestFileBuilder::new()?.with_constant_seed().into_rng();
         let mut data = vec![0; 100000];
         rng.fill_bytes(&mut data);
 

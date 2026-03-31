@@ -1,8 +1,8 @@
 [workspace]
 members = ["copyrite"]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 license = "MIT"
-edition = "2021"
+edition = "2024"
 authors = ["Marko Malenic <mmalenic1@gmail.com>"]
