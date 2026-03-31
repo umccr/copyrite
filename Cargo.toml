@@ -6,3 +6,4 @@ resolver = "3"
 license = "MIT"
 edition = "2024"
 authors = ["Marko Malenic <mmalenic1@gmail.com>"]
+rust-version = "1.91.1"
