@@ -1,8 +1,8 @@
 //! Performs the check task to determine if files are identical from .sums files.
 //!
 
-use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
+use crate::checksum::file::{Checksum, SumsFile};
 use crate::error::{ApiError, Error, Result};
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder};
 use crate::stats::{CheckComparison, ChecksumPair};
@@ -421,7 +421,7 @@ impl CheckTask {
         let mut files = BTreeMap::new();
         while let Some((mut key, locations)) = self.objects.0.pop_last() {
             key.0
-                 .0
+                .0
                 .checksums
                 .iter_mut()
                 .for_each(|(_, checksum)| *checksum = Default::default());
@@ -526,7 +526,7 @@ pub(crate) mod test {
     use anyhow::Result;
     use std::collections::BTreeMap;
     use std::path::Path;
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     #[tokio::test]
     async fn test_check() -> Result<()> {
@@ -545,7 +545,7 @@ pub(crate) mod test {
             .objects
             .0
             .into_keys()
-            .map(|key| key.0 .0)
+            .map(|key| key.0.0)
             .collect();
 
         assert_eq!(
@@ -582,7 +582,7 @@ pub(crate) mod test {
             .objects
             .0
             .into_keys()
-            .map(|key| key.0 .0)
+            .map(|key| key.0.0)
             .collect();
 
         assert_eq!(
@@ -619,7 +619,7 @@ pub(crate) mod test {
             .objects
             .0
             .into_keys()
-            .map(|key| key.0 .0)
+            .map(|key| key.0.0)
             .collect();
 
         assert_eq!(
@@ -665,7 +665,7 @@ pub(crate) mod test {
             .objects
             .0
             .into_keys()
-            .map(|key| key.0 .0)
+            .map(|key| key.0.0)
             .collect();
 
         assert_eq!(

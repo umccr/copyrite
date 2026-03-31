@@ -1,7 +1,7 @@
 use copyrite::io::sums::channel::ChannelReader;
 use copyrite::task::generate::GenerateTaskBuilder;
 use copyrite::test::TestFileBuilder;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::path::Path;
 use tokio::fs::File;
@@ -30,7 +30,8 @@ async fn channel_reader(path: &Path) {
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
-    let bench_file = TestFileBuilder::default()
+    let bench_file = TestFileBuilder::new()
+        .unwrap()
         .generate_bench_defaults()
         .unwrap();
 

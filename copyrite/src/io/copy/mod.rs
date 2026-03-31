@@ -7,12 +7,12 @@ use crate::error::Error::CopyError;
 use crate::error::{ApiError, Result};
 use crate::io::copy::aws::S3Builder;
 use crate::io::copy::file::FileBuilder;
-use crate::io::{default_s3_client, Provider};
+use crate::io::{Provider, default_s3_client};
 use aws_sdk_s3::Client;
 use dyn_clone::DynClone;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{empty, AsyncRead};
+use tokio::io::{AsyncRead, empty};
 
 pub mod aws;
 pub mod file;

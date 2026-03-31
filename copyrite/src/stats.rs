@@ -1,8 +1,8 @@
 //! Structs related to output statistics.
 //!
 
-use crate::checksum::file::{Checksum, SumsFile};
 use crate::checksum::Ctx;
+use crate::checksum::file::{Checksum, SumsFile};
 use crate::cli::CopyMode;
 use crate::error::{ApiError, Error};
 use crate::task::check::{CheckTask, CheckTaskError, GroupBy};

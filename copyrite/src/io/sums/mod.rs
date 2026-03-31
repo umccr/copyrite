@@ -5,7 +5,7 @@ use crate::checksum::file::SumsFile;
 use crate::error::{ApiError, Result};
 use crate::io::sums::aws::S3Builder;
 use crate::io::sums::file::FileBuilder;
-use crate::io::{default_s3_client, Provider};
+use crate::io::{Provider, default_s3_client};
 use aws_sdk_s3::Client;
 use dyn_clone::DynClone;
 use futures_util::Stream;

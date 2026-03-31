@@ -1,25 +1,25 @@
 //! AWS checksums and functionality.
 //!
 
+use crate::checksum::Ctx;
 use crate::checksum::aws_etag::{AWSETagCtx, PartMode};
 use crate::checksum::file::Checksum;
 use crate::checksum::file::SumsFile;
 use crate::checksum::standard::StandardCtx;
-use crate::checksum::Ctx;
 use crate::error::Error::ParseError;
 use crate::error::{ApiError, Error, Result};
-use crate::io::sums::ObjectSums;
 use crate::io::Provider;
+use crate::io::sums::ObjectSums;
+use aws_sdk_s3::Client;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::get_object_attributes::GetObjectAttributesOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::{
     ChecksumAlgorithm, ChecksumMode, ChecksumType, ObjectAttributes, ObjectPart,
 };
-use aws_sdk_s3::Client;
 use aws_smithy_types::byte_stream::ByteStream;
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -428,7 +428,7 @@ impl S3 {
     }
 
     /// Get the object and convert it into an `AsyncRead`.
-    pub async fn object_reader(&self) -> Result<impl AsyncRead> {
+    pub async fn object_reader(&self) -> Result<impl AsyncRead + 'static> {
         Ok(Box::new(
             self.client
                 .get_object()
@@ -477,7 +477,7 @@ impl ObjectSums for S3 {
         }
     }
 
-    async fn reader(&mut self) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
+    async fn reader(&mut self) -> Result<Box<dyn AsyncRead + Unpin + Send + 'static>> {
         Ok(Box::new(self.object_reader().await?))
     }
 
@@ -507,7 +507,7 @@ pub(crate) mod test {
     use aws_sdk_s3::operation::head_object::builders::HeadObjectOutputBuilder;
     use aws_sdk_s3::types;
     use aws_sdk_s3::types::GetObjectAttributesParts;
-    use aws_smithy_mocks::{mock, mock_client, Rule, RuleMode};
+    use aws_smithy_mocks::{Rule, RuleMode, mock, mock_client};
 
     const EXPECTED_SHA256_SUM: &str = "Kf+9U8vkMXmrL6YtvZWMDsMLNAq1DOfHheinpLR3Hjk="; // pragma: allowlist secret
 
@@ -596,10 +596,12 @@ pub(crate) mod test {
         println!("{}", serde_json::to_string_pretty(&result).unwrap());
         println!("{}", serde_json::to_string_pretty(&expected).unwrap());
 
-        assert!(result
-            .into_iter()
-            .zip(expected)
-            .all(|(a, b)| a.is_same(&b).is_some()));
+        assert!(
+            result
+                .into_iter()
+                .zip(expected)
+                .all(|(a, b)| a.is_same(&b).is_some())
+        );
     }
 
     #[tokio::test]
