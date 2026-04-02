@@ -31,7 +31,8 @@ pub struct S3Builder {
     client: Option<Arc<Client>>,
     bucket: Option<String>,
     key: Option<String>,
-    avoid_get_object_attributes: bool,
+    no_get_object_attributes: bool,
+    no_checksum_mode: bool,
 }
 
 impl S3Builder {
@@ -54,12 +55,18 @@ impl S3Builder {
     }
 
     /// Avoid `GetObjectAttributes` calls.
-    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
-        self.avoid_get_object_attributes = avoid_get_object_attributes;
+    pub fn with_no_get_object_attributes(mut self, no_get_object_attributes: bool) -> Self {
+        self.no_get_object_attributes = no_get_object_attributes;
         self
     }
 
-    fn get_components(self) -> Result<(Arc<Client>, String, String, bool)> {
+    /// Disable checksum mode on API calls.
+    pub fn with_no_checksum_mode(mut self, no_checksum_mode: bool) -> Self {
+        self.no_checksum_mode = no_checksum_mode;
+        self
+    }
+
+    fn get_components(self) -> Result<(Arc<Client>, String, String, bool, bool)> {
         let error_fn =
             || ParseError("client, bucket and key are required in `S3Builder`".to_string());
 
@@ -67,7 +74,8 @@ impl S3Builder {
             self.client.ok_or_else(error_fn)?,
             self.bucket.ok_or_else(error_fn)?,
             self.key.ok_or_else(error_fn)?,
-            self.avoid_get_object_attributes,
+            self.no_get_object_attributes,
+            self.no_checksum_mode,
         ))
     }
 
@@ -77,11 +85,23 @@ impl S3Builder {
     }
 }
 
-impl From<(Arc<Client>, String, String, bool)> for S3 {
+impl From<(Arc<Client>, String, String, bool, bool)> for S3 {
     fn from(
-        (client, bucket, key, avoid_get_object_attributes): (Arc<Client>, String, String, bool),
+        (client, bucket, key, no_get_object_attributes, no_checksum_mode): (
+            Arc<Client>,
+            String,
+            String,
+            bool,
+            bool,
+        ),
     ) -> Self {
-        Self::new(client, bucket, key, avoid_get_object_attributes)
+        Self::new(
+            client,
+            bucket,
+            key,
+            no_get_object_attributes,
+            no_checksum_mode,
+        )
     }
 }
 
@@ -94,7 +114,8 @@ pub struct S3 {
     get_object_attributes: Option<GetObjectAttributesOutput>,
     head_object: HashMap<Option<u64>, HeadObjectOutput>,
     api_errors: HashSet<ApiError>,
-    avoid_get_object_attributes: bool,
+    no_get_object_attributes: bool,
+    no_checksum_mode: bool,
 }
 
 impl S3 {
@@ -103,7 +124,8 @@ impl S3 {
         client: Arc<Client>,
         bucket: String,
         key: String,
-        avoid_get_object_attributes: bool,
+        no_get_object_attributes: bool,
+        no_checksum_mode: bool,
     ) -> S3 {
         Self {
             client,
@@ -112,7 +134,8 @@ impl S3 {
             get_object_attributes: None,
             head_object: HashMap::new(),
             api_errors: HashSet::new(),
-            avoid_get_object_attributes,
+            no_get_object_attributes,
+            no_checksum_mode,
         }
     }
 
@@ -141,7 +164,7 @@ impl S3 {
     /// Get the `GetObjectAttributes` output for the target file. This caches the result in
     /// memory so that subsequent calls do not repeat the query.
     pub async fn get_object_attributes(&mut self) -> Option<&GetObjectAttributesOutput> {
-        if self.avoid_get_object_attributes {
+        if self.no_get_object_attributes {
             return None;
         }
 
@@ -177,15 +200,16 @@ impl S3 {
             return Ok(&self.head_object[&part_number]);
         }
 
-        let head_object = self
+        let mut head = self
             .client
             .head_object()
             .bucket(&self.bucket)
             .key(SumsFile::format_target_file(&self.key))
-            .set_part_number(part_number.map(i32::try_from).transpose()?)
-            .checksum_mode(ChecksumMode::Enabled)
-            .send()
-            .await?;
+            .set_part_number(part_number.map(i32::try_from).transpose()?);
+        if !self.no_checksum_mode {
+            head = head.checksum_mode(ChecksumMode::Enabled);
+        }
+        let head_object = head.send().await?;
 
         Ok(self.head_object.entry(part_number).or_insert(head_object))
     }

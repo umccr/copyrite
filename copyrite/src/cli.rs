@@ -50,6 +50,9 @@ pub struct Command {
     /// Options related to credentials.
     #[command(flatten)]
     pub credentials: Credentials,
+    /// Options related to S3-compatible storage compatibility.
+    #[command(flatten)]
+    pub compatibility: Compatibility,
 }
 
 impl Command {
@@ -100,7 +103,11 @@ impl Command {
     /// Execute the command from the args.
     pub async fn execute(self) -> Result<()> {
         let now = Instant::now();
-        let client = Arc::new(self.credentials.source_client().await?);
+        let client = Arc::new(
+            self.credentials
+                .source_client(&self.compatibility)
+                .await?,
+        );
 
         let pretty_json = self.output.pretty_json;
         let write_sums_file = self.output.write_sums_file;
@@ -109,7 +116,12 @@ impl Command {
         match self.commands {
             Subcommands::Generate(generate_args) => {
                 let stats = generate_args
-                    .generate(self.optimization, &self.credentials, vec![client], true)
+                    .generate(
+                        self.optimization,
+                        &self.compatibility,
+                        vec![client],
+                        true,
+                    )
                     .await
                     .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
                 if let Some(sums) = stats.sums {
@@ -123,7 +135,7 @@ impl Command {
                 let output = check_args
                     .check(
                         self.optimization,
-                        &self.credentials,
+                        &self.compatibility,
                         write_sums_file,
                         false,
                         vec![client],
@@ -134,13 +146,18 @@ impl Command {
                 Self::print_stats(&output, pretty_json, ui)?;
             }
             Subcommands::Copy(copy_args) => {
-                let destination_client = Arc::new(self.credentials.destination_client().await?);
+                let destination_client = Arc::new(
+                    self.credentials
+                        .destination_client(&self.compatibility)
+                        .await?,
+                );
 
                 let output = copy_args
                     .copy(
                         client,
                         destination_client,
                         self.credentials,
+                        self.compatibility,
                         self.optimization,
                         write_sums_file,
                         ui,
@@ -242,7 +259,7 @@ impl Generate {
     pub async fn generate(
         self,
         optimization: Optimization,
-        credentials: &Credentials,
+        compatibility: &Compatibility,
         mut clients: Vec<Arc<Client>>,
         write_sums_file: bool,
     ) -> stats::Result<GenerateStats> {
@@ -250,7 +267,8 @@ impl Generate {
             let reader = ChannelReader::new(stdin(), optimization.channel_capacity);
 
             let output = GenerateTaskBuilder::default()
-                .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
+                .with_no_get_object_attributes(compatibility.no_get_object_attributes())
+                .with_no_checksum_mode(compatibility.no_checksum_mode())
                 .with_overwrite(self.force_overwrite)
                 .with_verify(self.verify)
                 .with_context(self.checksum)
@@ -279,7 +297,8 @@ impl Generate {
                 let (ctxs, group_by) = Check::comparable_check(
                     self.input.clone(),
                     clients.clone(),
-                    credentials.avoid_get_object_attributes,
+                    compatibility.no_get_object_attributes(),
+                    compatibility.no_checksum_mode(),
                 )
                 .await?;
                 let (objects, compared, updated, api_errors) = ctxs.into_inner();
@@ -308,9 +327,10 @@ impl Generate {
                     {
                         let (input, ctx) = ctx.into_inner();
                         let task = GenerateTaskBuilder::default()
-                            .with_avoid_get_object_attributes(
-                                credentials.avoid_get_object_attributes,
+                            .with_no_get_object_attributes(
+                                compatibility.no_get_object_attributes(),
                             )
+                            .with_no_checksum_mode(compatibility.no_checksum_mode())
                             .with_overwrite(self.force_overwrite)
                             .with_verify(self.verify)
                             .with_input_file_name(input.to_string())
@@ -341,7 +361,8 @@ impl Generate {
 
             for (input, client) in self.input.into_iter().zip(clients.into_iter().cycle()) {
                 let task = GenerateTaskBuilder::default()
-                    .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
+                    .with_no_get_object_attributes(compatibility.no_get_object_attributes())
+                    .with_no_checksum_mode(compatibility.no_checksum_mode())
                     .with_overwrite(self.force_overwrite)
                     .with_verify(self.verify)
                     .with_input_file_name(input.to_string())
@@ -401,13 +422,15 @@ impl Check {
     pub async fn comparable_check(
         input: Vec<String>,
         clients: Vec<Arc<Client>>,
-        avoid_get_object_attributes: bool,
+        no_get_object_attributes: bool,
+        no_checksum_mode: bool,
     ) -> Result<(CheckTask, GroupBy)> {
         Ok((
             CheckTaskBuilder::default()
                 .with_input_files(input)
                 .with_group_by(GroupBy::Comparability)
-                .with_avoid_get_object_attributes(avoid_get_object_attributes)
+                .with_no_get_object_attributes(no_get_object_attributes)
+                .with_no_checksum_mode(no_checksum_mode)
                 .with_clients(clients)
                 .build()
                 .await?
@@ -430,7 +453,7 @@ impl Check {
     pub async fn check(
         self,
         optimization: Optimization,
-        credentials: &Credentials,
+        compatibility: &Compatibility,
         write_sums_file: bool,
         verify: bool,
         clients: Vec<Arc<Client>>,
@@ -440,7 +463,8 @@ impl Check {
 
         let mut builder = CheckTaskBuilder::default()
             .with_group_by(group_by)
-            .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
+            .with_no_get_object_attributes(compatibility.no_get_object_attributes())
+            .with_no_checksum_mode(compatibility.no_checksum_mode())
             .with_input_files(self.input.clone())
             .with_update(self.update)
             .with_clients(clients.clone());
@@ -449,7 +473,8 @@ impl Check {
             let (ctxs, _) = Check::comparable_check(
                 self.input.clone(),
                 clients.clone(),
-                credentials.avoid_get_object_attributes,
+                compatibility.no_get_object_attributes(),
+                compatibility.no_checksum_mode(),
             )
             .await?;
             let checksum = Check::generate_sums(ctxs);
@@ -461,7 +486,7 @@ impl Check {
                 force_overwrite: false,
                 verify,
             }
-            .generate(optimization, credentials, clients.clone(), write_sums_file)
+            .generate(optimization, compatibility, clients.clone(), write_sums_file)
             .await
             .map_err(|stats| CheckStats::from_generate_task(group_by, *stats))?;
             let sums = stats
@@ -643,7 +668,7 @@ impl Copy {
         source_client: Arc<Client>,
         destination_client: Arc<Client>,
         optimization: Optimization,
-        credentials: &Credentials,
+        compatibility: &Compatibility,
         verify: bool,
         write_sums_file: bool,
     ) -> stats::Result<CheckStats> {
@@ -657,7 +682,7 @@ impl Copy {
         }
         .check(
             optimization,
-            credentials,
+            compatibility,
             write_sums_file,
             verify,
             vec![source_client, destination_client],
@@ -673,6 +698,7 @@ impl Copy {
         source_client: Arc<Client>,
         destination_client: Arc<Client>,
         credentials: Credentials,
+        compatibility: Compatibility,
         optimization: Optimization,
         write_sums_file: bool,
         ui: bool,
@@ -687,8 +713,9 @@ impl Copy {
 
             // Check if it exists in the first place.
             let file_size = ObjectSumsBuilder::default()
-                .set_client(Some(source_client.clone()))
-                .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
+                .set_client(Some(destination_client.clone()))
+                .with_no_get_object_attributes(compatibility.no_get_object_attributes())
+                .with_no_checksum_mode(compatibility.no_checksum_mode())
                 .build(self.destination.to_string())
                 .await?
                 .file_size()
@@ -704,7 +731,7 @@ impl Copy {
                         source_client.clone(),
                         destination_client.clone(),
                         optimization.clone(),
-                        &credentials,
+                        &compatibility,
                         false,
                         write_sums_file,
                     )
@@ -779,7 +806,8 @@ impl Copy {
             .with_metadata_mode(self.metadata_mode)
             .with_tag_mode(self.tag_mode)
             .with_multipart_threshold(self.multipart_threshold)
-            .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
+            .with_no_get_object_attributes(compatibility.no_get_object_attributes())
+            .with_no_checksum_mode(compatibility.no_checksum_mode())
             .with_concurrency(self.concurrency)
             .with_part_size(self.part_size)
             .with_ui(ui)
@@ -803,7 +831,7 @@ impl Copy {
                     source_client,
                     destination_client,
                     optimization,
-                    &credentials,
+                    &compatibility,
                     sums_mismatch,
                     write_sums_file,
                 )
@@ -959,6 +987,79 @@ pub struct Output {
     pub write_sums_file: bool,
 }
 
+/// Options related to increasing compatibility with S3-compatible storage. These options are
+/// useful when using an S3-compatible endpoint that does not support all S3 features.
+#[derive(Args, Debug, Clone)]
+#[group(required = false)]
+#[command(next_help_heading = "Compatibility")]
+pub struct Compatibility {
+    /// Enable all compatibility options.
+    ///
+    /// This is a convenience flag that enables `--force-path-style`,
+    /// `--no-get-object-attributes`, and `--no-checksum-mode`.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_S3_COMPATIBLE",
+        hide_short_help = true
+    )]
+    pub s3_compatible: bool,
+    /// Use path-style addressing for S3 endpoints.
+    ///
+    /// By default, the S3 client uses virtual-hosted-style addressing. Some S3-compatible
+    /// endpoints such as Ceph require path-style addressing instead.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_FORCE_PATH_STYLE",
+        hide_short_help = true
+    )]
+    pub force_path_style: bool,
+    /// Do not use `GetObjectAttributes` calls when determining sums.
+    ///
+    /// `HeadObject` will be used as a fallback. This is an option because some S3-compatible
+    /// endpoints do not support `GetObjectAttributes`. If available, `GetObjectAttributes` is
+    /// preferred over `HeadObject` because it only requires a single call rather than a call for
+    /// each part.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_NO_GET_OBJECT_ATTRIBUTES",
+        hide_short_help = true
+    )]
+    pub no_get_object_attributes: bool,
+    /// Do not use `ChecksumMode::Enabled` on `HeadObject` calls.
+    ///
+    /// Some S3-compatible endpoints such as Ceph do not support the additional checksums on API
+    /// calls like `HeadObject`, which this option disables. This will also force `copyrite` to
+    /// only use `ETag`s for verification, and not additional checksums.
+    /// See https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_NO_CHECKSUM_MODE",
+        hide_short_help = true
+    )]
+    pub no_checksum_mode: bool,
+}
+
+impl Compatibility {
+    /// Whether to force path-style addressing.
+    pub fn force_path_style(&self) -> bool {
+        self.s3_compatible || self.force_path_style
+    }
+
+    /// Whether to avoid `GetObjectAttributes` calls.
+    pub fn no_get_object_attributes(&self) -> bool {
+        self.s3_compatible || self.no_get_object_attributes
+    }
+
+    /// Whether to disable checksum mode.
+    pub fn no_checksum_mode(&self) -> bool {
+        self.s3_compatible || self.no_checksum_mode
+    }
+}
+
 /// Options related to credentials. Options prefixed with `source_` affect `check`, `generate` and
 /// the source of a `copy` command. These options also have an alias without the prefix as they are
 /// used in all commands. Options prefixed with `destination_` only affect the destination of a
@@ -1077,19 +1178,6 @@ pub struct Credentials {
         hide_short_help = true
     )]
     pub destination_endpoint_url: Option<String>,
-    /// Avoid `GetObjectAttributes` calls when determining sums.
-    ///
-    /// `HeadObject` will be used as a fallback. This is an option because some S3-compatible
-    /// endpoints do not support `GetObjectAttributes`. If available, `GetObjectAttributes` is
-    /// preferred over `HeadObject` because it only requires a single call rather than a call for
-    /// each part.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_AVOID_GET_OBJECT_ATTRIBUTES",
-        hide_short_help = true
-    )]
-    pub avoid_get_object_attributes: bool,
     /// The source AWS access key ID. Overrides the value from the selected credential provider.
     #[arg(
         global = true,
@@ -1149,7 +1237,7 @@ pub struct Credentials {
 
 impl Credentials {
     /// Construct the source client from the credentials.
-    pub async fn source_client(&self) -> Result<Client> {
+    pub async fn source_client(&self, compatibility: &Compatibility) -> Result<Client> {
         let overrides = CredentialOverrides::new(
             self.source_access_key_id.clone(),
             self.source_secret_access_key.clone(),
@@ -1162,12 +1250,13 @@ impl Credentials {
             self.source_endpoint_url.as_deref(),
             self.source_secret.as_deref(),
             overrides,
+            compatibility.force_path_style(),
         )
         .await
     }
 
     /// Construct the destination client from the credentials.
-    pub async fn destination_client(&self) -> Result<Client> {
+    pub async fn destination_client(&self, compatibility: &Compatibility) -> Result<Client> {
         let overrides = CredentialOverrides::new(
             self.destination_access_key_id.clone(),
             self.destination_secret_access_key.clone(),
@@ -1180,6 +1269,7 @@ impl Credentials {
             self.destination_endpoint_url.as_deref(),
             self.destination_secret.as_deref(),
             overrides,
+            compatibility.force_path_style(),
         )
         .await
     }

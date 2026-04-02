@@ -258,6 +258,7 @@ pub async fn create_s3_client(
     endpoint_url: Option<&str>,
     secret: Option<&str>,
     overrides: CredentialOverrides,
+    force_path_style: bool,
 ) -> Result<Client> {
     let mut loader = aws_config::defaults(BehaviorVersion::latest());
 
@@ -303,9 +304,12 @@ pub async fn create_s3_client(
         let merged = overrides.merge_with(base.as_ref())?;
         config::Builder::from(&sdk_config)
             .credentials_provider(merged)
+            .force_path_style(force_path_style)
             .build()
     } else {
-        config::Builder::from(&sdk_config).build()
+        config::Builder::from(&sdk_config)
+            .force_path_style(force_path_style)
+            .build()
     };
 
     Ok(Client::from_conf(s3_config))
@@ -325,6 +329,7 @@ pub async fn default_s3_client() -> Result<Client> {
         None,
         None,
         no_overrides,
+        false,
     )
     .await
 }

@@ -62,7 +62,8 @@ dyn_clone::clone_trait_object!(ObjectSums);
 #[derive(Debug, Default)]
 pub struct ObjectSumsBuilder {
     client: Option<Arc<Client>>,
-    avoid_get_object_attributes: bool,
+    no_get_object_attributes: bool,
+    no_checksum_mode: bool,
 }
 
 impl ObjectSumsBuilder {
@@ -81,7 +82,8 @@ impl ObjectSumsBuilder {
                         .with_key(key)
                         .with_bucket(bucket)
                         .with_client(client)
-                        .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
+                        .with_no_get_object_attributes(self.no_get_object_attributes)
+                        .with_no_checksum_mode(self.no_checksum_mode)
                         .build()?,
                 ))
             }
@@ -95,8 +97,14 @@ impl ObjectSumsBuilder {
     }
 
     /// Avoid `GetObjectAttributes` calls.
-    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
-        self.avoid_get_object_attributes = avoid_get_object_attributes;
+    pub fn with_no_get_object_attributes(mut self, no_get_object_attributes: bool) -> Self {
+        self.no_get_object_attributes = no_get_object_attributes;
+        self
+    }
+
+    /// Disable checksums mode on API calls.
+    pub fn with_no_checksum_mode(mut self, no_checksum_mode: bool) -> Self {
+        self.no_checksum_mode = no_checksum_mode;
         self
     }
 }

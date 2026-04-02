@@ -74,6 +74,7 @@ async fn copy_test() -> Result<()> {
         config.endpoint_url.as_deref(),
         None,
         no_overrides,
+        false,
     )
     .await?;
 

@@ -25,7 +25,8 @@ pub struct CheckTaskBuilder {
     group_by: GroupBy,
     update: bool,
     clients: Vec<Option<Arc<Client>>>,
-    avoid_get_object_attributes: bool,
+    no_get_object_attributes: bool,
+    no_checksum_mode: bool,
 }
 
 impl Default for CheckTaskBuilder {
@@ -37,7 +38,8 @@ impl Default for CheckTaskBuilder {
             update: Default::default(),
             // Ensure at least one element in the vector to repeat.
             clients: vec![None],
-            avoid_get_object_attributes: Default::default(),
+            no_get_object_attributes: Default::default(),
+            no_checksum_mode: Default::default(),
         }
     }
 }
@@ -80,8 +82,14 @@ impl CheckTaskBuilder {
     }
 
     /// Avoid `GetObjectAttributes` calls.
-    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
-        self.avoid_get_object_attributes = avoid_get_object_attributes;
+    pub fn with_no_get_object_attributes(mut self, no_get_object_attributes: bool) -> Self {
+        self.no_get_object_attributes = no_get_object_attributes;
+        self
+    }
+
+    /// Disable checksum mode on API calls.
+    pub fn with_no_checksum_mode(mut self, no_checksum_mode: bool) -> Self {
+        self.no_checksum_mode = no_checksum_mode;
         self
     }
 
@@ -103,7 +111,8 @@ impl CheckTaskBuilder {
                 .zip(self.clients.into_iter().cycle())
                 .map(|(file, client)| async move {
                     let mut sums = ObjectSumsBuilder::default()
-                        .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
+                        .with_no_get_object_attributes(self.no_get_object_attributes)
+                        .with_no_checksum_mode(self.no_checksum_mode)
                         .set_client(client)
                         .build(file.to_string())
                         .await?;
@@ -148,6 +157,8 @@ impl CheckTaskBuilder {
             objects: CheckObjects(objects),
             group_by,
             update: self.update,
+            no_get_object_attributes: self.no_get_object_attributes,
+            no_checksum_mode: self.no_checksum_mode,
             recoverable_errors: errors,
             ..Default::default()
         })
@@ -203,14 +214,16 @@ impl State {
         &self,
         sums: &SumsFile,
         client: Option<Arc<Client>>,
-        avoid_get_object_attributes: bool,
+        no_get_object_attributes: bool,
+        no_checksum_mode: bool,
     ) -> Result<()> {
         match self {
             State::ObjectSums(object) => object.write_sums_file(sums).await,
             State::ExistingSums((location, _)) => {
                 ObjectSumsBuilder::default()
                     .set_client(client)
-                    .with_avoid_get_object_attributes(avoid_get_object_attributes)
+                    .with_no_get_object_attributes(no_get_object_attributes)
+                    .with_no_checksum_mode(no_checksum_mode)
                     .build(location.to_string())
                     .await?
                     .write_sums_file(sums)
@@ -344,7 +357,8 @@ pub struct CheckTask {
     compared_directly: Vec<CheckComparison>,
     updated: Vec<String>,
     client: Option<Arc<Client>>,
-    avoid_get_object_attributes: bool,
+    no_get_object_attributes: bool,
+    no_checksum_mode: bool,
     recoverable_errors: HashSet<ApiError>,
 }
 
@@ -432,7 +446,8 @@ impl CheckTask {
 
     async fn do_check(&mut self) -> Result<()> {
         let update = self.update && matches!(self.group_by, GroupBy::Equality);
-        let avoid_get_object_attributes = self.avoid_get_object_attributes;
+        let no_get_object_attributes = self.no_get_object_attributes;
+        let no_checksum_mode = self.no_checksum_mode;
         let client = self.client.clone();
         match self.group_by {
             GroupBy::Equality => self.merge_same().await,
@@ -449,7 +464,12 @@ impl CheckTask {
                     self.recoverable_errors.extend(location.api_errors());
                     if current.as_ref() != Some(file) {
                         location
-                            .write_sums_file(file, client.clone(), avoid_get_object_attributes)
+                            .write_sums_file(
+                                file,
+                                client.clone(),
+                                no_get_object_attributes,
+                                no_checksum_mode,
+                            )
                             .await?;
                         updated_sums.push(location.location());
                     }
