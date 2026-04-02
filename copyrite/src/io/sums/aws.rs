@@ -306,6 +306,24 @@ impl S3 {
             part_sums.push(Some(part_size));
         }
 
+        let file_size = self
+            .head_object(None)
+            .await?
+            .content_length()
+            .map(u64::try_from)
+            .transpose()?;
+        // Some S3-compatible implementations (e.g. Ceph) return the full object size
+        // for each part query instead of the individual part size, unlike the official
+        // S3 implementation. Check if this is occurring and fall-back to computing
+        // based on part number if so.
+        if total_parts > 1
+            && part_sums
+                .iter()
+                .all(|part| *part == file_size)
+        {
+            return Ok(None);
+        }
+
         Ok(Some(part_sums))
     }
 
