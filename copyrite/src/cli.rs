@@ -5,6 +5,7 @@ use crate::checksum::Ctx;
 use crate::error::Error;
 use crate::error::Error::{CheckError, GenerateError, ParseError};
 use crate::error::Result;
+use crate::io::S3Client;
 use crate::io::sums::ObjectSumsBuilder;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::{CredentialOverrides, Provider, create_s3_client, default_s3_client};
@@ -13,7 +14,6 @@ use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::CopyTaskBuilder;
 use crate::task::generate::{GenerateTaskBuilder, SumCtxPairs};
-use aws_sdk_s3::Client;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use console::style;
 use humantime::Duration;
@@ -97,14 +97,12 @@ impl Command {
             }
         }
 
-        // Source/destination-prefixed credential options are only valid for the `copy` command.
         if !matches!(args.commands, Subcommands::Copy(_))
-            && args.credentials.has_prefixed_options()
+            && (args.credentials.has_prefixed_options()
+                || args.compatibility.has_prefixed_options())
         {
             return Err(ParseError(
-                "source and destination credential options are only available for the `copy` \
-                 command; use the unprefixed versions instead (e.g. `--credential-provider` \
-                 instead of `--source-credential-provider`)"
+                "source and destination options are only available for the `copy` command, use the unprefixed versions instead (e.g. `--credential-provider`)"
                     .to_string(),
             ));
         }
@@ -115,11 +113,9 @@ impl Command {
     /// Execute the command from the args.
     pub async fn execute(self) -> Result<()> {
         let now = Instant::now();
-        let client = Arc::new(
-            self.credentials
-                .source_client(&self.compatibility)
-                .await?,
-        );
+        let client = self.credentials
+            .source_client(&self.compatibility)
+            .await?;
 
         let pretty_json = self.output.pretty_json;
         let write_sums_file = self.output.write_sums_file;
@@ -130,7 +126,6 @@ impl Command {
                 let stats = generate_args
                     .generate(
                         self.optimization,
-                        &self.compatibility,
                         vec![client],
                         true,
                     )
@@ -147,7 +142,6 @@ impl Command {
                 let output = check_args
                     .check(
                         self.optimization,
-                        &self.compatibility,
                         write_sums_file,
                         false,
                         vec![client],
@@ -158,18 +152,15 @@ impl Command {
                 Self::print_stats(&output, pretty_json, ui)?;
             }
             Subcommands::Copy(copy_args) => {
-                let destination_client = Arc::new(
-                    self.credentials
-                        .destination_client(&self.compatibility)
-                        .await?,
-                );
+                let destination_client = self.credentials
+                    .destination_client(&self.compatibility)
+                    .await?;
 
                 let output = copy_args
                     .copy(
                         client,
                         destination_client,
                         self.credentials,
-                        self.compatibility,
                         self.optimization,
                         write_sums_file,
                         ui,
@@ -271,16 +262,13 @@ impl Generate {
     pub async fn generate(
         self,
         optimization: Optimization,
-        compatibility: &Compatibility,
-        mut clients: Vec<Arc<Client>>,
+        mut clients: Vec<S3Client>,
         write_sums_file: bool,
     ) -> stats::Result<GenerateStats> {
         if self.input[0] == "-" {
             let reader = ChannelReader::new(stdin(), optimization.channel_capacity);
 
             let output = GenerateTaskBuilder::default()
-                .with_no_get_object_attributes(compatibility.no_get_object_attributes())
-                .with_no_checksum_mode(compatibility.no_checksum_mode())
                 .with_overwrite(self.force_overwrite)
                 .with_verify(self.verify)
                 .with_context(self.checksum)
@@ -309,8 +297,6 @@ impl Generate {
                 let (ctxs, group_by) = Check::comparable_check(
                     self.input.clone(),
                     clients.clone(),
-                    compatibility.no_get_object_attributes(),
-                    compatibility.no_checksum_mode(),
                 )
                 .await?;
                 let (objects, compared, updated, api_errors) = ctxs.into_inner();
@@ -327,7 +313,7 @@ impl Generate {
                 );
 
                 if clients.is_empty() {
-                    clients = vec![Arc::new(default_s3_client().await?)];
+                    clients = vec![S3Client::new(Arc::new(default_s3_client().await?), false, false)];
                 }
 
                 let ctxs = SumCtxPairs::from_comparable(objects)?;
@@ -339,10 +325,6 @@ impl Generate {
                     {
                         let (input, ctx) = ctx.into_inner();
                         let task = GenerateTaskBuilder::default()
-                            .with_no_get_object_attributes(
-                                compatibility.no_get_object_attributes(),
-                            )
-                            .with_no_checksum_mode(compatibility.no_checksum_mode())
                             .with_overwrite(self.force_overwrite)
                             .with_verify(self.verify)
                             .with_input_file_name(input.to_string())
@@ -373,8 +355,6 @@ impl Generate {
 
             for (input, client) in self.input.into_iter().zip(clients.into_iter().cycle()) {
                 let task = GenerateTaskBuilder::default()
-                    .with_no_get_object_attributes(compatibility.no_get_object_attributes())
-                    .with_no_checksum_mode(compatibility.no_checksum_mode())
                     .with_overwrite(self.force_overwrite)
                     .with_verify(self.verify)
                     .with_input_file_name(input.to_string())
@@ -433,16 +413,12 @@ impl Check {
     /// Perform a check for comparability on the input files.
     pub async fn comparable_check(
         input: Vec<String>,
-        clients: Vec<Arc<Client>>,
-        no_get_object_attributes: bool,
-        no_checksum_mode: bool,
+        clients: Vec<S3Client>,
     ) -> Result<(CheckTask, GroupBy)> {
         Ok((
             CheckTaskBuilder::default()
                 .with_input_files(input)
                 .with_group_by(GroupBy::Comparability)
-                .with_no_get_object_attributes(no_get_object_attributes)
-                .with_no_checksum_mode(no_checksum_mode)
                 .with_clients(clients)
                 .build()
                 .await?
@@ -465,18 +441,15 @@ impl Check {
     pub async fn check(
         self,
         optimization: Optimization,
-        compatibility: &Compatibility,
         write_sums_file: bool,
         verify: bool,
-        clients: Vec<Arc<Client>>,
+        clients: Vec<S3Client>,
     ) -> stats::Result<CheckStats> {
         let now = Instant::now();
         let group_by = self.group_by;
 
         let mut builder = CheckTaskBuilder::default()
             .with_group_by(group_by)
-            .with_no_get_object_attributes(compatibility.no_get_object_attributes())
-            .with_no_checksum_mode(compatibility.no_checksum_mode())
             .with_input_files(self.input.clone())
             .with_update(self.update)
             .with_clients(clients.clone());
@@ -485,8 +458,6 @@ impl Check {
             let (ctxs, _) = Check::comparable_check(
                 self.input.clone(),
                 clients.clone(),
-                compatibility.no_get_object_attributes(),
-                compatibility.no_checksum_mode(),
             )
             .await?;
             let checksum = Check::generate_sums(ctxs);
@@ -498,7 +469,7 @@ impl Check {
                 force_overwrite: false,
                 verify,
             }
-            .generate(optimization, compatibility, clients.clone(), write_sums_file)
+            .generate(optimization, clients.clone(), write_sums_file)
             .await
             .map_err(|stats| CheckStats::from_generate_task(group_by, *stats))?;
             let sums = stats
@@ -677,10 +648,9 @@ pub struct Copy {
 impl Copy {
     pub async fn copy_check(
         &self,
-        source_client: Arc<Client>,
-        destination_client: Arc<Client>,
+        source_client: S3Client,
+        destination_client: S3Client,
         optimization: Optimization,
-        compatibility: &Compatibility,
         verify: bool,
         write_sums_file: bool,
     ) -> stats::Result<CheckStats> {
@@ -694,7 +664,6 @@ impl Copy {
         }
         .check(
             optimization,
-            compatibility,
             write_sums_file,
             verify,
             vec![source_client, destination_client],
@@ -707,10 +676,9 @@ impl Copy {
     /// Perform the copy sub command from the args.
     pub async fn copy(
         self,
-        source_client: Arc<Client>,
-        destination_client: Arc<Client>,
+        source_client: S3Client,
+        destination_client: S3Client,
         credentials: Credentials,
-        compatibility: Compatibility,
         optimization: Optimization,
         write_sums_file: bool,
         ui: bool,
@@ -726,8 +694,6 @@ impl Copy {
             // Check if it exists in the first place.
             let file_size = ObjectSumsBuilder::default()
                 .set_client(Some(destination_client.clone()))
-                .with_no_get_object_attributes(compatibility.no_get_object_attributes())
-                .with_no_checksum_mode(compatibility.no_checksum_mode())
                 .build(self.destination.to_string())
                 .await?
                 .file_size()
@@ -743,7 +709,6 @@ impl Copy {
                         source_client.clone(),
                         destination_client.clone(),
                         optimization.clone(),
-                        &compatibility,
                         false,
                         write_sums_file,
                     )
@@ -818,8 +783,6 @@ impl Copy {
             .with_metadata_mode(self.metadata_mode)
             .with_tag_mode(self.tag_mode)
             .with_multipart_threshold(self.multipart_threshold)
-            .with_no_get_object_attributes(compatibility.no_get_object_attributes())
-            .with_no_checksum_mode(compatibility.no_checksum_mode())
             .with_concurrency(self.concurrency)
             .with_part_size(self.part_size)
             .with_ui(ui)
@@ -843,7 +806,6 @@ impl Copy {
                     source_client,
                     destination_client,
                     optimization,
-                    &compatibility,
                     sums_mismatch,
                     write_sums_file,
                 )
@@ -999,8 +961,11 @@ pub struct Output {
     pub write_sums_file: bool,
 }
 
-/// Options related to increasing compatibility with S3-compatible storage. These options are
-/// useful when using an S3-compatible endpoint that does not support all S3 features.
+/// Options related to increasing compatibility with S3-compatible storage. For
+/// `copy`, options can be prefixed with `source_` or `destination_` to target one side.
+/// `generate` and `check` only support the unprefixed version of options. Prefixed
+/// options enable additional compatibility for the side, and unprefixed options enable
+/// it for both sides.
 #[derive(Args, Debug, Clone)]
 #[group(required = false)]
 #[command(next_help_heading = "Compatibility")]
@@ -1009,6 +974,12 @@ pub struct Compatibility {
     ///
     /// This is a convenience flag that enables `--force-path-style`,
     /// `--no-get-object-attributes`, and `--no-checksum-mode`.
+    ///
+    /// For the copy command, each compatibility option can also be prefixed with
+    /// `source-` or `destination-` to enable additional compatibility per-side (e.g.
+    /// `--source-force-path-style`, `--destination-no-checksum-mode`). Unprefixed
+    /// options apply to both sides whereas prefixed options enable compatibility for
+    /// that side only. Prefixed options are not available for `generate` or `check`.
     #[arg(
         global = true,
         long,
@@ -1053,6 +1024,22 @@ pub struct Compatibility {
         hide_short_help = true
     )]
     pub no_checksum_mode: bool,
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_S3_COMPATIBLE", hide = true)]
+    pub source_s3_compatible: bool,
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_FORCE_PATH_STYLE", hide = true)]
+    pub source_force_path_style: bool,
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_NO_GET_OBJECT_ATTRIBUTES", hide = true)]
+    pub source_no_get_object_attributes: bool,
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_NO_CHECKSUM_MODE", hide = true)]
+    pub source_no_checksum_mode: bool,
+    #[arg(global = true, long, env = "COPYRITE_DESTINATION_S3_COMPATIBLE", hide = true)]
+    pub destination_s3_compatible: bool,
+    #[arg(global = true, long, env = "COPYRITE_DESTINATION_FORCE_PATH_STYLE", hide = true)]
+    pub destination_force_path_style: bool,
+    #[arg(global = true, long, env = "COPYRITE_DESTINATION_NO_GET_OBJECT_ATTRIBUTES", hide = true)]
+    pub destination_no_get_object_attributes: bool,
+    #[arg(global = true, long, env = "COPYRITE_DESTINATION_NO_CHECKSUM_MODE", hide = true)]
+    pub destination_no_checksum_mode: bool,
 }
 
 impl Compatibility {
@@ -1070,6 +1057,61 @@ impl Compatibility {
     pub fn no_checksum_mode(&self) -> bool {
         self.s3_compatible || self.no_checksum_mode
     }
+
+    /// Whether to force path-style addressing for the source.
+    pub fn source_force_path_style(&self) -> bool {
+        self.source_s3_compatible
+            || self.source_force_path_style
+            || self.force_path_style()
+    }
+
+    /// Whether to force path-style addressing for the destination.
+    pub fn destination_force_path_style(&self) -> bool {
+        self.destination_s3_compatible
+            || self.destination_force_path_style
+            || self.force_path_style()
+    }
+
+    /// Whether to avoid `GetObjectAttributes` calls for the source.
+    pub fn source_no_get_object_attributes(&self) -> bool {
+        self.source_s3_compatible
+            || self.source_no_get_object_attributes
+            || self.no_get_object_attributes()
+    }
+
+    /// Whether to avoid `GetObjectAttributes` calls for the destination.
+    pub fn destination_no_get_object_attributes(&self) -> bool {
+        self.destination_s3_compatible
+            || self.destination_no_get_object_attributes
+            || self.no_get_object_attributes()
+    }
+
+    /// Whether to disable checksum mode for the source.
+    pub fn source_no_checksum_mode(&self) -> bool {
+        self.source_s3_compatible
+            || self.source_no_checksum_mode
+            || self.no_checksum_mode()
+    }
+
+    /// Whether to disable checksum mode for the destination.
+    pub fn destination_no_checksum_mode(&self) -> bool {
+        self.destination_s3_compatible
+            || self.destination_no_checksum_mode
+            || self.no_checksum_mode()
+    }
+
+    /// Check if any source or destination specific options are set.
+    pub fn has_prefixed_options(&self) -> bool {
+        self.source_s3_compatible
+            || self.source_force_path_style
+            || self.source_no_get_object_attributes
+            || self.source_no_checksum_mode
+            || self.destination_s3_compatible
+            || self.destination_force_path_style
+            || self.destination_no_get_object_attributes
+            || self.destination_no_checksum_mode
+    }
+
 }
 
 /// Options related to credentials. Unprefixed options apply to both source and destination. For
@@ -1364,31 +1406,41 @@ impl Credentials {
     }
 
     /// Construct the source client from the credentials.
-    pub async fn source_client(&self, compatibility: &Compatibility) -> Result<Client> {
-        create_s3_client(
+    pub async fn source_client(&self, compatibility: &Compatibility) -> Result<S3Client> {
+        let client = create_s3_client(
             &self.effective_source_credential_provider(),
             self.effective_source_profile(),
             self.effective_source_region(),
             self.effective_source_endpoint_url(),
             self.effective_source_secret(),
             self.source_overrides(),
-            compatibility.force_path_style(),
+            compatibility.source_force_path_style(),
         )
-        .await
+        .await?;
+        Ok(S3Client::new(
+            Arc::new(client),
+            compatibility.source_no_get_object_attributes(),
+            compatibility.source_no_checksum_mode(),
+        ))
     }
 
     /// Construct the destination client from the credentials.
-    pub async fn destination_client(&self, compatibility: &Compatibility) -> Result<Client> {
-        create_s3_client(
+    pub async fn destination_client(&self, compatibility: &Compatibility) -> Result<S3Client> {
+        let client = create_s3_client(
             &self.effective_destination_credential_provider(),
             self.effective_destination_profile(),
             self.effective_destination_region(),
             self.effective_destination_endpoint_url(),
             self.effective_destination_secret(),
             self.destination_overrides(),
-            compatibility.force_path_style(),
+            compatibility.destination_force_path_style(),
         )
-        .await
+        .await?;
+        Ok(S3Client::new(
+            Arc::new(client),
+            compatibility.destination_no_get_object_attributes(),
+            compatibility.destination_no_checksum_mode(),
+        ))
     }
 
     /// Check if the default credentials are being used without any overrides.
