@@ -823,13 +823,20 @@ pub(crate) mod test {
         );
 
         // If there are no AWS metadata sums, then use a defaulted value.
+        let destination_client = S3Client::new(Arc::new(mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            &[]
+        )), false, false);
         let no_metadata_sums = builder
             .clone()
+            .with_destination_client(destination_client.clone())
             .with_source(test_file.to_string_lossy().to_string());
         assert_eq!(no_metadata_sums.build().await?.part_size, Some(8388608));
         let no_metadata_sums_part_size = builder
             .clone()
             .with_part_size(Some(5242880))
+            .with_destination_client(destination_client.clone())
             .with_source(test_file.to_string_lossy().to_string());
         assert_eq!(
             no_metadata_sums_part_size.build().await?.part_size,
@@ -838,6 +845,7 @@ pub(crate) mod test {
         let no_metadata_sums_single_part = builder
             .clone()
             .with_multipart_threshold(Some(TEST_FILE_SIZE))
+            .with_destination_client(destination_client)
             .with_source(test_file.to_string_lossy().to_string());
         assert_eq!(no_metadata_sums_single_part.build().await?.part_size, None);
 

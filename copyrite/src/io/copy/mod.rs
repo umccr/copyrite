@@ -10,7 +10,6 @@ use crate::io::copy::file::FileBuilder;
 use crate::io::{Provider, S3Client};
 use dyn_clone::DynClone;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::io::{AsyncRead, empty};
 
 pub mod aws;
@@ -217,10 +216,9 @@ impl ObjectCopyBuilder {
         };
 
         if is_s3 {
-            let client = match self.client {
-                Some(client) => client,
-                None => S3Client::new(Arc::new(S3Client::default_s3_client().await?), false, false),
-            };
+            let client = self.client.ok_or_else(|| {
+                CopyError("an S3 client is required for S3 providers".to_string())
+            })?;
             let source = self.source.map(|source| source.into_s3()).transpose()?;
             let destination = self
                 .destination

@@ -88,6 +88,7 @@ impl CheckTaskBuilder {
             .collect::<Vec<_>>();
         self.files.retain(|file| !in_memory.contains(&file));
 
+        let task_client = self.clients.first().cloned().flatten();
         let (objects, errors): (Vec<_>, Vec<_>) = join_all(
             self.files
                 .into_iter()
@@ -139,6 +140,7 @@ impl CheckTaskBuilder {
             group_by,
             update: self.update,
             recoverable_errors: errors,
+            client: task_client,
             ..Default::default()
         })
     }

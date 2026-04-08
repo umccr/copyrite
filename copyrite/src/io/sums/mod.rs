@@ -71,10 +71,11 @@ impl ObjectSumsBuilder {
                 Ok(Box::new(FileBuilder::default().with_file(file).build()?))
             }
             Provider::S3 { bucket, key } => {
-                let client = match self.client {
-                    Some(client) => client,
-                    None => S3Client::new(Arc::new(S3Client::default_s3_client().await?), false, false),
-                };
+                let client = self.client.ok_or_else(|| {
+                    crate::error::Error::ParseError(
+                        "an S3 client is required for S3 providers".to_string(),
+                    )
+                })?;
                 Ok(Box::new(
                     S3Builder::default()
                         .with_key(key)

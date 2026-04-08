@@ -26,7 +26,6 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::stdin;
 
@@ -262,7 +261,7 @@ impl Generate {
     pub async fn generate(
         self,
         optimization: Optimization,
-        mut clients: Vec<S3Client>,
+        clients: Vec<S3Client>,
         write_sums_file: bool,
     ) -> stats::Result<GenerateStats> {
         if self.input[0] == "-" {
@@ -311,10 +310,6 @@ impl Generate {
                     )
                     .with_elapsed(now.elapsed()),
                 );
-
-                if clients.is_empty() {
-                    clients = vec![S3Client::new(Arc::new(S3Client::default_s3_client().await?), false, false)];
-                }
 
                 let ctxs = SumCtxPairs::from_comparable(objects)?;
                 if let Some(ctxs) = ctxs {
