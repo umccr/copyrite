@@ -112,9 +112,7 @@ impl Command {
     /// Execute the command from the args.
     pub async fn execute(self) -> Result<()> {
         let now = Instant::now();
-        let client = self.credentials
-            .source_client(&self.compatibility)
-            .await?;
+        let client = self.credentials.source_client(&self.compatibility).await?;
 
         let pretty_json = self.output.pretty_json;
         let write_sums_file = self.output.write_sums_file;
@@ -123,11 +121,7 @@ impl Command {
         match self.commands {
             Subcommands::Generate(generate_args) => {
                 let stats = generate_args
-                    .generate(
-                        self.optimization,
-                        vec![client],
-                        true,
-                    )
+                    .generate(self.optimization, vec![client], true)
                     .await
                     .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
                 if let Some(sums) = stats.sums {
@@ -139,19 +133,15 @@ impl Command {
             }
             Subcommands::Check(check_args) => {
                 let output = check_args
-                    .check(
-                        self.optimization,
-                        write_sums_file,
-                        false,
-                        vec![client],
-                    )
+                    .check(self.optimization, write_sums_file, false, vec![client])
                     .await
                     .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
 
                 Self::print_stats(&output, pretty_json, ui)?;
             }
             Subcommands::Copy(copy_args) => {
-                let destination_client = self.credentials
+                let destination_client = self
+                    .credentials
                     .destination_client(&self.compatibility)
                     .await?;
 
@@ -293,11 +283,8 @@ impl Generate {
 
             if self.missing {
                 let now = Instant::now();
-                let (ctxs, group_by) = Check::comparable_check(
-                    self.input.clone(),
-                    clients.clone(),
-                )
-                .await?;
+                let (ctxs, group_by) =
+                    Check::comparable_check(self.input.clone(), clients.clone()).await?;
                 let (objects, compared, updated, api_errors) = ctxs.into_inner();
                 check_stats = Some(
                     CheckStats::new(
@@ -450,11 +437,7 @@ impl Check {
             .with_clients(clients.clone());
         let mut generate_stats = None;
         if self.missing {
-            let (ctxs, _) = Check::comparable_check(
-                self.input.clone(),
-                clients.clone(),
-            )
-            .await?;
+            let (ctxs, _) = Check::comparable_check(self.input.clone(), clients.clone()).await?;
             let checksum = Check::generate_sums(ctxs);
 
             let mut stats = Generate {
@@ -1019,21 +1002,61 @@ pub struct Compatibility {
         hide_short_help = true
     )]
     pub no_checksum_mode: bool,
-    #[arg(global = true, long, env = "COPYRITE_SOURCE_S3_COMPATIBLE", hide = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_S3_COMPATIBLE",
+        hide = true
+    )]
     pub source_s3_compatible: bool,
-    #[arg(global = true, long, env = "COPYRITE_SOURCE_FORCE_PATH_STYLE", hide = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_FORCE_PATH_STYLE",
+        hide = true
+    )]
     pub source_force_path_style: bool,
-    #[arg(global = true, long, env = "COPYRITE_SOURCE_NO_GET_OBJECT_ATTRIBUTES", hide = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_NO_GET_OBJECT_ATTRIBUTES",
+        hide = true
+    )]
     pub source_no_get_object_attributes: bool,
-    #[arg(global = true, long, env = "COPYRITE_SOURCE_NO_CHECKSUM_MODE", hide = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_NO_CHECKSUM_MODE",
+        hide = true
+    )]
     pub source_no_checksum_mode: bool,
-    #[arg(global = true, long, env = "COPYRITE_DESTINATION_S3_COMPATIBLE", hide = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_S3_COMPATIBLE",
+        hide = true
+    )]
     pub destination_s3_compatible: bool,
-    #[arg(global = true, long, env = "COPYRITE_DESTINATION_FORCE_PATH_STYLE", hide = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_FORCE_PATH_STYLE",
+        hide = true
+    )]
     pub destination_force_path_style: bool,
-    #[arg(global = true, long, env = "COPYRITE_DESTINATION_NO_GET_OBJECT_ATTRIBUTES", hide = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_NO_GET_OBJECT_ATTRIBUTES",
+        hide = true
+    )]
     pub destination_no_get_object_attributes: bool,
-    #[arg(global = true, long, env = "COPYRITE_DESTINATION_NO_CHECKSUM_MODE", hide = true)]
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_NO_CHECKSUM_MODE",
+        hide = true
+    )]
     pub destination_no_checksum_mode: bool,
 }
 
@@ -1055,9 +1078,7 @@ impl Compatibility {
 
     /// Whether to force path-style addressing for the source.
     pub fn source_force_path_style(&self) -> bool {
-        self.source_s3_compatible
-            || self.source_force_path_style
-            || self.force_path_style()
+        self.source_s3_compatible || self.source_force_path_style || self.force_path_style()
     }
 
     /// Whether to force path-style addressing for the destination.
@@ -1083,9 +1104,7 @@ impl Compatibility {
 
     /// Whether to disable checksum mode for the source.
     pub fn source_no_checksum_mode(&self) -> bool {
-        self.source_s3_compatible
-            || self.source_no_checksum_mode
-            || self.no_checksum_mode()
+        self.source_s3_compatible || self.source_no_checksum_mode || self.no_checksum_mode()
     }
 
     /// Whether to disable checksum mode for the destination.
@@ -1106,7 +1125,6 @@ impl Compatibility {
             || self.destination_no_get_object_attributes
             || self.destination_no_checksum_mode
     }
-
 }
 
 /// Options related to credentials. Unprefixed options apply to both source and destination. For
@@ -1134,13 +1152,7 @@ pub struct Credentials {
     )]
     pub credential_provider: Option<CredentialProvider>,
     /// The profile to use if the credential provider is `aws-profile`.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_PROFILE",
-
-        hide_short_help = true
-    )]
+    #[arg(global = true, long, env = "COPYRITE_PROFILE", hide_short_help = true)]
     pub profile: Option<String>,
     /// The secret name or ARN to use if the credential provider is `aws-secret`.
     ///
@@ -1160,19 +1172,12 @@ pub struct Credentials {
         global = true,
         long,
         env = "COPYRITE_SECRET",
-
         hide_short_help = true,
         verbatim_doc_comment
     )]
     pub secret: Option<String>,
     /// Set the region for the credential provider.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_REGION",
-
-        hide_short_help = true
-    )]
+    #[arg(global = true, long, env = "COPYRITE_REGION", hide_short_help = true)]
     pub region: Option<String>,
     /// Set the endpoint URL for AWS calls. This allows using a different endpoint that has an
     /// S3-compatible storage API.
@@ -1180,7 +1185,6 @@ pub struct Credentials {
         global = true,
         long,
         env = "COPYRITE_ENDPOINT_URL",
-
         hide_short_help = true
     )]
     pub endpoint_url: Option<String>,
@@ -1189,7 +1193,6 @@ pub struct Credentials {
         global = true,
         long,
         env = "COPYRITE_ACCESS_KEY_ID",
-
         hide_short_help = true
     )]
     pub access_key_id: Option<String>,
@@ -1198,7 +1201,6 @@ pub struct Credentials {
         global = true,
         long,
         env = "COPYRITE_SECRET_ACCESS_KEY",
-
         hide_short_help = true
     )]
     pub secret_access_key: Option<String>,
@@ -1207,7 +1209,6 @@ pub struct Credentials {
         global = true,
         long,
         env = "COPYRITE_SESSION_TOKEN",
-
         hide_short_help = true
     )]
     pub session_token: Option<String>,
@@ -1220,33 +1221,13 @@ pub struct Credentials {
         hide = true
     )]
     pub source_credential_provider: Option<CredentialProvider>,
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_SOURCE_PROFILE",
-        hide = true
-    )]
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_PROFILE", hide = true)]
     pub source_profile: Option<String>,
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_SOURCE_SECRET",
-        hide = true
-    )]
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_SECRET", hide = true)]
     pub source_secret: Option<String>,
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_SOURCE_REGION",
-        hide = true
-    )]
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_REGION", hide = true)]
     pub source_region: Option<String>,
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_SOURCE_ENDPOINT_URL",
-        hide = true
-    )]
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_ENDPOINT_URL", hide = true)]
     pub source_endpoint_url: Option<String>,
     #[arg(
         global = true,
@@ -1278,26 +1259,11 @@ pub struct Credentials {
         hide = true
     )]
     pub destination_credential_provider: Option<CredentialProvider>,
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_PROFILE",
-        hide = true
-    )]
+    #[arg(global = true, long, env = "COPYRITE_DESTINATION_PROFILE", hide = true)]
     pub destination_profile: Option<String>,
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_SECRET",
-        hide = true
-    )]
+    #[arg(global = true, long, env = "COPYRITE_DESTINATION_SECRET", hide = true)]
     pub destination_secret: Option<String>,
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_REGION",
-        hide = true
-    )]
+    #[arg(global = true, long, env = "COPYRITE_DESTINATION_REGION", hide = true)]
     pub destination_region: Option<String>,
     #[arg(
         global = true,
@@ -1346,9 +1312,7 @@ impl Credentials {
 
     /// Resolve the effective source profile.
     pub fn effective_source_profile(&self) -> Option<&str> {
-        self.source_profile
-            .as_deref()
-            .or(self.profile.as_deref())
+        self.source_profile.as_deref().or(self.profile.as_deref())
     }
 
     /// Resolve the effective destination profile.
@@ -1360,9 +1324,7 @@ impl Credentials {
 
     /// Resolve the effective source secret.
     pub fn effective_source_secret(&self) -> Option<&str> {
-        self.source_secret
-            .as_deref()
-            .or(self.secret.as_deref())
+        self.source_secret.as_deref().or(self.secret.as_deref())
     }
 
     /// Resolve the effective destination secret.
@@ -1374,9 +1336,7 @@ impl Credentials {
 
     /// Resolve the effective source region.
     pub fn effective_source_region(&self) -> Option<&str> {
-        self.source_region
-            .as_deref()
-            .or(self.region.as_deref())
+        self.source_region.as_deref().or(self.region.as_deref())
     }
 
     /// Resolve the effective destination region.
@@ -1402,24 +1362,20 @@ impl Credentials {
 
     /// Construct the source client from the credentials.
     pub async fn source_client(&self, compatibility: &Compatibility) -> Result<S3Client> {
-        S3Client::new_from_cli_source(
-            self,
-            compatibility
-        ).await
+        S3Client::new_from_cli_source(self, compatibility).await
     }
 
     /// Construct the destination client from the credentials.
     pub async fn destination_client(&self, compatibility: &Compatibility) -> Result<S3Client> {
-        S3Client::new_from_cli_destination(
-            self,
-            compatibility
-        ).await
+        S3Client::new_from_cli_destination(self, compatibility).await
     }
 
     /// Check if the default credentials are being used without any overrides.
     pub fn is_default(&self) -> bool {
         self.effective_source_credential_provider().is_default()
-            && self.effective_destination_credential_provider().is_default()
+            && self
+                .effective_destination_credential_provider()
+                .is_default()
             && self.effective_source_endpoint_url().is_none()
             && self.effective_destination_endpoint_url().is_none()
             && !self.source_overrides().any()

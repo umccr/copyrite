@@ -1,7 +1,7 @@
 //! Module that handles all file IO
 //!
 
-use crate::cli::{Credentials, CredentialProvider, Compatibility};
+use crate::cli::{Compatibility, CredentialProvider, Credentials};
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use aws_config::Region;
@@ -39,7 +39,7 @@ impl S3Client {
     /// Create a new source S3Client from CLI compatibility and credentials options.
     pub async fn new_from_cli_source(
         credentials: &Credentials,
-        compatibility: &Compatibility
+        compatibility: &Compatibility,
     ) -> Result<Self> {
         let client = Self::create_s3_client(
             &credentials.effective_source_credential_provider(),
@@ -50,7 +50,7 @@ impl S3Client {
             credentials.source_overrides(),
             compatibility.source_force_path_style(),
         )
-            .await?;
+        .await?;
         Ok(Self::new(
             Arc::new(client),
             compatibility.source_no_get_object_attributes(),
@@ -61,7 +61,7 @@ impl S3Client {
     /// Create a new source S3Client from CLI compatibility and credentials options.
     pub async fn new_from_cli_destination(
         credentials: &Credentials,
-        compatibility: &Compatibility
+        compatibility: &Compatibility,
     ) -> Result<Self> {
         let client = Self::create_s3_client(
             &credentials.effective_destination_credential_provider(),
@@ -72,7 +72,7 @@ impl S3Client {
             credentials.destination_overrides(),
             compatibility.destination_force_path_style(),
         )
-            .await?;
+        .await?;
         Ok(Self::new(
             Arc::new(client),
             compatibility.destination_no_get_object_attributes(),
@@ -127,7 +127,8 @@ impl S3Client {
             }
             (CredentialProvider::AwsProfile, None, _) => {
                 return Err(ParseError(
-                    "profile must be specified if using aws-profile credential provider".to_string(),
+                    "profile must be specified if using aws-profile credential provider"
+                        .to_string(),
                 ));
             }
             (CredentialProvider::AwsSecret, _, None) => {
@@ -177,7 +178,7 @@ impl S3Client {
             no_overrides,
             false,
         )
-            .await
+        .await
     }
 }
 
@@ -383,7 +384,10 @@ impl CredentialOverrides {
 
     /// Merge overrides with base credentials. Each override takes precedence over the corresponding
     /// field in the base credentials.
-    pub fn merge_with(&self, base: Option<&aws_credential_types::Credentials>) -> Result<aws_credential_types::Credentials> {
+    pub fn merge_with(
+        &self,
+        base: Option<&aws_credential_types::Credentials>,
+    ) -> Result<aws_credential_types::Credentials> {
         let access_key_id = self
             .access_key_id
             .as_deref()

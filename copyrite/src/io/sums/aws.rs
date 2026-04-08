@@ -69,18 +69,8 @@ impl S3Builder {
 }
 
 impl From<(S3Client, String, String)> for S3 {
-    fn from(
-        (client, bucket, key): (
-            S3Client,
-            String,
-            String,
-        ),
-    ) -> Self {
-        Self::new(
-            client,
-            bucket,
-            key,
-        )
+    fn from((client, bucket, key): (S3Client, String, String)) -> Self {
+        Self::new(client, bucket, key)
     }
 }
 
@@ -97,11 +87,7 @@ pub struct S3 {
 
 impl S3 {
     /// Create a new S3 object.
-    pub fn new(
-        client: S3Client,
-        bucket: String,
-        key: String,
-    ) -> S3 {
+    pub fn new(client: S3Client, bucket: String, key: String) -> S3 {
         Self {
             client,
             bucket,
@@ -316,11 +302,7 @@ impl S3 {
         // for each part query instead of the individual part size, unlike the official
         // S3 implementation. Check if this is occurring and fall-back to computing
         // based on part number if so.
-        if total_parts > 1
-            && part_sums
-                .iter()
-                .all(|part| *part == file_size)
-        {
+        if total_parts > 1 && part_sums.iter().all(|part| *part == file_size) {
             return Ok(None);
         }
 
@@ -526,10 +508,10 @@ pub(crate) mod test {
     use crate::test::{TEST_FILE_NAME, TEST_FILE_SIZE};
     use aws_sdk_s3::Client;
     use aws_sdk_s3::operation::head_object::builders::HeadObjectOutputBuilder;
-    use std::sync::Arc;
     use aws_sdk_s3::types;
     use aws_sdk_s3::types::GetObjectAttributesParts;
     use aws_smithy_mocks::{Rule, RuleMode, mock, mock_client};
+    use std::sync::Arc;
 
     const EXPECTED_SHA256_SUM: &str = "Kf+9U8vkMXmrL6YtvZWMDsMLNAq1DOfHheinpLR3Hjk="; // pragma: allowlist secret
 
@@ -550,7 +532,11 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_multi_part_with_sha256_different_part_sizes() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(S3Client::new(Arc::new(mock_multi_part_with_sha256_different_part_sizes()), false, false))
+            .with_client(S3Client::new(
+                Arc::new(mock_multi_part_with_sha256_different_part_sizes()),
+                false,
+                false,
+            ))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -576,7 +562,11 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_multi_part_etag_only_different_part_sizes() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(S3Client::new(Arc::new(mock_multi_part_etag_only_different_part_sizes()), false, false))
+            .with_client(S3Client::new(
+                Arc::new(mock_multi_part_etag_only_different_part_sizes()),
+                false,
+                false,
+            ))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -599,7 +589,11 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_multi_part_with_sha256() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(S3Client::new(Arc::new(mock_multi_part_with_sha256()), false, false))
+            .with_client(S3Client::new(
+                Arc::new(mock_multi_part_with_sha256()),
+                false,
+                false,
+            ))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -629,7 +623,11 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_multi_part_etag_only() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(S3Client::new(Arc::new(mock_multi_part_etag_only()), false, false))
+            .with_client(S3Client::new(
+                Arc::new(mock_multi_part_etag_only()),
+                false,
+                false,
+            ))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -647,7 +645,11 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_single_part_with_sha256() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(S3Client::new(Arc::new(mock_single_part_with_sha256()), false, false))
+            .with_client(S3Client::new(
+                Arc::new(mock_single_part_with_sha256()),
+                false,
+                false,
+            ))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -665,7 +667,11 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_single_part_etag_only() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(S3Client::new(Arc::new(mock_single_part_etag_only()), false, false))
+            .with_client(S3Client::new(
+                Arc::new(mock_single_part_etag_only()),
+                false,
+                false,
+            ))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;

@@ -191,11 +191,7 @@ impl State {
 
     /// Write the sums file to the location. If no object sums are used then this creates a new
     /// object sums to write the file.
-    pub async fn write_sums_file(
-        &self,
-        sums: &SumsFile,
-        client: Option<S3Client>,
-    ) -> Result<()> {
+    pub async fn write_sums_file(&self, sums: &SumsFile, client: Option<S3Client>) -> Result<()> {
         match self {
             State::ObjectSums(object) => object.write_sums_file(sums).await,
             State::ExistingSums((location, _)) => {
@@ -436,12 +432,7 @@ impl CheckTask {
 
                     self.recoverable_errors.extend(location.api_errors());
                     if current.as_ref() != Some(file) {
-                        location
-                            .write_sums_file(
-                                file,
-                                client.clone(),
-                            )
-                            .await?;
+                        location.write_sums_file(file, client.clone()).await?;
                         updated_sums.push(location.location());
                     }
                 }

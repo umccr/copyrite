@@ -3,10 +3,10 @@
 
 use crate::checksum::file::SumsFile;
 use crate::error::{ApiError, Result};
+use crate::io::Provider;
 use crate::io::S3Client;
 use crate::io::sums::aws::S3Builder;
 use crate::io::sums::file::FileBuilder;
-use crate::io::Provider;
 use dyn_clone::DynClone;
 use futures_util::Stream;
 use std::collections::HashSet;
