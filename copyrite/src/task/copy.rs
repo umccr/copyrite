@@ -344,35 +344,22 @@ impl CopyTaskBuilder {
             CopyMode::DownloadUpload
         };
 
-        let (source_copy, destination_copy) = if copy_mode.is_server_side() {
-            let source = ObjectCopyBuilder::default()
-                .with_copy_metadata(self.metadata_mode)
-                .with_copy_tags(self.tag_mode)
-                .set_client(self.source_client.clone())
-                .set_source(Some(source.clone()))
-                .set_destination(Some(destination.clone()))
-                .build()
-                .await?;
-
-            (source.clone(), source)
-        } else {
-            (
-                ObjectCopyBuilder::default()
-                    .with_copy_metadata(self.metadata_mode)
-                    .with_copy_tags(self.tag_mode)
-                    .set_client(self.source_client.clone())
-                    .set_source(Some(source.clone()))
-                    .build()
-                    .await?,
-                ObjectCopyBuilder::default()
-                    .with_copy_metadata(self.metadata_mode)
-                    .with_copy_tags(self.tag_mode)
-                    .set_client(self.destination_client.clone())
-                    .set_destination(Some(destination.clone()))
-                    .build()
-                    .await?,
-            )
-        };
+        let source_copy = ObjectCopyBuilder::default()
+            .with_copy_metadata(self.metadata_mode)
+            .with_copy_tags(self.tag_mode)
+            .set_client(self.source_client.clone())
+            .set_source(Some(source.clone()))
+            .build()
+            .await?;
+        let mut destination_builder = ObjectCopyBuilder::default()
+            .with_copy_metadata(self.metadata_mode)
+            .with_copy_tags(self.tag_mode)
+            .set_client(self.destination_client.clone())
+            .set_destination(Some(destination.clone()));
+        if copy_mode.is_server_side() {
+            destination_builder = destination_builder.set_source(Some(source.clone()));
+        }
+        let destination_copy = destination_builder.build().await?;
 
         let state = source_copy.initialize_state().await?;
 
@@ -617,17 +604,17 @@ impl CopyTask {
 
         match (self.copy_mode, self.part_size) {
             (CopyMode::ServerSide, None) => {
-                let copy = self.source_copy.copy(None, &self.state).await?;
+                let copy = self.destination_copy.copy(None, &self.state).await?;
 
                 self.update_bytes(copy.bytes_transferred);
                 self.n_retries += copy.n_retries;
                 self.recoverable_errors.extend(copy.api_errors);
             }
             (CopyMode::ServerSide, Some(part_size)) => {
-                let source = self.source_copy.clone();
+                let destination = self.destination_copy.clone();
                 self.run_multipart(
                     part_size,
-                    |option, state| async move { source.copy(Some(option), &state).await },
+                    |option, state| async move { destination.copy(Some(option), &state).await },
                     |result, _, _| async move { Ok(result) },
                 )
                 .await?
@@ -757,10 +744,17 @@ pub(crate) mod test {
     async fn copy_settings() -> Result<()> {
         let test_file = TestFileBuilder::new()?.generate_test_defaults()?;
 
+        let destination_client = S3Client::new(Arc::new(mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            &[]
+        )), false, false);
+
         let builder = CopyTaskBuilder::default()
             .with_concurrency(10)
             .with_source("s3://bucket/key".to_string())
-            .with_destination("s3://bucket/key2".to_string());
+            .with_destination("s3://bucket/key2".to_string())
+            .with_destination_client(destination_client);
 
         let lt_threshold = builder
             .clone()
