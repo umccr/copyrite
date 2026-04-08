@@ -5,15 +5,15 @@ use crate::checksum::Ctx;
 use crate::error::Error;
 use crate::error::Error::{CheckError, GenerateError, ParseError};
 use crate::error::Result;
+use crate::io::S3Client;
 use crate::io::sums::ObjectSumsBuilder;
 use crate::io::sums::channel::ChannelReader;
-use crate::io::{CredentialOverrides, Provider, create_s3_client, default_s3_client};
+use crate::io::{CredentialOverrides, Provider};
 use crate::stats;
 use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::CopyTaskBuilder;
 use crate::task::generate::{GenerateTaskBuilder, SumCtxPairs};
-use aws_sdk_s3::Client;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use console::style;
 use humantime::Duration;
@@ -26,7 +26,6 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::stdin;
 
@@ -50,6 +49,9 @@ pub struct Command {
     /// Options related to credentials.
     #[command(flatten)]
     pub credentials: Credentials,
+    /// Options related to S3-compatible storage compatibility.
+    #[command(flatten)]
+    pub compatibility: Compatibility,
 }
 
 impl Command {
@@ -94,13 +96,23 @@ impl Command {
             }
         }
 
+        if !matches!(args.commands, Subcommands::Copy(_))
+            && (args.credentials.has_prefixed_options()
+                || args.compatibility.has_prefixed_options())
+        {
+            return Err(ParseError(
+                "source and destination options are only available for the `copy` command, use the unprefixed versions instead (e.g. `--credential-provider`)"
+                    .to_string(),
+            ));
+        }
+
         Ok(())
     }
 
     /// Execute the command from the args.
     pub async fn execute(self) -> Result<()> {
         let now = Instant::now();
-        let client = Arc::new(self.credentials.source_client().await?);
+        let client = self.credentials.source_client(&self.compatibility).await?;
 
         let pretty_json = self.output.pretty_json;
         let write_sums_file = self.output.write_sums_file;
@@ -109,7 +121,7 @@ impl Command {
         match self.commands {
             Subcommands::Generate(generate_args) => {
                 let stats = generate_args
-                    .generate(self.optimization, &self.credentials, vec![client], true)
+                    .generate(self.optimization, vec![client], true)
                     .await
                     .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
                 if let Some(sums) = stats.sums {
@@ -121,20 +133,17 @@ impl Command {
             }
             Subcommands::Check(check_args) => {
                 let output = check_args
-                    .check(
-                        self.optimization,
-                        &self.credentials,
-                        write_sums_file,
-                        false,
-                        vec![client],
-                    )
+                    .check(self.optimization, write_sums_file, false, vec![client])
                     .await
                     .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
 
                 Self::print_stats(&output, pretty_json, ui)?;
             }
             Subcommands::Copy(copy_args) => {
-                let destination_client = Arc::new(self.credentials.destination_client().await?);
+                let destination_client = self
+                    .credentials
+                    .destination_client(&self.compatibility)
+                    .await?;
 
                 let output = copy_args
                     .copy(
@@ -242,15 +251,13 @@ impl Generate {
     pub async fn generate(
         self,
         optimization: Optimization,
-        credentials: &Credentials,
-        mut clients: Vec<Arc<Client>>,
+        clients: Vec<S3Client>,
         write_sums_file: bool,
     ) -> stats::Result<GenerateStats> {
         if self.input[0] == "-" {
             let reader = ChannelReader::new(stdin(), optimization.channel_capacity);
 
             let output = GenerateTaskBuilder::default()
-                .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
                 .with_overwrite(self.force_overwrite)
                 .with_verify(self.verify)
                 .with_context(self.checksum)
@@ -276,12 +283,8 @@ impl Generate {
 
             if self.missing {
                 let now = Instant::now();
-                let (ctxs, group_by) = Check::comparable_check(
-                    self.input.clone(),
-                    clients.clone(),
-                    credentials.avoid_get_object_attributes,
-                )
-                .await?;
+                let (ctxs, group_by) =
+                    Check::comparable_check(self.input.clone(), clients.clone()).await?;
                 let (objects, compared, updated, api_errors) = ctxs.into_inner();
                 check_stats = Some(
                     CheckStats::new(
@@ -295,10 +298,6 @@ impl Generate {
                     .with_elapsed(now.elapsed()),
                 );
 
-                if clients.is_empty() {
-                    clients = vec![Arc::new(default_s3_client().await?)];
-                }
-
                 let ctxs = SumCtxPairs::from_comparable(objects)?;
                 if let Some(ctxs) = ctxs {
                     for (ctx, client) in ctxs
@@ -308,9 +307,6 @@ impl Generate {
                     {
                         let (input, ctx) = ctx.into_inner();
                         let task = GenerateTaskBuilder::default()
-                            .with_avoid_get_object_attributes(
-                                credentials.avoid_get_object_attributes,
-                            )
                             .with_overwrite(self.force_overwrite)
                             .with_verify(self.verify)
                             .with_input_file_name(input.to_string())
@@ -341,7 +337,6 @@ impl Generate {
 
             for (input, client) in self.input.into_iter().zip(clients.into_iter().cycle()) {
                 let task = GenerateTaskBuilder::default()
-                    .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
                     .with_overwrite(self.force_overwrite)
                     .with_verify(self.verify)
                     .with_input_file_name(input.to_string())
@@ -400,14 +395,12 @@ impl Check {
     /// Perform a check for comparability on the input files.
     pub async fn comparable_check(
         input: Vec<String>,
-        clients: Vec<Arc<Client>>,
-        avoid_get_object_attributes: bool,
+        clients: Vec<S3Client>,
     ) -> Result<(CheckTask, GroupBy)> {
         Ok((
             CheckTaskBuilder::default()
                 .with_input_files(input)
                 .with_group_by(GroupBy::Comparability)
-                .with_avoid_get_object_attributes(avoid_get_object_attributes)
                 .with_clients(clients)
                 .build()
                 .await?
@@ -430,28 +423,21 @@ impl Check {
     pub async fn check(
         self,
         optimization: Optimization,
-        credentials: &Credentials,
         write_sums_file: bool,
         verify: bool,
-        clients: Vec<Arc<Client>>,
+        clients: Vec<S3Client>,
     ) -> stats::Result<CheckStats> {
         let now = Instant::now();
         let group_by = self.group_by;
 
         let mut builder = CheckTaskBuilder::default()
             .with_group_by(group_by)
-            .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
             .with_input_files(self.input.clone())
             .with_update(self.update)
             .with_clients(clients.clone());
         let mut generate_stats = None;
         if self.missing {
-            let (ctxs, _) = Check::comparable_check(
-                self.input.clone(),
-                clients.clone(),
-                credentials.avoid_get_object_attributes,
-            )
-            .await?;
+            let (ctxs, _) = Check::comparable_check(self.input.clone(), clients.clone()).await?;
             let checksum = Check::generate_sums(ctxs);
 
             let mut stats = Generate {
@@ -461,7 +447,7 @@ impl Check {
                 force_overwrite: false,
                 verify,
             }
-            .generate(optimization, credentials, clients.clone(), write_sums_file)
+            .generate(optimization, clients.clone(), write_sums_file)
             .await
             .map_err(|stats| CheckStats::from_generate_task(group_by, *stats))?;
             let sums = stats
@@ -640,10 +626,9 @@ pub struct Copy {
 impl Copy {
     pub async fn copy_check(
         &self,
-        source_client: Arc<Client>,
-        destination_client: Arc<Client>,
+        source_client: S3Client,
+        destination_client: S3Client,
         optimization: Optimization,
-        credentials: &Credentials,
         verify: bool,
         write_sums_file: bool,
     ) -> stats::Result<CheckStats> {
@@ -657,7 +642,6 @@ impl Copy {
         }
         .check(
             optimization,
-            credentials,
             write_sums_file,
             verify,
             vec![source_client, destination_client],
@@ -670,8 +654,8 @@ impl Copy {
     /// Perform the copy sub command from the args.
     pub async fn copy(
         self,
-        source_client: Arc<Client>,
-        destination_client: Arc<Client>,
+        source_client: S3Client,
+        destination_client: S3Client,
         credentials: Credentials,
         optimization: Optimization,
         write_sums_file: bool,
@@ -687,8 +671,7 @@ impl Copy {
 
             // Check if it exists in the first place.
             let file_size = ObjectSumsBuilder::default()
-                .set_client(Some(source_client.clone()))
-                .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
+                .set_client(Some(destination_client.clone()))
                 .build(self.destination.to_string())
                 .await?
                 .file_size()
@@ -704,7 +687,6 @@ impl Copy {
                         source_client.clone(),
                         destination_client.clone(),
                         optimization.clone(),
-                        &credentials,
                         false,
                         write_sums_file,
                     )
@@ -779,7 +761,6 @@ impl Copy {
             .with_metadata_mode(self.metadata_mode)
             .with_tag_mode(self.tag_mode)
             .with_multipart_threshold(self.multipart_threshold)
-            .with_avoid_get_object_attributes(credentials.avoid_get_object_attributes)
             .with_concurrency(self.concurrency)
             .with_part_size(self.part_size)
             .with_ui(ui)
@@ -803,7 +784,6 @@ impl Copy {
                     source_client,
                     destination_client,
                     optimization,
-                    &credentials,
                     sums_mismatch,
                     write_sums_file,
                 )
@@ -959,57 +939,222 @@ pub struct Output {
     pub write_sums_file: bool,
 }
 
-/// Options related to credentials. Options prefixed with `source_` affect `check`, `generate` and
-/// the source of a `copy` command. These options also have an alias without the prefix as they are
-/// used in all commands. Options prefixed with `destination_` only affect the destination of a
-/// `copy` command.
+/// Options related to increasing compatibility with S3-compatible storage. For
+/// `copy`, options can be prefixed with `source_` or `destination_` to target one side.
+/// `generate` and `check` only support the unprefixed version of options. Prefixed
+/// options enable additional compatibility for the side, and unprefixed options enable
+/// it for both sides.
+#[derive(Args, Debug, Clone)]
+#[group(required = false)]
+#[command(next_help_heading = "Compatibility")]
+pub struct Compatibility {
+    /// Enable all compatibility options.
+    ///
+    /// This is a convenience flag that enables `--force-path-style`,
+    /// `--no-get-object-attributes`, and `--no-checksum-mode`.
+    ///
+    /// For the copy command, each compatibility option can also be prefixed with
+    /// `source-` or `destination-` to enable additional compatibility per-side (e.g.
+    /// `--source-force-path-style`, `--destination-no-checksum-mode`). Unprefixed
+    /// options apply to both sides whereas prefixed options enable compatibility for
+    /// that side only. Prefixed options are not available for `generate` or `check`.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_S3_COMPATIBLE",
+        hide_short_help = true
+    )]
+    pub s3_compatible: bool,
+    /// Use path-style addressing for S3 endpoints.
+    ///
+    /// By default, the S3 client uses virtual-hosted-style addressing. Some S3-compatible
+    /// endpoints such as Ceph require path-style addressing instead.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_FORCE_PATH_STYLE",
+        hide_short_help = true
+    )]
+    pub force_path_style: bool,
+    /// Do not use `GetObjectAttributes` calls when determining sums.
+    ///
+    /// `HeadObject` will be used as a fallback. This is an option because some S3-compatible
+    /// endpoints do not support `GetObjectAttributes`. If available, `GetObjectAttributes` is
+    /// preferred over `HeadObject` because it only requires a single call rather than a call for
+    /// each part.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_NO_GET_OBJECT_ATTRIBUTES",
+        hide_short_help = true
+    )]
+    pub no_get_object_attributes: bool,
+    /// Do not use `ChecksumMode::Enabled` on `HeadObject` calls.
+    ///
+    /// Some S3-compatible endpoints such as Ceph do not support the additional checksums on API
+    /// calls like `HeadObject`, which this option disables. This will also force `copyrite` to
+    /// only use `ETag`s for verification, and not additional checksums.
+    /// See https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_NO_CHECKSUM_MODE",
+        hide_short_help = true
+    )]
+    pub no_checksum_mode: bool,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_S3_COMPATIBLE",
+        hide = true
+    )]
+    pub source_s3_compatible: bool,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_FORCE_PATH_STYLE",
+        hide = true
+    )]
+    pub source_force_path_style: bool,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_NO_GET_OBJECT_ATTRIBUTES",
+        hide = true
+    )]
+    pub source_no_get_object_attributes: bool,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_NO_CHECKSUM_MODE",
+        hide = true
+    )]
+    pub source_no_checksum_mode: bool,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_S3_COMPATIBLE",
+        hide = true
+    )]
+    pub destination_s3_compatible: bool,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_FORCE_PATH_STYLE",
+        hide = true
+    )]
+    pub destination_force_path_style: bool,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_NO_GET_OBJECT_ATTRIBUTES",
+        hide = true
+    )]
+    pub destination_no_get_object_attributes: bool,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_NO_CHECKSUM_MODE",
+        hide = true
+    )]
+    pub destination_no_checksum_mode: bool,
+}
+
+impl Compatibility {
+    /// Whether to force path-style addressing.
+    pub fn force_path_style(&self) -> bool {
+        self.s3_compatible || self.force_path_style
+    }
+
+    /// Whether to avoid `GetObjectAttributes` calls.
+    pub fn no_get_object_attributes(&self) -> bool {
+        self.s3_compatible || self.no_get_object_attributes
+    }
+
+    /// Whether to disable checksum mode.
+    pub fn no_checksum_mode(&self) -> bool {
+        self.s3_compatible || self.no_checksum_mode
+    }
+
+    /// Whether to force path-style addressing for the source.
+    pub fn source_force_path_style(&self) -> bool {
+        self.source_s3_compatible || self.source_force_path_style || self.force_path_style()
+    }
+
+    /// Whether to force path-style addressing for the destination.
+    pub fn destination_force_path_style(&self) -> bool {
+        self.destination_s3_compatible
+            || self.destination_force_path_style
+            || self.force_path_style()
+    }
+
+    /// Whether to avoid `GetObjectAttributes` calls for the source.
+    pub fn source_no_get_object_attributes(&self) -> bool {
+        self.source_s3_compatible
+            || self.source_no_get_object_attributes
+            || self.no_get_object_attributes()
+    }
+
+    /// Whether to avoid `GetObjectAttributes` calls for the destination.
+    pub fn destination_no_get_object_attributes(&self) -> bool {
+        self.destination_s3_compatible
+            || self.destination_no_get_object_attributes
+            || self.no_get_object_attributes()
+    }
+
+    /// Whether to disable checksum mode for the source.
+    pub fn source_no_checksum_mode(&self) -> bool {
+        self.source_s3_compatible || self.source_no_checksum_mode || self.no_checksum_mode()
+    }
+
+    /// Whether to disable checksum mode for the destination.
+    pub fn destination_no_checksum_mode(&self) -> bool {
+        self.destination_s3_compatible
+            || self.destination_no_checksum_mode
+            || self.no_checksum_mode()
+    }
+
+    /// Check if any source or destination options are set.
+    pub fn has_prefixed_options(&self) -> bool {
+        self.source_s3_compatible
+            || self.source_force_path_style
+            || self.source_no_get_object_attributes
+            || self.source_no_checksum_mode
+            || self.destination_s3_compatible
+            || self.destination_force_path_style
+            || self.destination_no_get_object_attributes
+            || self.destination_no_checksum_mode
+    }
+}
+
+/// Options related to credentials. Unprefixed options apply to both source and destination. For
+/// `copy`, options can be prefixed with `source_` or `destination_` to target one side. `generate`
+/// and `check` only support the unprefixed version of options. Prefixed options take precedence
+/// over unprefixed options in copies.
 #[derive(Args, Debug)]
 #[group(required = false)]
 #[command(next_help_heading = "Credentials")]
 pub struct Credentials {
-    /// The credentials source credentials to use. This affects the credentials used for `check`
-    /// `generate` and the source of a `copy` operation.
+    /// The credential provider to use. Defaults to `default-environment` if not specified.
+    ///
+    /// For the copy command, each credential option can also be prefixed with
+    /// `source-` or `destination-` to target one side independently (e.g.
+    /// `--source-credential-provider`, `--destination-region`). When both prefixed and
+    /// unprefixed versions are specified, the prefixed version takes precedence.
+    /// Prefixed options are not available for `generate` or `check`.
     #[arg(
         global = true,
         long,
-        env = "COPYRITE_SOURCE_CREDENTIAL_PROVIDER",
-        default_value = "default-environment",
-        alias = "credential-provider",
-        requires_if("aws-profile", "source_profile"),
-        requires_if("aws-secret", "source_secret"),
+        env = "COPYRITE_CREDENTIAL_PROVIDER",
+        requires_if("aws-profile", "profile"),
+        requires_if("aws-secret", "secret"),
         hide_short_help = true
     )]
-    pub source_credential_provider: CredentialProvider,
-    /// The destination credentials to use. This only affects the credentials used for the
-    /// destination of a `copy` operation.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_CREDENTIAL_PROVIDER",
-        default_value = "default-environment",
-        requires_if("aws-profile", "destination_profile"),
-        requires_if("aws-secret", "destination_secret"),
-        hide_short_help = true
-    )]
-    pub destination_credential_provider: CredentialProvider,
-    /// The source profile to use if the source credential provider is `aws-profile`.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_SOURCE_PROFILE",
-        alias = "profile",
-        hide_short_help = true
-    )]
-    pub source_profile: Option<String>,
-    /// The destination profile to use if the destination credential provider is `aws-profile`.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_PROFILE",
-        hide_short_help = true
-    )]
-    pub destination_profile: Option<String>,
-    /// The source secret name or ARN to use if the source credential provider is `aws-secret`.
+    pub credential_provider: Option<CredentialProvider>,
+    /// The profile to use if the credential provider is `aws-profile`.
+    #[arg(global = true, long, env = "COPYRITE_PROFILE", hide_short_help = true)]
+    pub profile: Option<String>,
+    /// The secret name or ARN to use if the credential provider is `aws-secret`.
     ///
     /// The secret must be a JSON object, with only `access_key_id` and `secret_access_key`
     /// being required:
@@ -1026,187 +1171,262 @@ pub struct Credentials {
     #[arg(
         global = true,
         long,
-        env = "COPYRITE_SOURCE_SECRET",
-        alias = "secret",
+        env = "COPYRITE_SECRET",
         hide_short_help = true,
         verbatim_doc_comment
     )]
+    pub secret: Option<String>,
+    /// Set the region for the credential provider.
+    #[arg(global = true, long, env = "COPYRITE_REGION", hide_short_help = true)]
+    pub region: Option<String>,
+    /// Set the endpoint URL for AWS calls. This allows using a different endpoint that has an
+    /// S3-compatible storage API.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_ENDPOINT_URL",
+        hide_short_help = true
+    )]
+    pub endpoint_url: Option<String>,
+    /// The AWS access key ID. Overrides the value from the selected credential provider.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_ACCESS_KEY_ID",
+        hide_short_help = true
+    )]
+    pub access_key_id: Option<String>,
+    /// The AWS secret access key. Overrides the value from the selected credential provider.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SECRET_ACCESS_KEY",
+        hide_short_help = true
+    )]
+    pub secret_access_key: Option<String>,
+    /// The AWS session token. Overrides the value from the selected credential provider.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SESSION_TOKEN",
+        hide_short_help = true
+    )]
+    pub session_token: Option<String>,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_CREDENTIAL_PROVIDER",
+        requires_if("aws-profile", "source_profile"),
+        requires_if("aws-secret", "source_secret"),
+        hide = true
+    )]
+    pub source_credential_provider: Option<CredentialProvider>,
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_PROFILE", hide = true)]
+    pub source_profile: Option<String>,
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_SECRET", hide = true)]
     pub source_secret: Option<String>,
-    /// The destination secret name or ARN to use if the destination credential provider is
-    /// `aws-secret`. See `--source-secret` for the expected JSON format.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_SECRET",
-        hide_short_help = true
-    )]
-    pub destination_secret: Option<String>,
-    /// Set the region for the source credential provider.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_SOURCE_REGION",
-        alias = "region",
-        hide_short_help = true
-    )]
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_REGION", hide = true)]
     pub source_region: Option<String>,
-    /// Set the region for the destination credential provider.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_REGION",
-        hide_short_help = true
-    )]
-    pub destination_region: Option<String>,
-    /// Set the source endpoint URL for AWS calls. This allows using a different endpoint that
-    /// has an S3-compatible storage API.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_SOURCE_ENDPOINT_URL",
-        alias = "endpoint-url",
-        hide_short_help = true
-    )]
+    #[arg(global = true, long, env = "COPYRITE_SOURCE_ENDPOINT_URL", hide = true)]
     pub source_endpoint_url: Option<String>,
-    /// Set the destination endpoint URL for AWS calls. This allows using a different endpoint
-    /// that has an S3-compatible storage API.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_ENDPOINT_URL",
-        hide_short_help = true
-    )]
-    pub destination_endpoint_url: Option<String>,
-    /// Avoid `GetObjectAttributes` calls when determining sums.
-    ///
-    /// `HeadObject` will be used as a fallback. This is an option because some S3-compatible
-    /// endpoints do not support `GetObjectAttributes`. If available, `GetObjectAttributes` is
-    /// preferred over `HeadObject` because it only requires a single call rather than a call for
-    /// each part.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_AVOID_GET_OBJECT_ATTRIBUTES",
-        hide_short_help = true
-    )]
-    pub avoid_get_object_attributes: bool,
-    /// The source AWS access key ID. Overrides the value from the selected credential provider.
     #[arg(
         global = true,
         long,
         env = "COPYRITE_SOURCE_ACCESS_KEY_ID",
-        alias = "access-key-id",
-        hide_short_help = true
+        hide = true
     )]
     pub source_access_key_id: Option<String>,
-    /// The source AWS secret access key. Overrides the value from the selected credential
-    /// provider.
     #[arg(
         global = true,
         long,
         env = "COPYRITE_SOURCE_SECRET_ACCESS_KEY",
-        alias = "secret-access-key",
-        hide_short_help = true
+        hide = true
     )]
     pub source_secret_access_key: Option<String>,
-    /// The source AWS session token. Overrides the value from the selected credential provider.
     #[arg(
         global = true,
         long,
         env = "COPYRITE_SOURCE_SESSION_TOKEN",
-        alias = "session-token",
-        hide_short_help = true
+        hide = true
     )]
     pub source_session_token: Option<String>,
-    /// The destination AWS access key ID. Overrides the value from the selected credential
-    /// provider.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_CREDENTIAL_PROVIDER",
+        requires_if("aws-profile", "destination_profile"),
+        requires_if("aws-secret", "destination_secret"),
+        hide = true
+    )]
+    pub destination_credential_provider: Option<CredentialProvider>,
+    #[arg(global = true, long, env = "COPYRITE_DESTINATION_PROFILE", hide = true)]
+    pub destination_profile: Option<String>,
+    #[arg(global = true, long, env = "COPYRITE_DESTINATION_SECRET", hide = true)]
+    pub destination_secret: Option<String>,
+    #[arg(global = true, long, env = "COPYRITE_DESTINATION_REGION", hide = true)]
+    pub destination_region: Option<String>,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_ENDPOINT_URL",
+        hide = true
+    )]
+    pub destination_endpoint_url: Option<String>,
     #[arg(
         global = true,
         long,
         env = "COPYRITE_DESTINATION_ACCESS_KEY_ID",
-        hide_short_help = true
+        hide = true
     )]
     pub destination_access_key_id: Option<String>,
-    /// The destination AWS secret access key. Overrides the value from the selected credential
-    /// provider.
     #[arg(
         global = true,
         long,
         env = "COPYRITE_DESTINATION_SECRET_ACCESS_KEY",
-        hide_short_help = true
+        hide = true
     )]
     pub destination_secret_access_key: Option<String>,
-    /// The destination AWS session token. Overrides the value from the selected credential
-    /// provider.
     #[arg(
         global = true,
         long,
         env = "COPYRITE_DESTINATION_SESSION_TOKEN",
-        hide_short_help = true
+        hide = true
     )]
     pub destination_session_token: Option<String>,
 }
 
 impl Credentials {
+    /// Resolve the effective source credential provider.
+    pub fn effective_source_credential_provider(&self) -> CredentialProvider {
+        self.source_credential_provider
+            .or(self.credential_provider)
+            .unwrap_or_default()
+    }
+
+    /// Resolve the effective destination credential provider.
+    pub fn effective_destination_credential_provider(&self) -> CredentialProvider {
+        self.destination_credential_provider
+            .or(self.credential_provider)
+            .unwrap_or_default()
+    }
+
+    /// Resolve the effective source profile.
+    pub fn effective_source_profile(&self) -> Option<&str> {
+        self.source_profile.as_deref().or(self.profile.as_deref())
+    }
+
+    /// Resolve the effective destination profile.
+    pub fn effective_destination_profile(&self) -> Option<&str> {
+        self.destination_profile
+            .as_deref()
+            .or(self.profile.as_deref())
+    }
+
+    /// Resolve the effective source secret.
+    pub fn effective_source_secret(&self) -> Option<&str> {
+        self.source_secret.as_deref().or(self.secret.as_deref())
+    }
+
+    /// Resolve the effective destination secret.
+    pub fn effective_destination_secret(&self) -> Option<&str> {
+        self.destination_secret
+            .as_deref()
+            .or(self.secret.as_deref())
+    }
+
+    /// Resolve the effective source region.
+    pub fn effective_source_region(&self) -> Option<&str> {
+        self.source_region.as_deref().or(self.region.as_deref())
+    }
+
+    /// Resolve the effective destination region.
+    pub fn effective_destination_region(&self) -> Option<&str> {
+        self.destination_region
+            .as_deref()
+            .or(self.region.as_deref())
+    }
+
+    /// Resolve the effective source endpoint URL.
+    pub fn effective_source_endpoint_url(&self) -> Option<&str> {
+        self.source_endpoint_url
+            .as_deref()
+            .or(self.endpoint_url.as_deref())
+    }
+
+    /// Resolve the effective destination endpoint URL.
+    pub fn effective_destination_endpoint_url(&self) -> Option<&str> {
+        self.destination_endpoint_url
+            .as_deref()
+            .or(self.endpoint_url.as_deref())
+    }
+
     /// Construct the source client from the credentials.
-    pub async fn source_client(&self) -> Result<Client> {
-        let overrides = CredentialOverrides::new(
-            self.source_access_key_id.clone(),
-            self.source_secret_access_key.clone(),
-            self.source_session_token.clone(),
-        );
-        create_s3_client(
-            &self.source_credential_provider,
-            self.source_profile.as_deref(),
-            self.source_region.as_deref(),
-            self.source_endpoint_url.as_deref(),
-            self.source_secret.as_deref(),
-            overrides,
-        )
-        .await
+    pub async fn source_client(&self, compatibility: &Compatibility) -> Result<S3Client> {
+        S3Client::new_from_cli_source(self, compatibility).await
     }
 
     /// Construct the destination client from the credentials.
-    pub async fn destination_client(&self) -> Result<Client> {
-        let overrides = CredentialOverrides::new(
-            self.destination_access_key_id.clone(),
-            self.destination_secret_access_key.clone(),
-            self.destination_session_token.clone(),
-        );
-        create_s3_client(
-            &self.destination_credential_provider,
-            self.destination_profile.as_deref(),
-            self.destination_region.as_deref(),
-            self.destination_endpoint_url.as_deref(),
-            self.destination_secret.as_deref(),
-            overrides,
-        )
-        .await
+    pub async fn destination_client(&self, compatibility: &Compatibility) -> Result<S3Client> {
+        S3Client::new_from_cli_destination(self, compatibility).await
     }
 
     /// Check if the default credentials are being used without any overrides.
     pub fn is_default(&self) -> bool {
-        self.source_credential_provider.is_default()
-            && self.destination_credential_provider.is_default()
-            && self.source_endpoint_url.is_none()
-            && self.destination_endpoint_url.is_none()
+        self.effective_source_credential_provider().is_default()
+            && self
+                .effective_destination_credential_provider()
+                .is_default()
+            && self.effective_source_endpoint_url().is_none()
+            && self.effective_destination_endpoint_url().is_none()
             && !self.source_overrides().any()
             && !self.destination_overrides().any()
     }
 
-    fn source_overrides(&self) -> CredentialOverrides {
+    /// Check if any source or destination options are set.
+    pub fn has_prefixed_options(&self) -> bool {
+        self.source_credential_provider.is_some()
+            || self.destination_credential_provider.is_some()
+            || self.source_profile.is_some()
+            || self.destination_profile.is_some()
+            || self.source_secret.is_some()
+            || self.destination_secret.is_some()
+            || self.source_region.is_some()
+            || self.destination_region.is_some()
+            || self.source_endpoint_url.is_some()
+            || self.destination_endpoint_url.is_some()
+            || self.source_access_key_id.is_some()
+            || self.destination_access_key_id.is_some()
+            || self.source_secret_access_key.is_some()
+            || self.destination_secret_access_key.is_some()
+            || self.source_session_token.is_some()
+            || self.destination_session_token.is_some()
+    }
+
+    pub fn source_overrides(&self) -> CredentialOverrides {
         CredentialOverrides::new(
-            self.source_access_key_id.clone(),
-            self.source_secret_access_key.clone(),
-            self.source_session_token.clone(),
+            self.source_access_key_id
+                .clone()
+                .or(self.access_key_id.clone()),
+            self.source_secret_access_key
+                .clone()
+                .or(self.secret_access_key.clone()),
+            self.source_session_token
+                .clone()
+                .or(self.session_token.clone()),
         )
     }
 
-    fn destination_overrides(&self) -> CredentialOverrides {
+    pub fn destination_overrides(&self) -> CredentialOverrides {
         CredentialOverrides::new(
-            self.destination_access_key_id.clone(),
-            self.destination_secret_access_key.clone(),
-            self.destination_session_token.clone(),
+            self.destination_access_key_id
+                .clone()
+                .or(self.access_key_id.clone()),
+            self.destination_secret_access_key
+                .clone()
+                .or(self.secret_access_key.clone()),
+            self.destination_session_token
+                .clone()
+                .or(self.session_token.clone()),
         )
     }
 }

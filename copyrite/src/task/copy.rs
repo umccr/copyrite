@@ -8,9 +8,9 @@ use crate::cli::{CopyMode, MetadataCopy};
 use crate::error::Error::CopyError;
 use crate::error::{ApiError, Error, Result};
 use crate::io::Provider;
+use crate::io::S3Client;
 use crate::io::copy::{CopyResult, CopyState, MultiPartOptions, ObjectCopy, ObjectCopyBuilder};
 use crate::io::sums::ObjectSumsBuilder;
-use aws_sdk_s3::Client;
 use console::style;
 use futures_util::future::join_all;
 use indicatif::{HumanBytes, ProgressBar, ProgressState, ProgressStyle};
@@ -18,7 +18,6 @@ use std::cmp::min;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter, Write};
 use std::future::Future;
-use std::sync::Arc;
 use std::{fmt, result};
 
 pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 8 * 1024 * 1024; // 8mib
@@ -33,11 +32,10 @@ pub struct CopyTaskBuilder {
     metadata_mode: MetadataCopy,
     tag_mode: MetadataCopy,
     copy_mode: CopyMode,
-    source_client: Option<Arc<Client>>,
-    destination_client: Option<Arc<Client>>,
+    source_client: Option<S3Client>,
+    destination_client: Option<S3Client>,
     concurrency: Option<usize>,
     api_errors: HashSet<ApiError>,
-    avoid_get_object_attributes: bool,
     ui: bool,
 }
 
@@ -123,13 +121,13 @@ impl CopyTaskBuilder {
     }
 
     /// Set the source S3 client to use for S3 copies.
-    pub fn with_source_client(mut self, client: Arc<Client>) -> Self {
+    pub fn with_source_client(mut self, client: S3Client) -> Self {
         self.source_client = Some(client);
         self
     }
 
     /// Set the destination S3 client to use for S3 copies.
-    pub fn with_destination_client(mut self, client: Arc<Client>) -> Self {
+    pub fn with_destination_client(mut self, client: S3Client) -> Self {
         self.destination_client = Some(client);
         self
     }
@@ -137,12 +135,6 @@ impl CopyTaskBuilder {
     /// Set the S3 client to use for S3 copies.
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = Some(concurrency);
-        self
-    }
-
-    /// Avoid `GetObjectAttributes` calls.
-    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
-        self.avoid_get_object_attributes = avoid_get_object_attributes;
         self
     }
 
@@ -241,7 +233,6 @@ impl CopyTaskBuilder {
         // Only use the sums file if the size is not set at the source.
         let sums = if self.part_size.is_none() {
             let mut object = ObjectSumsBuilder::default()
-                .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
                 .set_client(self.source_client.clone())
                 .build(self.source.to_string())
                 .await?;
@@ -332,7 +323,7 @@ impl CopyTaskBuilder {
         Err(err_fn())
     }
 
-    /// Build a generate task.
+    /// Build a copy task.
     pub async fn build(self) -> Result<CopyTask> {
         if self.source.is_empty() || self.destination.is_empty() {
             return Err(CopyError("source and destination required".to_string()));
@@ -353,35 +344,22 @@ impl CopyTaskBuilder {
             CopyMode::DownloadUpload
         };
 
-        let (source_copy, destination_copy) = if copy_mode.is_server_side() {
-            let source = ObjectCopyBuilder::default()
-                .with_copy_metadata(self.metadata_mode)
-                .with_copy_tags(self.tag_mode)
-                .set_client(self.source_client.clone())
-                .set_source(Some(source.clone()))
-                .set_destination(Some(destination.clone()))
-                .build()
-                .await?;
-
-            (source.clone(), source)
-        } else {
-            (
-                ObjectCopyBuilder::default()
-                    .with_copy_metadata(self.metadata_mode)
-                    .with_copy_tags(self.tag_mode)
-                    .set_client(self.source_client.clone())
-                    .set_source(Some(source.clone()))
-                    .build()
-                    .await?,
-                ObjectCopyBuilder::default()
-                    .with_copy_metadata(self.metadata_mode)
-                    .with_copy_tags(self.tag_mode)
-                    .set_client(self.destination_client.clone())
-                    .set_destination(Some(destination.clone()))
-                    .build()
-                    .await?,
-            )
-        };
+        let source_copy = ObjectCopyBuilder::default()
+            .with_copy_metadata(self.metadata_mode)
+            .with_copy_tags(self.tag_mode)
+            .set_client(self.source_client.clone())
+            .set_source(Some(source.clone()))
+            .build()
+            .await?;
+        let mut destination_builder = ObjectCopyBuilder::default()
+            .with_copy_metadata(self.metadata_mode)
+            .with_copy_tags(self.tag_mode)
+            .set_client(self.destination_client.clone())
+            .set_destination(Some(destination.clone()));
+        if copy_mode.is_server_side() {
+            destination_builder = destination_builder.set_source(Some(source.clone()));
+        }
+        let destination_copy = destination_builder.build().await?;
 
         let state = source_copy.initialize_state().await?;
 
@@ -626,17 +604,17 @@ impl CopyTask {
 
         match (self.copy_mode, self.part_size) {
             (CopyMode::ServerSide, None) => {
-                let copy = self.source_copy.copy(None, &self.state).await?;
+                let copy = self.destination_copy.copy(None, &self.state).await?;
 
                 self.update_bytes(copy.bytes_transferred);
                 self.n_retries += copy.n_retries;
                 self.recoverable_errors.extend(copy.api_errors);
             }
             (CopyMode::ServerSide, Some(part_size)) => {
-                let source = self.source_copy.clone();
+                let destination = self.destination_copy.clone();
                 self.run_multipart(
                     part_size,
-                    |option, state| async move { source.copy(Some(option), &state).await },
+                    |option, state| async move { destination.copy(Some(option), &state).await },
                     |result, _, _| async move { Ok(result) },
                 )
                 .await?
@@ -727,6 +705,7 @@ pub(crate) mod test {
     use aws_sdk_s3::operation::head_object::HeadObjectOutput;
     use aws_sdk_s3::types::error::NoSuchKey;
     use aws_smithy_mocks::{Rule, RuleMode, mock, mock_client};
+    use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::fs::File;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -765,45 +744,56 @@ pub(crate) mod test {
     async fn copy_settings() -> Result<()> {
         let test_file = TestFileBuilder::new()?.generate_test_defaults()?;
 
+        let destination_client = S3Client::new(
+            Arc::new(mock_client!(aws_sdk_s3, RuleMode::Sequential, &[])),
+            false,
+            false,
+        );
+
         let builder = CopyTaskBuilder::default()
             .with_concurrency(10)
             .with_source("s3://bucket/key".to_string())
-            .with_destination("s3://bucket/key2".to_string());
+            .with_destination("s3://bucket/key2".to_string())
+            .with_destination_client(destination_client);
 
         let lt_threshold = builder
             .clone()
             .with_multipart_threshold(Some(TEST_FILE_SIZE + 1))
-            .with_source_client(Arc::new(mock_size(
-                TEST_FILE_SIZE,
-                mock_single_part_etag_only_rule(),
-            )));
+            .with_source_client(S3Client::new(
+                Arc::new(mock_size(TEST_FILE_SIZE, mock_single_part_etag_only_rule())),
+                false,
+                false,
+            ));
         assert_eq!(lt_threshold.build().await?.part_size, None);
 
         // S3 to S3 will always prefer the original upload settings so even if the size is greater than the
         // threshold, it should still be single part.
-        let gt_threshold = builder.clone().with_source_client(Arc::new(mock_size(
-            TEST_FILE_SIZE,
-            mock_single_part_etag_only_rule(),
-        )));
+        let gt_threshold = builder.clone().with_source_client(S3Client::new(
+            Arc::new(mock_size(TEST_FILE_SIZE, mock_single_part_etag_only_rule())),
+            false,
+            false,
+        ));
         assert_eq!(gt_threshold.build().await?.part_size, None);
 
         // If it was originally multipart, it should prefer that even if below the threshold.
         let multipart_lt_threshold = builder
             .clone()
             .with_multipart_threshold(Some(TEST_FILE_SIZE + 1))
-            .with_source_client(Arc::new(mock_size(
-                TEST_FILE_SIZE,
-                mock_multi_part_etag_only_rule(),
-            )));
+            .with_source_client(S3Client::new(
+                Arc::new(mock_size(TEST_FILE_SIZE, mock_multi_part_etag_only_rule())),
+                false,
+                false,
+            ));
         assert_eq!(
             multipart_lt_threshold.build().await?.part_size,
             Some(214748365)
         );
 
-        let multipart_gt_threshold = builder.clone().with_source_client(Arc::new(mock_size(
-            TEST_FILE_SIZE,
-            mock_multi_part_etag_only_rule(),
-        )));
+        let multipart_gt_threshold = builder.clone().with_source_client(S3Client::new(
+            Arc::new(mock_size(TEST_FILE_SIZE, mock_multi_part_etag_only_rule())),
+            false,
+            false,
+        ));
         assert_eq!(
             multipart_gt_threshold.build().await?.part_size,
             Some(214748365)
@@ -813,31 +803,40 @@ pub(crate) mod test {
         let part_size_set = builder
             .clone()
             .with_part_size(Some(5242880))
-            .with_source_client(Arc::new(mock_size(
-                TEST_FILE_SIZE,
-                mock_single_part_etag_only_rule(),
-            )));
+            .with_source_client(S3Client::new(
+                Arc::new(mock_size(TEST_FILE_SIZE, mock_single_part_etag_only_rule())),
+                false,
+                false,
+            ));
         assert_eq!(part_size_set.build().await?.part_size, Some(5242880));
         let part_size_set_multipart = builder
             .clone()
             .with_part_size(Some(5242880))
-            .with_source_client(Arc::new(mock_size(
-                TEST_FILE_SIZE,
-                mock_multi_part_etag_only_rule(),
-            )));
+            .with_source_client(S3Client::new(
+                Arc::new(mock_size(TEST_FILE_SIZE, mock_multi_part_etag_only_rule())),
+                false,
+                false,
+            ));
         assert_eq!(
             part_size_set_multipart.build().await?.part_size,
             Some(5242880)
         );
 
         // If there are no AWS metadata sums, then use a defaulted value.
+        let destination_client = S3Client::new(
+            Arc::new(mock_client!(aws_sdk_s3, RuleMode::Sequential, &[])),
+            false,
+            false,
+        );
         let no_metadata_sums = builder
             .clone()
+            .with_destination_client(destination_client.clone())
             .with_source(test_file.to_string_lossy().to_string());
         assert_eq!(no_metadata_sums.build().await?.part_size, Some(8388608));
         let no_metadata_sums_part_size = builder
             .clone()
             .with_part_size(Some(5242880))
+            .with_destination_client(destination_client.clone())
             .with_source(test_file.to_string_lossy().to_string());
         assert_eq!(
             no_metadata_sums_part_size.build().await?.part_size,
@@ -846,6 +845,7 @@ pub(crate) mod test {
         let no_metadata_sums_single_part = builder
             .clone()
             .with_multipart_threshold(Some(TEST_FILE_SIZE))
+            .with_destination_client(destination_client)
             .with_source(test_file.to_string_lossy().to_string());
         assert_eq!(no_metadata_sums_single_part.build().await?.part_size, None);
 
@@ -853,20 +853,22 @@ pub(crate) mod test {
         let part_size_err_max = builder
             .clone()
             .with_part_size(Some(60000000000))
-            .with_source_client(Arc::new(mock_size(
-                TEST_FILE_SIZE,
-                mock_single_part_etag_only_rule(),
-            )));
+            .with_source_client(S3Client::new(
+                Arc::new(mock_size(TEST_FILE_SIZE, mock_single_part_etag_only_rule())),
+                false,
+                false,
+            ));
         assert!(part_size_err_max.build().await.is_err());
         // If the part size exceeds the limits, this should be an error.
         let part_size_err_min =
             builder
                 .clone()
                 .with_part_size(Some(1))
-                .with_source_client(Arc::new(mock_size(
-                    TEST_FILE_SIZE,
-                    mock_single_part_etag_only_rule(),
-                )));
+                .with_source_client(S3Client::new(
+                    Arc::new(mock_size(TEST_FILE_SIZE, mock_single_part_etag_only_rule())),
+                    false,
+                    false,
+                ));
         assert!(part_size_err_min.build().await.is_err());
 
         Ok(())

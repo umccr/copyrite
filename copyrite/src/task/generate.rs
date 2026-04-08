@@ -5,16 +5,15 @@ use crate::checksum::Ctx;
 use crate::checksum::file::{Checksum, SumsFile};
 use crate::error::Error::GenerateError;
 use crate::error::{ApiError, Error, Result};
+use crate::io::S3Client;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder, SharedReader};
 use crate::task::check::{CheckObjects, SumsKey};
 use crate::task::generate::Task::{ChecksumTask, ReadTask};
-use aws_sdk_s3::Client;
 use futures_util::future::join_all;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::result;
-use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 /// Define the kind of task that is running.
@@ -34,8 +33,7 @@ pub struct GenerateTaskBuilder {
     reader: Option<Box<dyn SharedReader + Send>>,
     capacity: usize,
     write: bool,
-    client: Option<Arc<Client>>,
-    avoid_get_object_attributes: bool,
+    client: Option<S3Client>,
 }
 
 impl GenerateTaskBuilder {
@@ -76,12 +74,12 @@ impl GenerateTaskBuilder {
     }
 
     /// Set the S3 client to use.
-    pub fn with_client(self, client: Arc<Client>) -> Self {
+    pub fn with_client(self, client: S3Client) -> Self {
         self.set_client(Some(client))
     }
 
     /// Set the S3 client to use.
-    pub fn set_client(mut self, client: Option<Arc<Client>>) -> Self {
+    pub fn set_client(mut self, client: Option<S3Client>) -> Self {
         self.client = client;
         self
     }
@@ -97,17 +95,10 @@ impl GenerateTaskBuilder {
         self
     }
 
-    /// Avoid `GetObjectAttributes` calls.
-    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
-        self.avoid_get_object_attributes = avoid_get_object_attributes;
-        self
-    }
-
     /// Build a generate task.
     pub async fn build(mut self) -> Result<GenerateTask> {
         let mut sums = ObjectSumsBuilder::default()
             .set_client(self.client)
-            .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
             .build(self.input_file_name.to_string())
             .await?;
 

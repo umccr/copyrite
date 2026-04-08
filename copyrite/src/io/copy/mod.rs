@@ -7,11 +7,9 @@ use crate::error::Error::CopyError;
 use crate::error::{ApiError, Result};
 use crate::io::copy::aws::S3Builder;
 use crate::io::copy::file::FileBuilder;
-use crate::io::{Provider, default_s3_client};
-use aws_sdk_s3::Client;
+use crate::io::{Provider, S3Client};
 use dyn_clone::DynClone;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::io::{AsyncRead, empty};
 
 pub mod aws;
@@ -203,7 +201,7 @@ dyn_clone::clone_trait_object!(ObjectCopy);
 pub struct ObjectCopyBuilder {
     metadata_mode: MetadataCopy,
     tag_mode: MetadataCopy,
-    client: Option<Arc<Client>>,
+    client: Option<S3Client>,
     source: Option<Provider>,
     destination: Option<Provider>,
 }
@@ -218,10 +216,9 @@ impl ObjectCopyBuilder {
         };
 
         if is_s3 {
-            let client = match self.client {
-                Some(client) => client,
-                None => Arc::new(default_s3_client().await?),
-            };
+            let client = self.client.ok_or_else(|| {
+                CopyError("an S3 client is required for S3 providers".to_string())
+            })?;
             let source = self.source.map(|source| source.into_s3()).transpose()?;
             let destination = self
                 .destination
@@ -279,7 +276,7 @@ impl ObjectCopyBuilder {
     }
 
     /// Set the S3 client if this is an s3 provider.
-    pub fn set_client(mut self, client: Option<Arc<Client>>) -> Self {
+    pub fn set_client(mut self, client: Option<S3Client>) -> Self {
         self.client = client;
         self
     }

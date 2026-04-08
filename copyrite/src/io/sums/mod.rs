@@ -3,10 +3,10 @@
 
 use crate::checksum::file::SumsFile;
 use crate::error::{ApiError, Result};
+use crate::io::Provider;
+use crate::io::S3Client;
 use crate::io::sums::aws::S3Builder;
 use crate::io::sums::file::FileBuilder;
-use crate::io::{Provider, default_s3_client};
-use aws_sdk_s3::Client;
 use dyn_clone::DynClone;
 use futures_util::Stream;
 use std::collections::HashSet;
@@ -61,8 +61,7 @@ dyn_clone::clone_trait_object!(ObjectSums);
 /// Build object sums from object URLs.
 #[derive(Debug, Default)]
 pub struct ObjectSumsBuilder {
-    client: Option<Arc<Client>>,
-    avoid_get_object_attributes: bool,
+    client: Option<S3Client>,
 }
 
 impl ObjectSumsBuilder {
@@ -72,16 +71,16 @@ impl ObjectSumsBuilder {
                 Ok(Box::new(FileBuilder::default().with_file(file).build()?))
             }
             Provider::S3 { bucket, key } => {
-                let client = match self.client {
-                    Some(client) => client,
-                    None => Arc::new(default_s3_client().await?),
-                };
+                let client = self.client.ok_or_else(|| {
+                    crate::error::Error::ParseError(
+                        "an S3 client is required for S3 providers".to_string(),
+                    )
+                })?;
                 Ok(Box::new(
                     S3Builder::default()
                         .with_key(key)
                         .with_bucket(bucket)
                         .with_client(client)
-                        .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
                         .build()?,
                 ))
             }
@@ -89,14 +88,8 @@ impl ObjectSumsBuilder {
     }
 
     /// Set the S3 client if this is an s3 provider.
-    pub fn set_client(mut self, client: Option<Arc<Client>>) -> Self {
+    pub fn set_client(mut self, client: Option<S3Client>) -> Self {
         self.client = client;
-        self
-    }
-
-    /// Avoid `GetObjectAttributes` calls.
-    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
-        self.avoid_get_object_attributes = avoid_get_object_attributes;
         self
     }
 }

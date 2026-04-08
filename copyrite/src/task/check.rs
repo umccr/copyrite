@@ -4,9 +4,9 @@
 use crate::checksum::Ctx;
 use crate::checksum::file::{Checksum, SumsFile};
 use crate::error::{ApiError, Error, Result};
+use crate::io::S3Client;
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder};
 use crate::stats::{CheckComparison, ChecksumPair};
-use aws_sdk_s3::Client;
 use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc;
 use std::{fmt, mem, result};
 
 /// Build a check task.
@@ -24,8 +23,7 @@ pub struct CheckTaskBuilder {
     sums_files: Vec<(String, SumsFile)>,
     group_by: GroupBy,
     update: bool,
-    clients: Vec<Option<Arc<Client>>>,
-    avoid_get_object_attributes: bool,
+    clients: Vec<Option<S3Client>>,
 }
 
 impl Default for CheckTaskBuilder {
@@ -37,7 +35,6 @@ impl Default for CheckTaskBuilder {
             update: Default::default(),
             // Ensure at least one element in the vector to repeat.
             clients: vec![None],
-            avoid_get_object_attributes: Default::default(),
         }
     }
 }
@@ -56,7 +53,7 @@ impl CheckTaskBuilder {
     }
 
     /// Set the S3 client to use for each input file.
-    pub fn with_clients(mut self, clients: Vec<Arc<Client>>) -> Self {
+    pub fn with_clients(mut self, clients: Vec<S3Client>) -> Self {
         self.clients = clients.into_iter().map(Some).collect();
         self
     }
@@ -74,14 +71,8 @@ impl CheckTaskBuilder {
     }
 
     /// Set the S3 client to use.
-    pub fn with_client(mut self, client: Arc<Client>) -> Self {
+    pub fn with_client(mut self, client: S3Client) -> Self {
         self.clients = vec![Some(client)];
-        self
-    }
-
-    /// Avoid `GetObjectAttributes` calls.
-    pub fn with_avoid_get_object_attributes(mut self, avoid_get_object_attributes: bool) -> Self {
-        self.avoid_get_object_attributes = avoid_get_object_attributes;
         self
     }
 
@@ -97,13 +88,13 @@ impl CheckTaskBuilder {
             .collect::<Vec<_>>();
         self.files.retain(|file| !in_memory.contains(&file));
 
+        let task_client = self.clients.first().cloned().flatten();
         let (objects, errors): (Vec<_>, Vec<_>) = join_all(
             self.files
                 .into_iter()
                 .zip(self.clients.into_iter().cycle())
                 .map(|(file, client)| async move {
                     let mut sums = ObjectSumsBuilder::default()
-                        .with_avoid_get_object_attributes(self.avoid_get_object_attributes)
                         .set_client(client)
                         .build(file.to_string())
                         .await?;
@@ -149,6 +140,7 @@ impl CheckTaskBuilder {
             group_by,
             update: self.update,
             recoverable_errors: errors,
+            client: task_client,
             ..Default::default()
         })
     }
@@ -199,18 +191,12 @@ impl State {
 
     /// Write the sums file to the location. If no object sums are used then this creates a new
     /// object sums to write the file.
-    pub async fn write_sums_file(
-        &self,
-        sums: &SumsFile,
-        client: Option<Arc<Client>>,
-        avoid_get_object_attributes: bool,
-    ) -> Result<()> {
+    pub async fn write_sums_file(&self, sums: &SumsFile, client: Option<S3Client>) -> Result<()> {
         match self {
             State::ObjectSums(object) => object.write_sums_file(sums).await,
             State::ExistingSums((location, _)) => {
                 ObjectSumsBuilder::default()
                     .set_client(client)
-                    .with_avoid_get_object_attributes(avoid_get_object_attributes)
                     .build(location.to_string())
                     .await?
                     .write_sums_file(sums)
@@ -343,8 +329,7 @@ pub struct CheckTask {
     update: bool,
     compared_directly: Vec<CheckComparison>,
     updated: Vec<String>,
-    client: Option<Arc<Client>>,
-    avoid_get_object_attributes: bool,
+    client: Option<S3Client>,
     recoverable_errors: HashSet<ApiError>,
 }
 
@@ -432,7 +417,6 @@ impl CheckTask {
 
     async fn do_check(&mut self) -> Result<()> {
         let update = self.update && matches!(self.group_by, GroupBy::Equality);
-        let avoid_get_object_attributes = self.avoid_get_object_attributes;
         let client = self.client.clone();
         match self.group_by {
             GroupBy::Equality => self.merge_same().await,
@@ -448,9 +432,7 @@ impl CheckTask {
 
                     self.recoverable_errors.extend(location.api_errors());
                     if current.as_ref() != Some(file) {
-                        location
-                            .write_sums_file(file, client.clone(), avoid_get_object_attributes)
-                            .await?;
+                        location.write_sums_file(file, client.clone()).await?;
                         updated_sums.push(location.location());
                     }
                 }

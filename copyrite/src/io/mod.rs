@@ -1,18 +1,186 @@
 //! Module that handles all file IO
 //!
 
-use crate::cli::CredentialProvider;
+use crate::cli::{Compatibility, CredentialProvider, Credentials};
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use aws_config::Region;
-use aws_credential_types::Credentials;
 use aws_credential_types::provider::ProvideCredentials;
 use aws_sdk_s3::{Client, config};
 use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
 use serde::Deserialize;
+use std::sync::Arc;
 
 pub mod copy;
 pub mod sums;
+
+/// An S3 client wrapper with compatibility settings.
+#[derive(Debug, Clone)]
+pub struct S3Client {
+    inner: Arc<Client>,
+    no_get_object_attributes: bool,
+    no_checksum_mode: bool,
+}
+
+impl S3Client {
+    /// Create a new S3Client.
+    pub fn new(
+        client: Arc<Client>,
+        no_get_object_attributes: bool,
+        no_checksum_mode: bool,
+    ) -> Self {
+        Self {
+            inner: client,
+            no_get_object_attributes,
+            no_checksum_mode,
+        }
+    }
+
+    /// Create a new source S3Client from CLI compatibility and credentials options.
+    pub async fn new_from_cli_source(
+        credentials: &Credentials,
+        compatibility: &Compatibility,
+    ) -> Result<Self> {
+        let client = Self::create_s3_client(
+            &credentials.effective_source_credential_provider(),
+            credentials.effective_source_profile(),
+            credentials.effective_source_region(),
+            credentials.effective_source_endpoint_url(),
+            credentials.effective_source_secret(),
+            credentials.source_overrides(),
+            compatibility.source_force_path_style(),
+        )
+        .await?;
+        Ok(Self::new(
+            Arc::new(client),
+            compatibility.source_no_get_object_attributes(),
+            compatibility.source_no_checksum_mode(),
+        ))
+    }
+
+    /// Create a new destination S3Client from CLI compatibility and credentials options.
+    pub async fn new_from_cli_destination(
+        credentials: &Credentials,
+        compatibility: &Compatibility,
+    ) -> Result<Self> {
+        let client = Self::create_s3_client(
+            &credentials.effective_destination_credential_provider(),
+            credentials.effective_destination_profile(),
+            credentials.effective_destination_region(),
+            credentials.effective_destination_endpoint_url(),
+            credentials.effective_destination_secret(),
+            credentials.destination_overrides(),
+            compatibility.destination_force_path_style(),
+        )
+        .await?;
+        Ok(Self::new(
+            Arc::new(client),
+            compatibility.destination_no_get_object_attributes(),
+            compatibility.destination_no_checksum_mode(),
+        ))
+    }
+
+    /// Get the inner AWS S3 client.
+    pub fn inner(&self) -> &Arc<Client> {
+        &self.inner
+    }
+
+    /// Whether to avoid `GetObjectAttributes` calls.
+    pub fn no_get_object_attributes(&self) -> bool {
+        self.no_get_object_attributes
+    }
+
+    /// Whether to disable checksum mode.
+    pub fn no_checksum_mode(&self) -> bool {
+        self.no_checksum_mode
+    }
+
+    /// Create an S3 client from the credentials provider, profile, region and endpoint url.
+    /// Any fields set in `overrides` take precedence over the resolved credential provider values.
+    pub async fn create_s3_client(
+        provider: &CredentialProvider,
+        profile: Option<&str>,
+        region: Option<&str>,
+        endpoint_url: Option<&str>,
+        secret: Option<&str>,
+        overrides: CredentialOverrides,
+        force_path_style: bool,
+    ) -> Result<Client> {
+        let mut loader = aws_config::defaults(BehaviorVersion::latest());
+
+        if let Some(region) = region {
+            loader = loader.region(Region::new(region.to_string()));
+        }
+        if let Some(endpoint_url) = endpoint_url {
+            loader = loader.endpoint_url(endpoint_url);
+        }
+
+        let loader = match (provider, profile, secret) {
+            (CredentialProvider::DefaultEnvironment, _, _) => loader,
+            (CredentialProvider::NoCredentials, _, _) => loader.no_credentials(),
+            (CredentialProvider::AwsProfile, Some(profile), _) => loader.profile_name(profile),
+            (CredentialProvider::AwsSecret, _, Some(secret)) => {
+                let credentials = SecretsManagerCredentials::new(secret)
+                    .await?
+                    .into_credentials();
+                loader.credentials_provider(credentials)
+            }
+            (CredentialProvider::AwsProfile, None, _) => {
+                return Err(ParseError(
+                    "profile must be specified if using aws-profile credential provider"
+                        .to_string(),
+                ));
+            }
+            (CredentialProvider::AwsSecret, _, None) => {
+                return Err(ParseError(
+                    "secret must be specified if using aws-secret credential provider".to_string(),
+                ));
+            }
+        };
+
+        let sdk_config = loader.load().await;
+
+        let s3_config = if overrides.any() {
+            // Allow no credentials to be set with only overrides.
+            let base = if let Some(creds_provider) = sdk_config.credentials_provider() {
+                creds_provider.provide_credentials().await.ok()
+            } else {
+                None
+            };
+
+            let merged = overrides.merge_with(base.as_ref())?;
+            config::Builder::from(&sdk_config)
+                .credentials_provider(merged)
+                .force_path_style(force_path_style)
+                .build()
+        } else {
+            config::Builder::from(&sdk_config)
+                .force_path_style(force_path_style)
+                .build()
+        };
+
+        Ok(Client::from_conf(s3_config))
+    }
+
+    /// Create the default S3 client.
+    pub async fn default_s3_client() -> Result<Client> {
+        let no_overrides = CredentialOverrides {
+            access_key_id: None,
+            secret_access_key: None,
+            session_token: None,
+        };
+        Self::create_s3_client(
+            &CredentialProvider::DefaultEnvironment,
+            None,
+            None,
+            None,
+            None,
+            no_overrides,
+            false,
+        )
+        .await
+    }
+}
 
 /// The type of provider for the object.
 #[derive(Debug, Clone)]
@@ -114,8 +282,8 @@ fn construct_credentials(
     access_key_id: impl Into<String>,
     secret_access_key: impl Into<String>,
     session_token: Option<impl Into<String>>,
-) -> Credentials {
-    let mut builder = Credentials::builder()
+) -> aws_credential_types::Credentials {
+    let mut builder = aws_credential_types::Credentials::builder()
         .access_key_id(access_key_id)
         .secret_access_key(secret_access_key)
         .provider_name("copyrite");
@@ -177,7 +345,7 @@ impl SecretsManagerCredentials {
     }
 
     /// Convert into AWS config compatible credentials.
-    pub fn into_credentials(self) -> Credentials {
+    pub fn into_credentials(self) -> aws_credential_types::Credentials {
         construct_credentials(
             self.access_key_id,
             self.secret_access_key,
@@ -216,7 +384,10 @@ impl CredentialOverrides {
 
     /// Merge overrides with base credentials. Each override takes precedence over the corresponding
     /// field in the base credentials.
-    pub fn merge_with(&self, base: Option<&Credentials>) -> Result<Credentials> {
+    pub fn merge_with(
+        &self,
+        base: Option<&aws_credential_types::Credentials>,
+    ) -> Result<aws_credential_types::Credentials> {
         let access_key_id = self
             .access_key_id
             .as_deref()
@@ -247,86 +418,6 @@ impl CredentialOverrides {
             session_token,
         ))
     }
-}
-
-/// Create an S3 client from the credentials provider, profile, region and endpoint url.
-/// Any fields set in `overrides` take precedence over the resolved credential provider values.
-pub async fn create_s3_client(
-    provider: &CredentialProvider,
-    profile: Option<&str>,
-    region: Option<&str>,
-    endpoint_url: Option<&str>,
-    secret: Option<&str>,
-    overrides: CredentialOverrides,
-) -> Result<Client> {
-    let mut loader = aws_config::defaults(BehaviorVersion::latest());
-
-    if let Some(region) = region {
-        loader = loader.region(Region::new(region.to_string()));
-    }
-    if let Some(endpoint_url) = endpoint_url {
-        loader = loader.endpoint_url(endpoint_url);
-    }
-
-    let loader = match (provider, profile, secret) {
-        (CredentialProvider::DefaultEnvironment, _, _) => loader,
-        (CredentialProvider::NoCredentials, _, _) => loader.no_credentials(),
-        (CredentialProvider::AwsProfile, Some(profile), _) => loader.profile_name(profile),
-        (CredentialProvider::AwsSecret, _, Some(secret)) => {
-            let credentials = SecretsManagerCredentials::new(secret)
-                .await?
-                .into_credentials();
-            loader.credentials_provider(credentials)
-        }
-        (CredentialProvider::AwsProfile, None, _) => {
-            return Err(ParseError(
-                "profile must be specified if using aws-profile credential provider".to_string(),
-            ));
-        }
-        (CredentialProvider::AwsSecret, _, None) => {
-            return Err(ParseError(
-                "secret must be specified if using aws-secret credential provider".to_string(),
-            ));
-        }
-    };
-
-    let sdk_config = loader.load().await;
-
-    let s3_config = if overrides.any() {
-        // Allow no credentials to be set with only overrides.
-        let base = if let Some(creds_provider) = sdk_config.credentials_provider() {
-            creds_provider.provide_credentials().await.ok()
-        } else {
-            None
-        };
-
-        let merged = overrides.merge_with(base.as_ref())?;
-        config::Builder::from(&sdk_config)
-            .credentials_provider(merged)
-            .build()
-    } else {
-        config::Builder::from(&sdk_config).build()
-    };
-
-    Ok(Client::from_conf(s3_config))
-}
-
-/// Create the default S3 client.
-pub async fn default_s3_client() -> Result<Client> {
-    let no_overrides = CredentialOverrides {
-        access_key_id: None,
-        secret_access_key: None,
-        session_token: None,
-    };
-    create_s3_client(
-        &CredentialProvider::DefaultEnvironment,
-        None,
-        None,
-        None,
-        None,
-        no_overrides,
-    )
-    .await
 }
 
 #[cfg(test)]
