@@ -58,7 +58,7 @@ impl S3Client {
         ))
     }
 
-    /// Create a new source S3Client from CLI compatibility and credentials options.
+    /// Create a new destination S3Client from CLI compatibility and credentials options.
     pub async fn new_from_cli_destination(
         credentials: &Credentials,
         compatibility: &Compatibility,
