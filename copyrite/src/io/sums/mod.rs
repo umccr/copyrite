@@ -3,10 +3,10 @@
 
 use crate::checksum::file::SumsFile;
 use crate::error::{ApiError, Result};
+use crate::io::S3Client;
 use crate::io::sums::aws::S3Builder;
 use crate::io::sums::file::FileBuilder;
-use crate::io::{Provider, default_s3_client};
-use aws_sdk_s3::Client;
+use crate::io::Provider;
 use dyn_clone::DynClone;
 use futures_util::Stream;
 use std::collections::HashSet;
@@ -61,9 +61,7 @@ dyn_clone::clone_trait_object!(ObjectSums);
 /// Build object sums from object URLs.
 #[derive(Debug, Default)]
 pub struct ObjectSumsBuilder {
-    client: Option<Arc<Client>>,
-    no_get_object_attributes: bool,
-    no_checksum_mode: bool,
+    client: Option<S3Client>,
 }
 
 impl ObjectSumsBuilder {
@@ -75,15 +73,13 @@ impl ObjectSumsBuilder {
             Provider::S3 { bucket, key } => {
                 let client = match self.client {
                     Some(client) => client,
-                    None => Arc::new(default_s3_client().await?),
+                    None => S3Client::new(Arc::new(S3Client::default_s3_client().await?), false, false),
                 };
                 Ok(Box::new(
                     S3Builder::default()
                         .with_key(key)
                         .with_bucket(bucket)
                         .with_client(client)
-                        .with_no_get_object_attributes(self.no_get_object_attributes)
-                        .with_no_checksum_mode(self.no_checksum_mode)
                         .build()?,
                 ))
             }
@@ -91,20 +87,8 @@ impl ObjectSumsBuilder {
     }
 
     /// Set the S3 client if this is an s3 provider.
-    pub fn set_client(mut self, client: Option<Arc<Client>>) -> Self {
+    pub fn set_client(mut self, client: Option<S3Client>) -> Self {
         self.client = client;
-        self
-    }
-
-    /// Avoid `GetObjectAttributes` calls.
-    pub fn with_no_get_object_attributes(mut self, no_get_object_attributes: bool) -> Self {
-        self.no_get_object_attributes = no_get_object_attributes;
-        self
-    }
-
-    /// Disable checksums mode on API calls.
-    pub fn with_no_checksum_mode(mut self, no_checksum_mode: bool) -> Self {
-        self.no_checksum_mode = no_checksum_mode;
         self
     }
 }

@@ -9,8 +9,8 @@ use crate::checksum::standard::StandardCtx;
 use crate::error::Error::ParseError;
 use crate::error::{ApiError, Error, Result};
 use crate::io::Provider;
+use crate::io::S3Client;
 use crate::io::sums::ObjectSums;
-use aws_sdk_s3::Client;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::get_object_attributes::GetObjectAttributesOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
@@ -22,22 +22,19 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::Arc;
 use tokio::io::AsyncRead;
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
 pub struct S3Builder {
-    client: Option<Arc<Client>>,
+    client: Option<S3Client>,
     bucket: Option<String>,
     key: Option<String>,
-    no_get_object_attributes: bool,
-    no_checksum_mode: bool,
 }
 
 impl S3Builder {
     /// Set the client.
-    pub fn with_client(mut self, client: Arc<Client>) -> Self {
+    pub fn with_client(mut self, client: S3Client) -> Self {
         self.client = Some(client);
         self
     }
@@ -54,19 +51,7 @@ impl S3Builder {
         self
     }
 
-    /// Avoid `GetObjectAttributes` calls.
-    pub fn with_no_get_object_attributes(mut self, no_get_object_attributes: bool) -> Self {
-        self.no_get_object_attributes = no_get_object_attributes;
-        self
-    }
-
-    /// Disable checksum mode on API calls.
-    pub fn with_no_checksum_mode(mut self, no_checksum_mode: bool) -> Self {
-        self.no_checksum_mode = no_checksum_mode;
-        self
-    }
-
-    fn get_components(self) -> Result<(Arc<Client>, String, String, bool, bool)> {
+    fn get_components(self) -> Result<(S3Client, String, String)> {
         let error_fn =
             || ParseError("client, bucket and key are required in `S3Builder`".to_string());
 
@@ -74,8 +59,6 @@ impl S3Builder {
             self.client.ok_or_else(error_fn)?,
             self.bucket.ok_or_else(error_fn)?,
             self.key.ok_or_else(error_fn)?,
-            self.no_get_object_attributes,
-            self.no_checksum_mode,
         ))
     }
 
@@ -85,22 +68,18 @@ impl S3Builder {
     }
 }
 
-impl From<(Arc<Client>, String, String, bool, bool)> for S3 {
+impl From<(S3Client, String, String)> for S3 {
     fn from(
-        (client, bucket, key, no_get_object_attributes, no_checksum_mode): (
-            Arc<Client>,
+        (client, bucket, key): (
+            S3Client,
             String,
             String,
-            bool,
-            bool,
         ),
     ) -> Self {
         Self::new(
             client,
             bucket,
             key,
-            no_get_object_attributes,
-            no_checksum_mode,
         )
     }
 }
@@ -108,24 +87,20 @@ impl From<(Arc<Client>, String, String, bool, bool)> for S3 {
 /// An S3 object and AWS-related existing sums.
 #[derive(Debug, Clone)]
 pub struct S3 {
-    client: Arc<Client>,
+    client: S3Client,
     bucket: String,
     key: String,
     get_object_attributes: Option<GetObjectAttributesOutput>,
     head_object: HashMap<Option<u64>, HeadObjectOutput>,
     api_errors: HashSet<ApiError>,
-    no_get_object_attributes: bool,
-    no_checksum_mode: bool,
 }
 
 impl S3 {
     /// Create a new S3 object.
     pub fn new(
-        client: Arc<Client>,
+        client: S3Client,
         bucket: String,
         key: String,
-        no_get_object_attributes: bool,
-        no_checksum_mode: bool,
     ) -> S3 {
         Self {
             client,
@@ -134,8 +109,6 @@ impl S3 {
             get_object_attributes: None,
             head_object: HashMap::new(),
             api_errors: HashSet::new(),
-            no_get_object_attributes,
-            no_checksum_mode,
         }
     }
 
@@ -143,6 +116,7 @@ impl S3 {
     pub async fn get_existing_sums(&self) -> Result<Option<SumsFile>> {
         match self
             .client
+            .inner()
             .get_object()
             .bucket(&self.bucket)
             .key(SumsFile::format_sums_file(&self.key))
@@ -164,7 +138,7 @@ impl S3 {
     /// Get the `GetObjectAttributes` output for the target file. This caches the result in
     /// memory so that subsequent calls do not repeat the query.
     pub async fn get_object_attributes(&mut self) -> Option<&GetObjectAttributesOutput> {
-        if self.no_get_object_attributes {
+        if self.client.no_get_object_attributes() {
             return None;
         }
 
@@ -174,6 +148,7 @@ impl S3 {
 
         let attributes = self
             .client
+            .inner()
             .get_object_attributes()
             .bucket(&self.bucket)
             .key(SumsFile::format_target_file(&self.key))
@@ -202,11 +177,12 @@ impl S3 {
 
         let mut head = self
             .client
+            .inner()
             .head_object()
             .bucket(&self.bucket)
             .key(SumsFile::format_target_file(&self.key))
             .set_part_number(part_number.map(i32::try_from).transpose()?);
-        if !self.no_checksum_mode {
+        if !self.client.no_checksum_mode() {
             head = head.checksum_mode(ChecksumMode::Enabled);
         }
         let head_object = head.send().await?;
@@ -473,6 +449,7 @@ impl S3 {
     pub async fn object_reader(&self) -> Result<impl AsyncRead + 'static> {
         Ok(Box::new(
             self.client
+                .inner()
                 .get_object()
                 .bucket(&self.bucket)
                 .key(SumsFile::format_target_file(&self.key))
@@ -497,6 +474,7 @@ impl S3 {
     pub async fn put_sums(&self, sums_file: &SumsFile) -> Result<()> {
         let key = SumsFile::format_sums_file(&self.key);
         self.client
+            .inner()
             .put_object()
             .checksum_algorithm(ChecksumAlgorithm::Crc64Nvme)
             .bucket(&self.bucket)
@@ -546,7 +524,9 @@ pub(crate) mod test {
     use crate::checksum::standard::test::EXPECTED_MD5_SUM;
     use crate::task::generate::test::generate_for;
     use crate::test::{TEST_FILE_NAME, TEST_FILE_SIZE};
+    use aws_sdk_s3::Client;
     use aws_sdk_s3::operation::head_object::builders::HeadObjectOutputBuilder;
+    use std::sync::Arc;
     use aws_sdk_s3::types;
     use aws_sdk_s3::types::GetObjectAttributesParts;
     use aws_smithy_mocks::{Rule, RuleMode, mock, mock_client};
@@ -570,7 +550,7 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_multi_part_with_sha256_different_part_sizes() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(Arc::new(mock_multi_part_with_sha256_different_part_sizes()))
+            .with_client(S3Client::new(Arc::new(mock_multi_part_with_sha256_different_part_sizes()), false, false))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -596,7 +576,7 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_multi_part_etag_only_different_part_sizes() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(Arc::new(mock_multi_part_etag_only_different_part_sizes()))
+            .with_client(S3Client::new(Arc::new(mock_multi_part_etag_only_different_part_sizes()), false, false))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -619,7 +599,7 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_multi_part_with_sha256() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(Arc::new(mock_multi_part_with_sha256()))
+            .with_client(S3Client::new(Arc::new(mock_multi_part_with_sha256()), false, false))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -649,7 +629,7 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_multi_part_etag_only() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(Arc::new(mock_multi_part_etag_only()))
+            .with_client(S3Client::new(Arc::new(mock_multi_part_etag_only()), false, false))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -667,7 +647,7 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_single_part_with_sha256() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(Arc::new(mock_single_part_with_sha256()))
+            .with_client(S3Client::new(Arc::new(mock_single_part_with_sha256()), false, false))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;
@@ -685,7 +665,7 @@ pub(crate) mod test {
     #[tokio::test]
     pub async fn test_single_part_etag_only() -> anyhow::Result<()> {
         let mut s3 = S3Builder::default()
-            .with_client(Arc::new(mock_single_part_etag_only()))
+            .with_client(S3Client::new(Arc::new(mock_single_part_etag_only()), false, false))
             .with_bucket("bucket".to_string())
             .with_key("key".to_string())
             .build()?;

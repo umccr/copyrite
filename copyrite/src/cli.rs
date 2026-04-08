@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::io::S3Client;
 use crate::io::sums::ObjectSumsBuilder;
 use crate::io::sums::channel::ChannelReader;
-use crate::io::{CredentialOverrides, Provider, create_s3_client, default_s3_client};
+use crate::io::{CredentialOverrides, Provider};
 use crate::stats;
 use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateStats};
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
@@ -313,7 +313,7 @@ impl Generate {
                 );
 
                 if clients.is_empty() {
-                    clients = vec![S3Client::new(Arc::new(default_s3_client().await?), false, false)];
+                    clients = vec![S3Client::new(Arc::new(S3Client::default_s3_client().await?), false, false)];
                 }
 
                 let ctxs = SumCtxPairs::from_comparable(objects)?;
@@ -1100,7 +1100,7 @@ impl Compatibility {
             || self.no_checksum_mode()
     }
 
-    /// Check if any source or destination specific options are set.
+    /// Check if any source or destination options are set.
     pub fn has_prefixed_options(&self) -> bool {
         self.source_s3_compatible
             || self.source_force_path_style
@@ -1336,70 +1336,70 @@ pub struct Credentials {
 
 impl Credentials {
     /// Resolve the effective source credential provider.
-    fn effective_source_credential_provider(&self) -> CredentialProvider {
+    pub fn effective_source_credential_provider(&self) -> CredentialProvider {
         self.source_credential_provider
             .or(self.credential_provider)
             .unwrap_or_default()
     }
 
     /// Resolve the effective destination credential provider.
-    fn effective_destination_credential_provider(&self) -> CredentialProvider {
+    pub fn effective_destination_credential_provider(&self) -> CredentialProvider {
         self.destination_credential_provider
             .or(self.credential_provider)
             .unwrap_or_default()
     }
 
     /// Resolve the effective source profile.
-    fn effective_source_profile(&self) -> Option<&str> {
+    pub fn effective_source_profile(&self) -> Option<&str> {
         self.source_profile
             .as_deref()
             .or(self.profile.as_deref())
     }
 
     /// Resolve the effective destination profile.
-    fn effective_destination_profile(&self) -> Option<&str> {
+    pub fn effective_destination_profile(&self) -> Option<&str> {
         self.destination_profile
             .as_deref()
             .or(self.profile.as_deref())
     }
 
     /// Resolve the effective source secret.
-    fn effective_source_secret(&self) -> Option<&str> {
+    pub fn effective_source_secret(&self) -> Option<&str> {
         self.source_secret
             .as_deref()
             .or(self.secret.as_deref())
     }
 
     /// Resolve the effective destination secret.
-    fn effective_destination_secret(&self) -> Option<&str> {
+    pub fn effective_destination_secret(&self) -> Option<&str> {
         self.destination_secret
             .as_deref()
             .or(self.secret.as_deref())
     }
 
     /// Resolve the effective source region.
-    fn effective_source_region(&self) -> Option<&str> {
+    pub fn effective_source_region(&self) -> Option<&str> {
         self.source_region
             .as_deref()
             .or(self.region.as_deref())
     }
 
     /// Resolve the effective destination region.
-    fn effective_destination_region(&self) -> Option<&str> {
+    pub fn effective_destination_region(&self) -> Option<&str> {
         self.destination_region
             .as_deref()
             .or(self.region.as_deref())
     }
 
     /// Resolve the effective source endpoint URL.
-    fn effective_source_endpoint_url(&self) -> Option<&str> {
+    pub fn effective_source_endpoint_url(&self) -> Option<&str> {
         self.source_endpoint_url
             .as_deref()
             .or(self.endpoint_url.as_deref())
     }
 
     /// Resolve the effective destination endpoint URL.
-    fn effective_destination_endpoint_url(&self) -> Option<&str> {
+    pub fn effective_destination_endpoint_url(&self) -> Option<&str> {
         self.destination_endpoint_url
             .as_deref()
             .or(self.endpoint_url.as_deref())
@@ -1407,40 +1407,18 @@ impl Credentials {
 
     /// Construct the source client from the credentials.
     pub async fn source_client(&self, compatibility: &Compatibility) -> Result<S3Client> {
-        let client = create_s3_client(
-            &self.effective_source_credential_provider(),
-            self.effective_source_profile(),
-            self.effective_source_region(),
-            self.effective_source_endpoint_url(),
-            self.effective_source_secret(),
-            self.source_overrides(),
-            compatibility.source_force_path_style(),
-        )
-        .await?;
-        Ok(S3Client::new(
-            Arc::new(client),
-            compatibility.source_no_get_object_attributes(),
-            compatibility.source_no_checksum_mode(),
-        ))
+        S3Client::new_from_cli_source(
+            self,
+            compatibility
+        ).await
     }
 
     /// Construct the destination client from the credentials.
     pub async fn destination_client(&self, compatibility: &Compatibility) -> Result<S3Client> {
-        let client = create_s3_client(
-            &self.effective_destination_credential_provider(),
-            self.effective_destination_profile(),
-            self.effective_destination_region(),
-            self.effective_destination_endpoint_url(),
-            self.effective_destination_secret(),
-            self.destination_overrides(),
-            compatibility.destination_force_path_style(),
-        )
-        .await?;
-        Ok(S3Client::new(
-            Arc::new(client),
-            compatibility.destination_no_get_object_attributes(),
-            compatibility.destination_no_checksum_mode(),
-        ))
+        S3Client::new_from_cli_destination(
+            self,
+            compatibility
+        ).await
     }
 
     /// Check if the default credentials are being used without any overrides.
@@ -1453,7 +1431,7 @@ impl Credentials {
             && !self.destination_overrides().any()
     }
 
-    /// Check if any source or destination specific options are set.
+    /// Check if any source or destination options are set.
     pub fn has_prefixed_options(&self) -> bool {
         self.source_credential_provider.is_some()
             || self.destination_credential_provider.is_some()
@@ -1473,7 +1451,7 @@ impl Credentials {
             || self.destination_session_token.is_some()
     }
 
-    fn source_overrides(&self) -> CredentialOverrides {
+    pub fn source_overrides(&self) -> CredentialOverrides {
         CredentialOverrides::new(
             self.source_access_key_id
                 .clone()
@@ -1487,7 +1465,7 @@ impl Credentials {
         )
     }
 
-    fn destination_overrides(&self) -> CredentialOverrides {
+    pub fn destination_overrides(&self) -> CredentialOverrides {
         CredentialOverrides::new(
             self.destination_access_key_id
                 .clone()

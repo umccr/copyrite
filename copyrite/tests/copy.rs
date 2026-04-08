@@ -7,7 +7,7 @@ use aws_sdk_s3::Client;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::ChecksumMode;
 use copyrite::cli::{Command, CredentialProvider};
-use copyrite::io::{CredentialOverrides, Provider, create_s3_client};
+use copyrite::io::{CredentialOverrides, Provider, S3Client};
 use copyrite::test::TestFileBuilder;
 use dotenvy::dotenv;
 use envy::prefixed;
@@ -67,7 +67,7 @@ async fn copy_test() -> Result<()> {
     let config = TestConfig::load()?;
     let file = TestFileBuilder::new()?.generate_bench_defaults()?;
     let no_overrides = CredentialOverrides::new(None, None, None);
-    let client = create_s3_client(
+    let client = S3Client::create_s3_client(
         &CredentialProvider::DefaultEnvironment,
         None,
         None,

@@ -8,9 +8,9 @@ use crate::cli::{CopyMode, MetadataCopy};
 use crate::error::Error::CopyError;
 use crate::error::{ApiError, Error, Result};
 use crate::io::Provider;
+use crate::io::S3Client;
 use crate::io::copy::{CopyResult, CopyState, MultiPartOptions, ObjectCopy, ObjectCopyBuilder};
 use crate::io::sums::ObjectSumsBuilder;
-use aws_sdk_s3::Client;
 use console::style;
 use futures_util::future::join_all;
 use indicatif::{HumanBytes, ProgressBar, ProgressState, ProgressStyle};
@@ -18,7 +18,6 @@ use std::cmp::min;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter, Write};
 use std::future::Future;
-use std::sync::Arc;
 use std::{fmt, result};
 
 pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 8 * 1024 * 1024; // 8mib
@@ -33,12 +32,10 @@ pub struct CopyTaskBuilder {
     metadata_mode: MetadataCopy,
     tag_mode: MetadataCopy,
     copy_mode: CopyMode,
-    source_client: Option<Arc<Client>>,
-    destination_client: Option<Arc<Client>>,
+    source_client: Option<S3Client>,
+    destination_client: Option<S3Client>,
     concurrency: Option<usize>,
     api_errors: HashSet<ApiError>,
-    no_get_object_attributes: bool,
-    no_checksum_mode: bool,
     ui: bool,
 }
 
@@ -124,13 +121,13 @@ impl CopyTaskBuilder {
     }
 
     /// Set the source S3 client to use for S3 copies.
-    pub fn with_source_client(mut self, client: Arc<Client>) -> Self {
+    pub fn with_source_client(mut self, client: S3Client) -> Self {
         self.source_client = Some(client);
         self
     }
 
     /// Set the destination S3 client to use for S3 copies.
-    pub fn with_destination_client(mut self, client: Arc<Client>) -> Self {
+    pub fn with_destination_client(mut self, client: S3Client) -> Self {
         self.destination_client = Some(client);
         self
     }
@@ -138,18 +135,6 @@ impl CopyTaskBuilder {
     /// Set the S3 client to use for S3 copies.
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = Some(concurrency);
-        self
-    }
-
-    /// Avoid `GetObjectAttributes` calls.
-    pub fn with_no_get_object_attributes(mut self, no_get_object_attributes: bool) -> Self {
-        self.no_get_object_attributes = no_get_object_attributes;
-        self
-    }
-
-    /// Disable checksum mode on `HeadObject` calls.
-    pub fn with_no_checksum_mode(mut self, no_checksum_mode: bool) -> Self {
-        self.no_checksum_mode = no_checksum_mode;
         self
     }
 
@@ -248,8 +233,6 @@ impl CopyTaskBuilder {
         // Only use the sums file if the size is not set at the source.
         let sums = if self.part_size.is_none() {
             let mut object = ObjectSumsBuilder::default()
-                .with_no_get_object_attributes(self.no_get_object_attributes)
-                .with_no_checksum_mode(self.no_checksum_mode)
                 .set_client(self.source_client.clone())
                 .build(self.source.to_string())
                 .await?;
@@ -730,6 +713,7 @@ pub(crate) mod test {
     use crate::test::{TEST_FILE_SIZE, TestFileBuilder};
     use anyhow::Result;
     use aws_sdk_s3::Client;
+    use std::sync::Arc;
     use aws_sdk_s3::operation::get_object::GetObjectError;
     use aws_sdk_s3::operation::get_object_tagging::GetObjectTaggingOutput;
     use aws_sdk_s3::operation::head_object::HeadObjectOutput;
@@ -781,37 +765,37 @@ pub(crate) mod test {
         let lt_threshold = builder
             .clone()
             .with_multipart_threshold(Some(TEST_FILE_SIZE + 1))
-            .with_source_client(Arc::new(mock_size(
+            .with_source_client(S3Client::new(Arc::new(mock_size(
                 TEST_FILE_SIZE,
                 mock_single_part_etag_only_rule(),
-            )));
+            )), false, false));
         assert_eq!(lt_threshold.build().await?.part_size, None);
 
         // S3 to S3 will always prefer the original upload settings so even if the size is greater than the
         // threshold, it should still be single part.
-        let gt_threshold = builder.clone().with_source_client(Arc::new(mock_size(
+        let gt_threshold = builder.clone().with_source_client(S3Client::new(Arc::new(mock_size(
             TEST_FILE_SIZE,
             mock_single_part_etag_only_rule(),
-        )));
+        )), false, false));
         assert_eq!(gt_threshold.build().await?.part_size, None);
 
         // If it was originally multipart, it should prefer that even if below the threshold.
         let multipart_lt_threshold = builder
             .clone()
             .with_multipart_threshold(Some(TEST_FILE_SIZE + 1))
-            .with_source_client(Arc::new(mock_size(
+            .with_source_client(S3Client::new(Arc::new(mock_size(
                 TEST_FILE_SIZE,
                 mock_multi_part_etag_only_rule(),
-            )));
+            )), false, false));
         assert_eq!(
             multipart_lt_threshold.build().await?.part_size,
             Some(214748365)
         );
 
-        let multipart_gt_threshold = builder.clone().with_source_client(Arc::new(mock_size(
+        let multipart_gt_threshold = builder.clone().with_source_client(S3Client::new(Arc::new(mock_size(
             TEST_FILE_SIZE,
             mock_multi_part_etag_only_rule(),
-        )));
+        )), false, false));
         assert_eq!(
             multipart_gt_threshold.build().await?.part_size,
             Some(214748365)
@@ -821,18 +805,18 @@ pub(crate) mod test {
         let part_size_set = builder
             .clone()
             .with_part_size(Some(5242880))
-            .with_source_client(Arc::new(mock_size(
+            .with_source_client(S3Client::new(Arc::new(mock_size(
                 TEST_FILE_SIZE,
                 mock_single_part_etag_only_rule(),
-            )));
+            )), false, false));
         assert_eq!(part_size_set.build().await?.part_size, Some(5242880));
         let part_size_set_multipart = builder
             .clone()
             .with_part_size(Some(5242880))
-            .with_source_client(Arc::new(mock_size(
+            .with_source_client(S3Client::new(Arc::new(mock_size(
                 TEST_FILE_SIZE,
                 mock_multi_part_etag_only_rule(),
-            )));
+            )), false, false));
         assert_eq!(
             part_size_set_multipart.build().await?.part_size,
             Some(5242880)
@@ -861,20 +845,20 @@ pub(crate) mod test {
         let part_size_err_max = builder
             .clone()
             .with_part_size(Some(60000000000))
-            .with_source_client(Arc::new(mock_size(
+            .with_source_client(S3Client::new(Arc::new(mock_size(
                 TEST_FILE_SIZE,
                 mock_single_part_etag_only_rule(),
-            )));
+            )), false, false));
         assert!(part_size_err_max.build().await.is_err());
         // If the part size exceeds the limits, this should be an error.
         let part_size_err_min =
             builder
                 .clone()
                 .with_part_size(Some(1))
-                .with_source_client(Arc::new(mock_size(
+                .with_source_client(S3Client::new(Arc::new(mock_size(
                     TEST_FILE_SIZE,
                     mock_single_part_etag_only_rule(),
-                )));
+                )), false, false));
         assert!(part_size_err_min.build().await.is_err());
 
         Ok(())

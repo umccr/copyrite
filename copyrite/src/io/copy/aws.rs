@@ -5,8 +5,8 @@ use crate::checksum::file::SumsFile;
 use crate::cli::MetadataCopy;
 use crate::error::Error::{CopyError, ParseError};
 use crate::error::{ApiError, Error, Result};
+use crate::io::S3Client;
 use crate::io::copy::{CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part};
-use aws_sdk_s3::Client;
 use aws_sdk_s3::operation::get_object_tagging::{GetObjectTaggingError, GetObjectTaggingOutput};
 use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
 use aws_sdk_s3::operation::upload_part::UploadPartOutput;
@@ -19,13 +19,12 @@ use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_types::byte_stream::ByteStream;
 use std::collections::HashMap;
 use std::result;
-use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
 pub struct S3Builder {
-    client: Option<Arc<Client>>,
+    client: Option<S3Client>,
     metadata_mode: MetadataCopy,
     tag_mode: MetadataCopy,
     source: Option<BucketKey>,
@@ -34,7 +33,7 @@ pub struct S3Builder {
 
 impl S3Builder {
     /// Set the client.
-    pub fn with_client(mut self, client: Arc<Client>) -> Self {
+    pub fn with_client(mut self, client: S3Client) -> Self {
         self.client = Some(client);
         self
     }
@@ -90,7 +89,7 @@ impl S3Builder {
 
 impl
     From<(
-        Arc<Client>,
+        S3Client,
         MetadataCopy,
         MetadataCopy,
         Option<BucketKey>,
@@ -99,7 +98,7 @@ impl
 {
     fn from(
         (client, metadata_mode, tag_mode, source, destination): (
-            Arc<Client>,
+            S3Client,
             MetadataCopy,
             MetadataCopy,
             Option<BucketKey>,
@@ -172,7 +171,7 @@ pub struct BucketKey {
 /// An S3 object and AWS-related existing sums.
 #[derive(Debug, Clone)]
 pub struct S3 {
-    client: Arc<Client>,
+    client: S3Client,
     metadata_mode: MetadataCopy,
     tag_mode: MetadataCopy,
     source: Option<BucketKey>,
@@ -216,6 +215,7 @@ impl S3 {
         bucket: &str,
     ) -> result::Result<HeadObjectOutput, SdkError<HeadObjectError, HttpResponse>> {
         self.client
+            .inner()
             .head_object()
             .bucket(bucket)
             .key(key)
@@ -230,6 +230,7 @@ impl S3 {
         bucket: &str,
     ) -> result::Result<GetObjectTaggingOutput, SdkError<GetObjectTaggingError, HttpResponse>> {
         self.client
+            .inner()
             .get_object_tagging()
             .bucket(bucket)
             .key(key)
@@ -239,7 +240,7 @@ impl S3 {
 
     /// Create a new S3 object.
     pub fn new(
-        client: Arc<Client>,
+        client: S3Client,
         metadata_mode: MetadataCopy,
         tag_mode: MetadataCopy,
         source: Option<BucketKey>,
@@ -265,6 +266,7 @@ impl S3 {
     ) -> Result<(String, Vec<ApiError>)> {
         let do_upload = |tagging, metadata, additional_checksum| async {
             self.client
+                .inner()
                 .create_multipart_upload()
                 .set_tagging(tagging)
                 .set_metadata(metadata)
@@ -330,6 +332,7 @@ impl S3 {
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
         let do_copy = |tagging, tagging_set, metadata, metadata_set, additional_checksum| async {
             self.client
+                .inner()
                 .copy_object()
                 .tagging_directive(tagging)
                 .set_tagging(tagging_set)
@@ -432,6 +435,7 @@ impl S3 {
         if let Some(part_number) = multi_part.part_number {
             let part = self
                 .client
+                .inner()
                 .upload_part_copy()
                 .upload_id(&upload_id)
                 .part_number(i32::try_from(part_number)?)
@@ -478,6 +482,7 @@ impl S3 {
 
         let result = self
             .client
+            .inner()
             .get_object()
             .bucket(&source.bucket)
             .key(&source.key)
@@ -504,6 +509,7 @@ impl S3 {
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
         let do_put = |tags, metadata, additional_checksum, buf| async {
             self.client
+                .inner()
                 .put_object()
                 .set_tagging(tags)
                 .set_metadata(metadata)
@@ -590,6 +596,7 @@ impl S3 {
         if let Some(part_number) = multi_part.part_number {
             let part = self
                 .client
+                .inner()
                 .upload_part()
                 .upload_id(&upload_id)
                 .set_checksum_algorithm(additional_checksum)
@@ -630,6 +637,7 @@ impl S3 {
         parts.sort_by(|a, b| a.part_number.cmp(&b.part_number));
 
         self.client
+            .inner()
             .complete_multipart_upload()
             .bucket(bucket)
             .key(key)

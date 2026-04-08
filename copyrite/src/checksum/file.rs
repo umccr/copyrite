@@ -4,6 +4,7 @@
 use crate::checksum::Ctx;
 use crate::error::Error::SumsFileError;
 use crate::error::{Error, Result};
+use crate::io::S3Client;
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_string};
@@ -26,10 +27,10 @@ pub struct State {
 
 impl State {
     /// Build from a name.
-    pub async fn try_from(name: String, no_get_object_attributes: bool) -> Result<Self> {
+    pub async fn try_from(name: String, client: Option<S3Client>) -> Result<Self> {
         Ok(Self {
             object_sums: ObjectSumsBuilder::default()
-                .with_no_get_object_attributes(no_get_object_attributes)
+                .set_client(client)
                 .build(SumsFile::format_target_file(&name))
                 .await?,
             name,
