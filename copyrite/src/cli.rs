@@ -97,6 +97,18 @@ impl Command {
             }
         }
 
+        // Source/destination-prefixed credential options are only valid for the `copy` command.
+        if !matches!(args.commands, Subcommands::Copy(_))
+            && args.credentials.has_prefixed_options()
+        {
+            return Err(ParseError(
+                "source and destination credential options are only available for the `copy` \
+                 command; use the unprefixed versions instead (e.g. `--credential-provider` \
+                 instead of `--source-credential-provider`)"
+                    .to_string(),
+            ));
+        }
+
         Ok(())
     }
 
@@ -1060,57 +1072,40 @@ impl Compatibility {
     }
 }
 
-/// Options related to credentials. Options prefixed with `source_` affect `check`, `generate` and
-/// the source of a `copy` command. These options also have an alias without the prefix as they are
-/// used in all commands. Options prefixed with `destination_` only affect the destination of a
-/// `copy` command.
+/// Options related to credentials. Unprefixed options apply to both source and destination. For
+/// `copy`, options can be prefixed with `source_` or `destination_` to target one side. `generate`
+/// and `check` only support the unprefixed version of options. Prefixed options take precedence
+/// over unprefixed options in copies.
 #[derive(Args, Debug)]
 #[group(required = false)]
 #[command(next_help_heading = "Credentials")]
 pub struct Credentials {
-    /// The credentials source credentials to use. This affects the credentials used for `check`
-    /// `generate` and the source of a `copy` operation.
+    /// The credential provider to use. Defaults to `default-environment` if not specified.
+    ///
+    /// For the copy command, each credential option can also be prefixed with
+    /// `source-` or `destination-` to target one side independently (e.g.
+    /// `--source-credential-provider`, `--destination-region`). When both prefixed and
+    /// unprefixed versions are specified, the prefixed version takes precedence.
+    /// Prefixed options are not available for `generate` or `check`.
     #[arg(
         global = true,
         long,
-        env = "COPYRITE_SOURCE_CREDENTIAL_PROVIDER",
-        default_value = "default-environment",
-        alias = "credential-provider",
-        requires_if("aws-profile", "source_profile"),
-        requires_if("aws-secret", "source_secret"),
+        env = "COPYRITE_CREDENTIAL_PROVIDER",
+        requires_if("aws-profile", "profile"),
+        requires_if("aws-secret", "secret"),
         hide_short_help = true
     )]
-    pub source_credential_provider: CredentialProvider,
-    /// The destination credentials to use. This only affects the credentials used for the
-    /// destination of a `copy` operation.
+    pub credential_provider: Option<CredentialProvider>,
+    /// The profile to use if the credential provider is `aws-profile`.
     #[arg(
         global = true,
         long,
-        env = "COPYRITE_DESTINATION_CREDENTIAL_PROVIDER",
-        default_value = "default-environment",
-        requires_if("aws-profile", "destination_profile"),
-        requires_if("aws-secret", "destination_secret"),
+        env = "COPYRITE_PROFILE",
+
         hide_short_help = true
     )]
-    pub destination_credential_provider: CredentialProvider,
-    /// The source profile to use if the source credential provider is `aws-profile`.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_SOURCE_PROFILE",
-        alias = "profile",
-        hide_short_help = true
-    )]
-    pub source_profile: Option<String>,
-    /// The destination profile to use if the destination credential provider is `aws-profile`.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_PROFILE",
-        hide_short_help = true
-    )]
-    pub destination_profile: Option<String>,
-    /// The source secret name or ARN to use if the source credential provider is `aws-secret`.
+    pub profile: Option<String>,
+    /// The secret name or ARN to use if the credential provider is `aws-secret`.
     ///
     /// The secret must be a JSON object, with only `access_key_id` and `secret_access_key`
     /// being required:
@@ -1127,129 +1122,256 @@ pub struct Credentials {
     #[arg(
         global = true,
         long,
-        env = "COPYRITE_SOURCE_SECRET",
-        alias = "secret",
+        env = "COPYRITE_SECRET",
+
         hide_short_help = true,
         verbatim_doc_comment
     )]
-    pub source_secret: Option<String>,
-    /// The destination secret name or ARN to use if the destination credential provider is
-    /// `aws-secret`. See `--source-secret` for the expected JSON format.
+    pub secret: Option<String>,
+    /// Set the region for the credential provider.
     #[arg(
         global = true,
         long,
-        env = "COPYRITE_DESTINATION_SECRET",
+        env = "COPYRITE_REGION",
+
         hide_short_help = true
     )]
-    pub destination_secret: Option<String>,
-    /// Set the region for the source credential provider.
+    pub region: Option<String>,
+    /// Set the endpoint URL for AWS calls. This allows using a different endpoint that has an
+    /// S3-compatible storage API.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_ENDPOINT_URL",
+
+        hide_short_help = true
+    )]
+    pub endpoint_url: Option<String>,
+    /// The AWS access key ID. Overrides the value from the selected credential provider.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_ACCESS_KEY_ID",
+
+        hide_short_help = true
+    )]
+    pub access_key_id: Option<String>,
+    /// The AWS secret access key. Overrides the value from the selected credential provider.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SECRET_ACCESS_KEY",
+
+        hide_short_help = true
+    )]
+    pub secret_access_key: Option<String>,
+    /// The AWS session token. Overrides the value from the selected credential provider.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SESSION_TOKEN",
+
+        hide_short_help = true
+    )]
+    pub session_token: Option<String>,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_CREDENTIAL_PROVIDER",
+        requires_if("aws-profile", "source_profile"),
+        requires_if("aws-secret", "source_secret"),
+        hide = true
+    )]
+    pub source_credential_provider: Option<CredentialProvider>,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_PROFILE",
+        hide = true
+    )]
+    pub source_profile: Option<String>,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_SOURCE_SECRET",
+        hide = true
+    )]
+    pub source_secret: Option<String>,
     #[arg(
         global = true,
         long,
         env = "COPYRITE_SOURCE_REGION",
-        alias = "region",
-        hide_short_help = true
+        hide = true
     )]
     pub source_region: Option<String>,
-    /// Set the region for the destination credential provider.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_REGION",
-        hide_short_help = true
-    )]
-    pub destination_region: Option<String>,
-    /// Set the source endpoint URL for AWS calls. This allows using a different endpoint that
-    /// has an S3-compatible storage API.
     #[arg(
         global = true,
         long,
         env = "COPYRITE_SOURCE_ENDPOINT_URL",
-        alias = "endpoint-url",
-        hide_short_help = true
+        hide = true
     )]
     pub source_endpoint_url: Option<String>,
-    /// Set the destination endpoint URL for AWS calls. This allows using a different endpoint
-    /// that has an S3-compatible storage API.
-    #[arg(
-        global = true,
-        long,
-        env = "COPYRITE_DESTINATION_ENDPOINT_URL",
-        hide_short_help = true
-    )]
-    pub destination_endpoint_url: Option<String>,
-    /// The source AWS access key ID. Overrides the value from the selected credential provider.
     #[arg(
         global = true,
         long,
         env = "COPYRITE_SOURCE_ACCESS_KEY_ID",
-        alias = "access-key-id",
-        hide_short_help = true
+        hide = true
     )]
     pub source_access_key_id: Option<String>,
-    /// The source AWS secret access key. Overrides the value from the selected credential
-    /// provider.
     #[arg(
         global = true,
         long,
         env = "COPYRITE_SOURCE_SECRET_ACCESS_KEY",
-        alias = "secret-access-key",
-        hide_short_help = true
+        hide = true
     )]
     pub source_secret_access_key: Option<String>,
-    /// The source AWS session token. Overrides the value from the selected credential provider.
     #[arg(
         global = true,
         long,
         env = "COPYRITE_SOURCE_SESSION_TOKEN",
-        alias = "session-token",
-        hide_short_help = true
+        hide = true
     )]
     pub source_session_token: Option<String>,
-    /// The destination AWS access key ID. Overrides the value from the selected credential
-    /// provider.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_CREDENTIAL_PROVIDER",
+        requires_if("aws-profile", "destination_profile"),
+        requires_if("aws-secret", "destination_secret"),
+        hide = true
+    )]
+    pub destination_credential_provider: Option<CredentialProvider>,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_PROFILE",
+        hide = true
+    )]
+    pub destination_profile: Option<String>,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_SECRET",
+        hide = true
+    )]
+    pub destination_secret: Option<String>,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_REGION",
+        hide = true
+    )]
+    pub destination_region: Option<String>,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_ENDPOINT_URL",
+        hide = true
+    )]
+    pub destination_endpoint_url: Option<String>,
     #[arg(
         global = true,
         long,
         env = "COPYRITE_DESTINATION_ACCESS_KEY_ID",
-        hide_short_help = true
+        hide = true
     )]
     pub destination_access_key_id: Option<String>,
-    /// The destination AWS secret access key. Overrides the value from the selected credential
-    /// provider.
     #[arg(
         global = true,
         long,
         env = "COPYRITE_DESTINATION_SECRET_ACCESS_KEY",
-        hide_short_help = true
+        hide = true
     )]
     pub destination_secret_access_key: Option<String>,
-    /// The destination AWS session token. Overrides the value from the selected credential
-    /// provider.
     #[arg(
         global = true,
         long,
         env = "COPYRITE_DESTINATION_SESSION_TOKEN",
-        hide_short_help = true
+        hide = true
     )]
     pub destination_session_token: Option<String>,
 }
 
 impl Credentials {
+    /// Resolve the effective source credential provider.
+    fn effective_source_credential_provider(&self) -> CredentialProvider {
+        self.source_credential_provider
+            .or(self.credential_provider)
+            .unwrap_or_default()
+    }
+
+    /// Resolve the effective destination credential provider.
+    fn effective_destination_credential_provider(&self) -> CredentialProvider {
+        self.destination_credential_provider
+            .or(self.credential_provider)
+            .unwrap_or_default()
+    }
+
+    /// Resolve the effective source profile.
+    fn effective_source_profile(&self) -> Option<&str> {
+        self.source_profile
+            .as_deref()
+            .or(self.profile.as_deref())
+    }
+
+    /// Resolve the effective destination profile.
+    fn effective_destination_profile(&self) -> Option<&str> {
+        self.destination_profile
+            .as_deref()
+            .or(self.profile.as_deref())
+    }
+
+    /// Resolve the effective source secret.
+    fn effective_source_secret(&self) -> Option<&str> {
+        self.source_secret
+            .as_deref()
+            .or(self.secret.as_deref())
+    }
+
+    /// Resolve the effective destination secret.
+    fn effective_destination_secret(&self) -> Option<&str> {
+        self.destination_secret
+            .as_deref()
+            .or(self.secret.as_deref())
+    }
+
+    /// Resolve the effective source region.
+    fn effective_source_region(&self) -> Option<&str> {
+        self.source_region
+            .as_deref()
+            .or(self.region.as_deref())
+    }
+
+    /// Resolve the effective destination region.
+    fn effective_destination_region(&self) -> Option<&str> {
+        self.destination_region
+            .as_deref()
+            .or(self.region.as_deref())
+    }
+
+    /// Resolve the effective source endpoint URL.
+    fn effective_source_endpoint_url(&self) -> Option<&str> {
+        self.source_endpoint_url
+            .as_deref()
+            .or(self.endpoint_url.as_deref())
+    }
+
+    /// Resolve the effective destination endpoint URL.
+    fn effective_destination_endpoint_url(&self) -> Option<&str> {
+        self.destination_endpoint_url
+            .as_deref()
+            .or(self.endpoint_url.as_deref())
+    }
+
     /// Construct the source client from the credentials.
     pub async fn source_client(&self, compatibility: &Compatibility) -> Result<Client> {
-        let overrides = CredentialOverrides::new(
-            self.source_access_key_id.clone(),
-            self.source_secret_access_key.clone(),
-            self.source_session_token.clone(),
-        );
         create_s3_client(
-            &self.source_credential_provider,
-            self.source_profile.as_deref(),
-            self.source_region.as_deref(),
-            self.source_endpoint_url.as_deref(),
-            self.source_secret.as_deref(),
-            overrides,
+            &self.effective_source_credential_provider(),
+            self.effective_source_profile(),
+            self.effective_source_region(),
+            self.effective_source_endpoint_url(),
+            self.effective_source_secret(),
+            self.source_overrides(),
             compatibility.force_path_style(),
         )
         .await
@@ -1257,18 +1379,13 @@ impl Credentials {
 
     /// Construct the destination client from the credentials.
     pub async fn destination_client(&self, compatibility: &Compatibility) -> Result<Client> {
-        let overrides = CredentialOverrides::new(
-            self.destination_access_key_id.clone(),
-            self.destination_secret_access_key.clone(),
-            self.destination_session_token.clone(),
-        );
         create_s3_client(
-            &self.destination_credential_provider,
-            self.destination_profile.as_deref(),
-            self.destination_region.as_deref(),
-            self.destination_endpoint_url.as_deref(),
-            self.destination_secret.as_deref(),
-            overrides,
+            &self.effective_destination_credential_provider(),
+            self.effective_destination_profile(),
+            self.effective_destination_region(),
+            self.effective_destination_endpoint_url(),
+            self.effective_destination_secret(),
+            self.destination_overrides(),
             compatibility.force_path_style(),
         )
         .await
@@ -1276,27 +1393,59 @@ impl Credentials {
 
     /// Check if the default credentials are being used without any overrides.
     pub fn is_default(&self) -> bool {
-        self.source_credential_provider.is_default()
-            && self.destination_credential_provider.is_default()
-            && self.source_endpoint_url.is_none()
-            && self.destination_endpoint_url.is_none()
+        self.effective_source_credential_provider().is_default()
+            && self.effective_destination_credential_provider().is_default()
+            && self.effective_source_endpoint_url().is_none()
+            && self.effective_destination_endpoint_url().is_none()
             && !self.source_overrides().any()
             && !self.destination_overrides().any()
     }
 
+    /// Check if any source or destination specific options are set.
+    pub fn has_prefixed_options(&self) -> bool {
+        self.source_credential_provider.is_some()
+            || self.destination_credential_provider.is_some()
+            || self.source_profile.is_some()
+            || self.destination_profile.is_some()
+            || self.source_secret.is_some()
+            || self.destination_secret.is_some()
+            || self.source_region.is_some()
+            || self.destination_region.is_some()
+            || self.source_endpoint_url.is_some()
+            || self.destination_endpoint_url.is_some()
+            || self.source_access_key_id.is_some()
+            || self.destination_access_key_id.is_some()
+            || self.source_secret_access_key.is_some()
+            || self.destination_secret_access_key.is_some()
+            || self.source_session_token.is_some()
+            || self.destination_session_token.is_some()
+    }
+
     fn source_overrides(&self) -> CredentialOverrides {
         CredentialOverrides::new(
-            self.source_access_key_id.clone(),
-            self.source_secret_access_key.clone(),
-            self.source_session_token.clone(),
+            self.source_access_key_id
+                .clone()
+                .or(self.access_key_id.clone()),
+            self.source_secret_access_key
+                .clone()
+                .or(self.secret_access_key.clone()),
+            self.source_session_token
+                .clone()
+                .or(self.session_token.clone()),
         )
     }
 
     fn destination_overrides(&self) -> CredentialOverrides {
         CredentialOverrides::new(
-            self.destination_access_key_id.clone(),
-            self.destination_secret_access_key.clone(),
-            self.destination_session_token.clone(),
+            self.destination_access_key_id
+                .clone()
+                .or(self.access_key_id.clone()),
+            self.destination_secret_access_key
+                .clone()
+                .or(self.secret_access_key.clone()),
+            self.destination_session_token
+                .clone()
+                .or(self.session_token.clone()),
         )
     }
 }
