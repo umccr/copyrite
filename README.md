@@ -109,4 +109,14 @@ The endpoint URL can also be set for S3-compatible endpoint tests:
 COPYRITE_TEST_BUCKET_URI="s3://bucket/prefix" COPYRITE_TEST_ENDPOINT_URL="https://storage.googleapis.com" cargo test --all-features -- --ignored
 ```
 
+This can also source credentials from a secret, and set compatibility options. The full test environment variables are:
+
+| Variable                      | Description                                                                                                  |
+|-------------------------------|--------------------------------------------------------------------------------------------------------------|
+| `COPYRITE_TEST_BUCKET_URI`    | The S3 bucket and prefix to use.                                                                             |
+| `COPYRITE_TEST_ENDPOINT_URL`  | The S3 endpoint URL.                                                                                         |
+| `COPYRITE_TEST_SECRET`        | The AWS Secrets Manager secret name or ARN, this will also set the credential provider type to `aws-secret`. |
+| `COPYRITE_TEST_REGION`        | The AWS region.                                                                                              |
+| `COPYRITE_TEST_S3_COMPATIBLE` | Set to `true` to enable S3-compatibility.                                                                    |
+
 [sums]: docs/ARCHITECTURE.md#the-sums-file

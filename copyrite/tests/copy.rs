@@ -22,6 +22,9 @@ use tempfile::TempDir;
 struct TestConfig {
     bucket_uri: String,
     endpoint_url: Option<String>,
+    secret: Option<String>,
+    region: Option<String>,
+    s3_compatible: Option<bool>,
 }
 
 impl TestConfig {
@@ -43,11 +46,23 @@ impl TestConfig {
         Ok(env)
     }
 
+    fn credential_provider(&self) -> CredentialProvider {
+        if self.secret.is_some() {
+            CredentialProvider::AwsSecret
+        } else {
+            CredentialProvider::DefaultEnvironment
+        }
+    }
+
+    fn is_s3_compatible(&self) -> bool {
+        self.s3_compatible.unwrap_or(false)
+    }
+
     fn format_uri(&self, path: &str) -> String {
         format!("{}/{}", self.bucket_uri, path)
     }
 
-    fn set_endpoint_url(&self, mut commands: Vec<String>) -> Vec<String> {
+    fn set_cli_options(&self, mut commands: Vec<String>) -> Vec<String> {
         if let Some(endpoint_url) = &self.endpoint_url {
             commands.extend([
                 "--source-endpoint-url".to_string(),
@@ -55,6 +70,19 @@ impl TestConfig {
                 "--destination-endpoint-url".to_string(),
                 endpoint_url.to_string(),
             ]);
+        }
+        if let Some(secret) = &self.secret {
+            commands.extend([
+                "--credential-provider".to_string(),
+                "aws-secret".to_string(),
+            ]);
+            commands.extend(["--secret".to_string(), secret.to_string()]);
+        }
+        if let Some(region) = &self.region {
+            commands.extend(["--region".to_string(), region.to_string()]);
+        }
+        if self.is_s3_compatible() {
+            commands.push("--s3-compatible".to_string());
         }
 
         commands
@@ -68,13 +96,13 @@ async fn copy_test() -> Result<()> {
     let file = TestFileBuilder::new()?.generate_bench_defaults()?;
     let no_overrides = CredentialOverrides::new(None, None, None);
     let client = S3Client::create_s3_client(
-        &CredentialProvider::DefaultEnvironment,
+        &config.credential_provider(),
         None,
-        None,
+        config.region.as_deref(),
         config.endpoint_url.as_deref(),
-        None,
+        config.secret.as_deref(),
         no_overrides,
-        false,
+        config.is_s3_compatible(),
     )
     .await?;
 
@@ -100,7 +128,7 @@ async fn local_s3_multipart(file: &Path, config: &TestConfig, client: &Client) -
 
     execute_multipart(file.as_ref(), uri.as_ref(), config).await;
 
-    let head = get_head_object(client, uri.as_ref()).await?;
+    let head = get_head_object(client, uri.as_ref(), config).await?;
     assert_head_multipart(head);
 
     Ok(())
@@ -113,7 +141,7 @@ async fn local_s3_single_part(file: &Path, config: &TestConfig, client: &Client)
 
     execute_single_part(file.as_ref(), uri.as_ref(), config).await;
 
-    let head = get_head_object(client, uri.as_ref()).await?;
+    let head = get_head_object(client, uri.as_ref(), config).await?;
     assert_head_single_part(head);
 
     Ok(())
@@ -126,7 +154,7 @@ async fn s3_s3_multipart(config: &TestConfig, client: &Client) -> Result<()> {
 
     execute_multipart(uri.as_ref(), destination.as_ref(), config).await;
 
-    let head = get_head_object(client, destination.as_ref()).await?;
+    let head = get_head_object(client, destination.as_ref(), config).await?;
     assert_head_multipart(head);
 
     Ok(())
@@ -139,7 +167,7 @@ async fn s3_s3_single_part(config: &TestConfig, client: &Client) -> Result<()> {
 
     execute_single_part(uri.as_ref(), destination.as_ref(), config).await;
 
-    let head = get_head_object(client, destination.as_ref()).await?;
+    let head = get_head_object(client, destination.as_ref(), config).await?;
     assert_head_single_part(head);
 
     Ok(())
@@ -186,15 +214,17 @@ fn assert_original(original: &str, copy: &str) -> Result<()> {
     Ok(())
 }
 
-async fn get_head_object(client: &Client, url: &str) -> Result<HeadObjectOutput> {
+async fn get_head_object(
+    client: &Client,
+    url: &str,
+    config: &TestConfig,
+) -> Result<HeadObjectOutput> {
     let (bucket, key) = Provider::try_from(url)?.into_s3()?;
-    let head = client
-        .head_object()
-        .bucket(bucket)
-        .key(key)
-        .checksum_mode(ChecksumMode::Enabled)
-        .send()
-        .await?;
+    let mut req = client.head_object().bucket(bucket).key(key);
+    if !config.is_s3_compatible() {
+        req = req.checksum_mode(ChecksumMode::Enabled);
+    }
+    let head = req.send().await?;
     Ok(head)
 }
 
@@ -214,7 +244,7 @@ async fn execute_multipart(from: &str, to: &str, config: &TestConfig) {
     .into_iter()
     .map(|s| s.to_string())
     .collect();
-    commands = config.set_endpoint_url(commands);
+    commands = config.set_cli_options(commands);
 
     execute_command(&commands).await;
 }
@@ -235,7 +265,7 @@ async fn execute_single_part(from: &str, to: &str, config: &TestConfig) {
     .into_iter()
     .map(|s| s.to_string())
     .collect();
-    commands = config.set_endpoint_url(commands);
+    commands = config.set_cli_options(commands);
 
     execute_command(&commands).await;
 }
