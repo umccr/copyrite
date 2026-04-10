@@ -57,42 +57,31 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-      - name: Determine arch
-        run: echo "ARCH=$(uname -m)" >> $GITHUB_ENV
-      - name: Builder/runner arch is...
-        run: echo "runner.arch=${{ runner.arch }}, uname=$ARCH"
-      - name: build RPM package
-        id: rpm_build
-        uses: naveenrajm7/rpmbuild@master
+      - name: Install RPM tools
+        run: sudo apt-get update && sudo apt-get install -y rpm rpmbuild || sudo apt-get install -y rpm
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build RPM package
+        run: |
+          RPM_VERSION=$(rpm --specfile pkg/rpm/copyrite.spec --qf '%{version}\n' | head -1)
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          tar czf "rpmbuild/SOURCES/copyrite-${RPM_VERSION}.tar.gz" --transform "s,^,copyrite-${RPM_VERSION}/," --exclude=rpmbuild --exclude=.git --exclude=target -C . .
+          rpmbuild --define "_topdir $(pwd)/rpmbuild" -bb pkg/rpm/copyrite.spec
+      - name: Release RPM assets
+        uses: softprops/action-gh-release@v2
         with:
-          spec_file: "./pkg/rpm/copyrite.spec"
+          files: rpmbuild/RPMS/**/*.rpm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # See https://github.com/jtdor/build-deb-action/issues/17#issuecomment-3434202578
       - run: cp -r pkg/debian .
-      - name: build-debian-package
+      - name: Build Debian package
         uses: jtdor/build-deb-action@v1
         env:
           DEB_BUILD_OPTIONS: noautodbgsym
         with:
           buildpackage-opts: --build=binary --no-sign
-      - name: find .deb assets
-        run: echo $PWD && find . -iname '*.deb'
-      - name: Release debian assets
+      - name: Release Debian assets
         uses: softprops/action-gh-release@v2
         with:
           files: ./debian/artifacts/*.deb
-      - name: Determine arch and rpm path
-        id: rpm_info
-        run: |
-          arch=$(uname -m)
-          echo "arch=$arch" >> $GITHUB_OUTPUT
-          echo "rpm_path=rpmbuild/RPMS/$arch" >> $GITHUB_OUTPUT
-      - name: Builder/runner arch is...
-        run: echo "runner.arch=${{ runner.arch }}, uname=${{ steps.rpm_info.outputs.arch }}"
-      - name: Setup arch path
-        run: echo "RPM_ARCH_PATH=rpmbuild/RPMS/$ARCH" >> $GITHUB_ENV
-      - name: Release rpm assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ steps.rpm_info.outputs.rpm_path }}/*.rpm
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
