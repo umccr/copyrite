@@ -773,7 +773,7 @@ impl Copy {
             .await?;
 
         // If the file existed at the start there must be a sums mismatch.
-        let sums_mismatch = exists;
+        let mismatch = exists;
         let copy_stats = if !self.no_check {
             if ui {
                 println!("{} Checking after copying...", style("[3/3]").bold().dim(),);
@@ -784,7 +784,7 @@ impl Copy {
                     source_client,
                     destination_client,
                     optimization,
-                    sums_mismatch,
+                    mismatch,
                     write_sums_file,
                 )
                 .await
@@ -808,9 +808,9 @@ impl Copy {
                 );
             }
 
-            CopyStats::from_task(result, Some(check_stats), false, sums_mismatch)
+            CopyStats::from_task(result, Some(check_stats), false, mismatch)
         } else {
-            CopyStats::from_task(result, None, false, sums_mismatch)
+            CopyStats::from_task(result, None, false, mismatch)
         };
 
         let elapsed = now.elapsed();
