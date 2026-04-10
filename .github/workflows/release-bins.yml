@@ -63,7 +63,7 @@ jobs:
         run: echo "runner.arch=${{ runner.arch }}, uname=$ARCH"
       - name: build RPM package
         id: rpm_build
-        uses: naveenrajm7/rpmbuild@v1.0.0
+        uses: naveenrajm7/rpmbuild@master
         with:
           spec_file: "./pkg/rpm/copyrite.spec"
       # See https://github.com/jtdor/build-deb-action/issues/17#issuecomment-3434202578
