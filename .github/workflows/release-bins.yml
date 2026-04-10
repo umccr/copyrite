@@ -3,18 +3,21 @@ name: release-binaries
 on:
   push:
     tags:
-      - '*'
+      - 'v[0-9]+.*'
 
 jobs:
   create-release:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: taiki-e/create-gh-release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
   release-binary-assets:
-    permissions: write-all
+    permissions:
+      contents: write
     needs: create-release
     strategy:
       matrix:
@@ -26,12 +29,12 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
 
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: copyrite
@@ -40,7 +43,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   release-linux-packages:
-    permissions: write-all
+    permissions:
+      contents: write
     needs: create-release
     strategy:
       matrix:
@@ -52,43 +56,26 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Determine arch
-        run: echo "ARCH=$(uname -m)" >> $GITHUB_ENV
-      - name: Builder/runner arch is...
-        run: echo "runner.arch=${{ runner.arch }}, uname=$ARCH"
-      - name: build RPM package
-        id: rpm_build
-        uses: naveenrajm7/rpmbuild@master
-        with:
-          spec_file: "./pkg/rpm/copyrite.spec"
-      # See https://github.com/jtdor/build-deb-action/issues/17#issuecomment-3434202578
-      - run: cp -r pkg/debian .
-      - name: build-debian-package
-        uses: jtdor/build-deb-action@v1
-        env:
-          DEB_BUILD_OPTIONS: noautodbgsym
-        with:
-          buildpackage-opts: --build=binary --no-sign
-      - name: find .deb assets
-        run: echo $PWD && find . -iname '*.deb'
-      - name: Release debian assets
+        uses: actions/checkout@v6
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y rpm debhelper build-essential
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build RPM package
+        run: rpmbuild --define "_topdir $(pwd)/rpmbuild" --build-in-place --nodeps -bb pkg/rpm/copyrite.spec
+      - name: Release RPM assets
         uses: softprops/action-gh-release@v2
         with:
-          files: ./debian/artifacts/*.deb
-      - name: Determine arch and rpm path
-        id: rpm_info
-        run: |
-          arch=$(uname -m)
-          echo "arch=$arch" >> $GITHUB_OUTPUT
-          echo "rpm_path=rpmbuild/RPMS/$arch" >> $GITHUB_OUTPUT
-      - name: Builder/runner arch is...
-        run: echo "runner.arch=${{ runner.arch }}, uname=${{ steps.rpm_info.outputs.arch }}"
-      - name: Setup arch path
-        run: echo "RPM_ARCH_PATH=rpmbuild/RPMS/$ARCH" >> $GITHUB_ENV
-      - name: Release rpm assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ steps.rpm_info.outputs.rpm_path }}/*.rpm
+          files: rpmbuild/RPMS/**/*.rpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Debian package
+        env:
+          DEB_BUILD_OPTIONS: noautodbgsym
+        run: |
+          cp -r pkg/debian .
+          dpkg-buildpackage --build=binary --no-sign
+      - name: Release Debian assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ../*.deb

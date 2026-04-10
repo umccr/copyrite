@@ -1,22 +1,15 @@
 Name:           copyrite
-Version:        0.1.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        CLI tool for efficient checksum and copy operations across object stores
 
 License:        MIT
 URL:            https://github.com/mmalenic/copyrite
-Source0:        %{name}-%{version}.tar.gz
-
-BuildRequires:  rustc
-BuildRequires:  cargo
 
 %global debug_package %{nil}
 
 %description
 A CLI tool for efficient checksum and copy operations across object stores.
-
-%prep
-%autosetup
 
 %build
 cargo build --release
@@ -28,5 +21,8 @@ install -D target/release/%{name} %{buildroot}%{_bindir}/%{name}
 %{_bindir}/%{name}
 
 %changelog
+* Fri Apr 10 2026 Marko Malenic <mmalenic1@gmail.com> - 0.3.0-1
+- Release 0.3.0
+
 * Wed Oct 22 2025 Marko Malenic <mmalenic1@gmail.com> - 0.1.0-1
 - Initial package
