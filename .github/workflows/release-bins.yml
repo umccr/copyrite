@@ -58,15 +58,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y rpm debhelper
+        run: sudo apt-get update && sudo apt-get install -y rpm debhelper build-essential
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Build RPM package
-        run: |
-          RPM_VERSION=$(rpm --specfile pkg/rpm/copyrite.spec --qf '%{version}\n' | head -1)
-          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-          tar czf "rpmbuild/SOURCES/copyrite-${RPM_VERSION}.tar.gz" --transform "s,^,copyrite-${RPM_VERSION}/," --exclude=rpmbuild --exclude=.git --exclude=target -C . .
-          rpmbuild --define "_topdir $(pwd)/rpmbuild" --nodeps -bb pkg/rpm/copyrite.spec
+        run: rpmbuild --define "_topdir $(pwd)/rpmbuild" --build-in-place --nodeps -bb pkg/rpm/copyrite.spec
       - name: Release RPM assets
         uses: softprops/action-gh-release@v2
         with:

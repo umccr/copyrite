@@ -5,18 +5,11 @@ Summary:        CLI tool for efficient checksum and copy operations across objec
 
 License:        MIT
 URL:            https://github.com/mmalenic/copyrite
-Source0:        %{name}-%{version}.tar.gz
-
-BuildRequires:  rustc
-BuildRequires:  cargo
 
 %global debug_package %{nil}
 
 %description
 A CLI tool for efficient checksum and copy operations across object stores.
-
-%prep
-%autosetup
 
 %build
 cargo build --release
