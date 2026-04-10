@@ -57,8 +57,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-      - name: Install RPM tools
-        run: sudo apt-get update && sudo apt-get install -y rpm rpmbuild || sudo apt-get install -y rpm
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y rpm debhelper
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Build RPM package
@@ -73,16 +73,13 @@ jobs:
           files: rpmbuild/RPMS/**/*.rpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # See https://github.com/jtdor/build-deb-action/issues/17#issuecomment-3434202578
-      - run: cp -r pkg/debian .
       - name: Build Debian package
-        uses: jtdor/build-deb-action@v1
         env:
           DEB_BUILD_OPTIONS: noautodbgsym
-        with:
-          docker-image: rust:1.91-bookworm
-          buildpackage-opts: --build=binary --no-sign
+        run: |
+          cp -r pkg/debian .
+          dpkg-buildpackage --build=binary --no-sign
       - name: Release Debian assets
         uses: softprops/action-gh-release@v2
         with:
-          files: ./debian/artifacts/*.deb
+          files: ../*.deb
