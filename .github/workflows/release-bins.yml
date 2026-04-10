@@ -3,18 +3,21 @@ name: release-binaries
 on:
   push:
     tags:
-      - '*'
+      - 'v[0-9]+.*'
 
 jobs:
   create-release:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: taiki-e/create-gh-release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
   release-binary-assets:
-    permissions: write-all
+    permissions:
+      contents: write
     needs: create-release
     strategy:
       matrix:
@@ -31,7 +34,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: copyrite
@@ -40,7 +43,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   release-linux-packages:
-    permissions: write-all
+    permissions:
+      contents: write
     needs: create-release
     strategy:
       matrix:
@@ -52,14 +56,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Determine arch
         run: echo "ARCH=$(uname -m)" >> $GITHUB_ENV
       - name: Builder/runner arch is...
         run: echo "runner.arch=${{ runner.arch }}, uname=$ARCH"
       - name: build RPM package
         id: rpm_build
-        uses: naveenrajm7/rpmbuild@master
+        uses: naveenrajm7/rpmbuild@v1.0.0
         with:
           spec_file: "./pkg/rpm/copyrite.spec"
       # See https://github.com/jtdor/build-deb-action/issues/17#issuecomment-3434202578
