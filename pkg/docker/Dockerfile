@@ -16,9 +16,9 @@ WORKDIR /build
 RUN \
     # Set boolean \
     if [ "${TARGETPLATFORM#linux/}" = "arm64" ]; then \
-      platform_url="aarch64";  \
+      platform_url="aarch64-unknown-linux-gnu";  \
     else \
-      platform_url="x86_64"; \
+      platform_url="x86_64-unknown-linux-gnu"; \
     fi && \
     # Install
     echo "Standard APT" 1>&2 && \
@@ -29,7 +29,7 @@ RUN \
     wget \
       --quiet \
       --output-document - \
-      "${GITHUB_REPO_RELEASES_URL}/${PACKAGE_VERSION}/copyrite-${platform_url}-linux-gnu.tar.gz" | \
+      "${GITHUB_REPO_RELEASES_URL}/${PACKAGE_VERSION}/copyrite-${platform_url}.tar.gz" | \
     tar \
       --directory /usr/bin \
       --extract \
