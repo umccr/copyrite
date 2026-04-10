@@ -1,5 +1,5 @@
 Name:           copyrite
-Version:        0.3.0
+Version:        0.3.1
 Release:        1%{?dist}
 Summary:        CLI tool for efficient checksum and copy operations across object stores
 
@@ -21,6 +21,9 @@ install -D target/release/%{name} %{buildroot}%{_bindir}/%{name}
 %{_bindir}/%{name}
 
 %changelog
+* Fri Apr 10 2026 Marko Malenic <mmalenic1@gmail.com> - 0.3.1-1
+- Release 0.3.1
+
 * Fri Apr 10 2026 Marko Malenic <mmalenic1@gmail.com> - 0.3.0-1
 - Release 0.3.0
 
