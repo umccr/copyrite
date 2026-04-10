@@ -80,6 +80,7 @@ jobs:
         env:
           DEB_BUILD_OPTIONS: noautodbgsym
         with:
+          docker-image: rust:1.91-bookworm
           buildpackage-opts: --build=binary --no-sign
       - name: Release Debian assets
         uses: softprops/action-gh-release@v2
