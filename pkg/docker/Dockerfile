@@ -6,9 +6,9 @@ LABEL org.opencontainers.image.description="CLI tool for efficient checksum and 
 LABEL org.opencontainers.image.licenses=MIT
 LABEL org.opencontainers.image.authors="Marko Malenic <mmalenic1@gmail.com>"
 
-ARG TARGETOS
+ARG TARGETPLATFORM
 ARG GITHUB_REPO_RELEASES_URL
-ARG TARGETARCH
+ARG PACKAGE_VERSION
 
 WORKDIR /build
 
