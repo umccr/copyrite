@@ -44,8 +44,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Get release tag
         id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.workflow_run.head_branch }}"
+          TAG=$(gh release view --repo "${{ github.repository }}" --json tagName --jq '.tagName')
           echo "tag=${TAG#v}" >> $GITHUB_OUTPUT
       - name: Docker GitHub release
         uses: docker/build-push-action@v7
