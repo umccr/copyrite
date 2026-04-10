@@ -1,24 +1,13 @@
 name: release-binaries
 
 on:
-  push:
-    tags:
-      - 'v[0-9]+.*'
+  release:
+    types: [published]
 
 jobs:
-  create-release:
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/create-gh-release-action@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
   release-binary-assets:
     permissions:
       contents: write
-    needs: create-release
     strategy:
       matrix:
         include:
@@ -45,7 +34,6 @@ jobs:
   release-linux-packages:
     permissions:
       contents: write
-    needs: create-release
     strategy:
       matrix:
         include:
