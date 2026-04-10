@@ -1,5 +1,5 @@
 Name:           copyrite
-Version:        0.3.1
+Version:        0.3.2
 Release:        1%{?dist}
 Summary:        CLI tool for efficient checksum and copy operations across object stores
 
