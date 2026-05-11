@@ -11,6 +11,7 @@ rust-version.workspace = true
 clap = { version = "4", features = ["derive", "env", "cargo", "wrap_help"] }
 thiserror = "2"
 rand = "0.10"
+pastey = "0.2"
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "test-util", "io-util", "io-std", "fs"] }
