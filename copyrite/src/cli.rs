@@ -527,6 +527,36 @@ impl CopyMode {
     }
 }
 
+/// Controls overriding the AWS SDK's stalled stream protection.
+///
+/// SSP is useful to prevent dead TCP connections from hanging if the SDK detects that no bytes are
+/// being transferred. Large objects using server-side copy can trigger this incorrectly, as
+/// `CopyObject` may not transmit many bytes for a while, which means that this should be disabled
+/// in those instances.
+#[derive(Debug, Clone, ValueEnum, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum StalledStreamProtection {
+    /// Use the default SDK behaviour.
+    Default,
+    /// Disable SSP only for server-side copy operations using `CopyObject` and
+    /// `UploadPartCopy`.
+    #[default]
+    DisableCopyObject,
+    /// Disable SSP for every S3 operation.
+    DisableAll,
+}
+
+impl StalledStreamProtection {
+    /// Whether SSP should be disabled for server-side copies.
+    pub fn disable_copy_object(&self) -> bool {
+        matches!(self, Self::DisableCopyObject | Self::DisableAll)
+    }
+
+    /// Whether SSP should be disabled for all requests.
+    pub fn disable_all(&self) -> bool {
+        matches!(self, Self::DisableAll)
+    }
+}
+
 /// Details of how to locate credentials or specify no credentials needed
 #[derive(Debug, Clone, ValueEnum, Copy, Default, Deserialize, Serialize)]
 pub enum CredentialProvider {
@@ -1002,6 +1032,20 @@ pub struct Compatibility {
         hide_short_help = true
     )]
     pub no_checksum_mode: bool,
+    /// Controls overriding the AWS SDK's stalled stream protection.
+    ///
+    /// SSP is useful to prevent dead TCP connections from hanging if the SDK detects that no bytes are
+    /// being transferred. Large objects using server-side copy can trigger this incorrectly, as
+    /// `CopyObject` may not transmit many bytes for a while, which means that this should be disabled
+    /// in those instances.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_STALLED_STREAM_PROTECTION",
+        default_value = "disable-copy-object",
+        hide_short_help = true
+    )]
+    pub stalled_stream_protection: StalledStreamProtection,
     #[arg(
         global = true,
         long,
@@ -1033,6 +1077,13 @@ pub struct Compatibility {
     #[arg(
         global = true,
         long,
+        env = "COPYRITE_SOURCE_STALLED_STREAM_PROTECTION",
+        hide = true
+    )]
+    pub source_stalled_stream_protection: Option<StalledStreamProtection>,
+    #[arg(
+        global = true,
+        long,
         env = "COPYRITE_DESTINATION_S3_COMPATIBLE",
         hide = true
     )]
@@ -1058,6 +1109,13 @@ pub struct Compatibility {
         hide = true
     )]
     pub destination_no_checksum_mode: bool,
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_DESTINATION_STALLED_STREAM_PROTECTION",
+        hide = true
+    )]
+    pub destination_stalled_stream_protection: Option<StalledStreamProtection>,
 }
 
 impl Compatibility {
@@ -1114,16 +1172,30 @@ impl Compatibility {
             || self.no_checksum_mode()
     }
 
+    /// The SSP configuration for the source.
+    pub fn source_stalled_stream_protection(&self) -> StalledStreamProtection {
+        self.source_stalled_stream_protection
+            .unwrap_or(self.stalled_stream_protection)
+    }
+
+    /// The SSP configuration for the destination.
+    pub fn destination_stalled_stream_protection(&self) -> StalledStreamProtection {
+        self.destination_stalled_stream_protection
+            .unwrap_or(self.stalled_stream_protection)
+    }
+
     /// Check if any source or destination options are set.
     pub fn has_prefixed_options(&self) -> bool {
         self.source_s3_compatible
             || self.source_force_path_style
             || self.source_no_get_object_attributes
             || self.source_no_checksum_mode
+            || self.source_stalled_stream_protection.is_some()
             || self.destination_s3_compatible
             || self.destination_force_path_style
             || self.destination_no_get_object_attributes
             || self.destination_no_checksum_mode
+            || self.destination_stalled_stream_protection.is_some()
     }
 }
 
