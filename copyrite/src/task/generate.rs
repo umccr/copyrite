@@ -398,8 +398,8 @@ impl SumCtxPairs {
         // Get the checksum which contains the most amount of occurrences across groups of sums files.
         let file_ctx = files
             .0
-            .iter()
-            .flat_map(|(file, _)| file.0.0.checksums.keys().cloned())
+            .keys()
+            .flat_map(|file| file.0.0.checksums.keys().cloned())
             .fold(BTreeMap::new(), |mut map, val| {
                 // Count occurrences
                 map.entry(val).and_modify(|count| *count += 1).or_insert(1);

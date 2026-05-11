@@ -29,7 +29,7 @@ pub struct S3Client {
     stalled_stream_protection: StalledStreamProtection,
 }
 
-/// Generate an `S3Client` wrapper method that calls the underlying `aws-sdk-s3` operation.
+/// Generate an `S3Client` wrapper method that calls the underlying S3 operation.
 macro_rules! s3_wrapper_call {
     ($name:ident, $disable:ident) => {
         paste! {
@@ -151,12 +151,12 @@ impl S3Client {
         self.no_checksum_mode
     }
 
-    /// The stalled-stream protection mode for this client.
+    /// The SSP mode for this client.
     pub fn stalled_stream_protection(&self) -> StalledStreamProtection {
         self.stalled_stream_protection
     }
 
-    /// Apply the SSP-disabled config override to a customizable operation when `disable` is true.
+    /// Apply the SSP config override.
     async fn ssp_override<T, E, B>(
         &self,
         customize: CustomizableOperation<T, E, B>,

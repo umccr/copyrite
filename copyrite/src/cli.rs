@@ -531,16 +531,16 @@ impl CopyMode {
 ///
 /// SSP is useful to prevent dead TCP connections from hanging if the SDK detects that no bytes are
 /// being transferred. Large objects using server-side copy can trigger this incorrectly, as
-/// `CopyObject` may not transmit many bytes for a while, which means that this should be disabled
-/// in those instances.
+/// `CopyObject` may not transmit many bytes for a while. In these situations it's recommended for
+/// SSP to be disabled.
 #[derive(Debug, Clone, ValueEnum, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum StalledStreamProtection {
-    /// Use the default SDK behaviour.
-    Default,
     /// Disable SSP only for server-side copy operations using `CopyObject` and
     /// `UploadPartCopy`.
     #[default]
     DisableCopyObject,
+    /// Use the default SDK behaviour.
+    Default,
     /// Disable SSP for every S3 operation.
     DisableAll,
 }
@@ -1036,8 +1036,8 @@ pub struct Compatibility {
     ///
     /// SSP is useful to prevent dead TCP connections from hanging if the SDK detects that no bytes are
     /// being transferred. Large objects using server-side copy can trigger this incorrectly, as
-    /// `CopyObject` may not transmit many bytes for a while, which means that this should be disabled
-    /// in those instances.
+    /// `CopyObject` may not transmit many bytes for a while. In these situations it's recommended for
+    /// SSP to be disabled.
     #[arg(
         global = true,
         long,

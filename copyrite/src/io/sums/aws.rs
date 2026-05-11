@@ -100,15 +100,15 @@ impl S3 {
 
     /// Get an existing sums file if it exists.
     pub async fn get_existing_sums(&self) -> Result<Option<SumsFile>> {
-        match self
+        let result = self
             .client
-            .inner()
-            .get_object()
-            .bucket(&self.bucket)
-            .key(SumsFile::format_sums_file(&self.key))
-            .send()
-            .await
-        {
+            .get_object(|b| {
+                b.bucket(&self.bucket)
+                    .key(SumsFile::format_sums_file(&self.key))
+            })
+            .await;
+
+        match result {
             Ok(sums) => {
                 let data = sums.body.collect().await?.to_vec();
                 let sums = SumsFile::read_from_slice(data.as_slice()).await?;
@@ -429,17 +429,15 @@ impl S3 {
 
     /// Get the object and convert it into an `AsyncRead`.
     pub async fn object_reader(&self) -> Result<impl AsyncRead + 'static> {
-        Ok(Box::new(
-            self.client
-                .inner()
-                .get_object()
-                .bucket(&self.bucket)
-                .key(SumsFile::format_target_file(&self.key))
-                .send()
-                .await?
-                .body
-                .into_async_read(),
-        ))
+        let response = self
+            .client
+            .get_object(|b| {
+                b.bucket(&self.bucket)
+                    .key(SumsFile::format_target_file(&self.key))
+            })
+            .await?;
+
+        Ok(Box::new(response.body.into_async_read()))
     }
 
     /// Get the object file size.
@@ -455,14 +453,14 @@ impl S3 {
     /// Write the sums file to the configured location using `PutObject`.
     pub async fn put_sums(&self, sums_file: &SumsFile) -> Result<()> {
         let key = SumsFile::format_sums_file(&self.key);
+        let body = ByteStream::from(sums_file.to_json_string()?.into_bytes());
         self.client
-            .inner()
-            .put_object()
-            .checksum_algorithm(ChecksumAlgorithm::Crc64Nvme)
-            .bucket(&self.bucket)
-            .key(&key)
-            .body(ByteStream::from(sums_file.to_json_string()?.into_bytes()))
-            .send()
+            .put_object(move |b| {
+                b.checksum_algorithm(ChecksumAlgorithm::Crc64Nvme)
+                    .bucket(&self.bucket)
+                    .key(&key)
+                    .body(body)
+            })
             .await?;
         Ok(())
     }
