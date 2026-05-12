@@ -50,7 +50,6 @@ macro_rules! s3_wrapper_call {
                     builder.customize(),
                     self.stalled_stream_protection.$disable(),
                 )
-                .await
                 .send()
                 .await
             }
@@ -136,11 +135,6 @@ impl S3Client {
         ))
     }
 
-    /// Get the inner AWS S3 client.
-    pub fn inner(&self) -> &Arc<Client> {
-        &self.inner
-    }
-
     /// Whether to avoid `GetObjectAttributes` calls.
     pub fn no_get_object_attributes(&self) -> bool {
         self.no_get_object_attributes
@@ -157,7 +151,7 @@ impl S3Client {
     }
 
     /// Apply the SSP config override.
-    async fn ssp_override<T, E, B>(
+    fn ssp_override<T, E, B>(
         &self,
         customize: CustomizableOperation<T, E, B>,
         disable: bool,
@@ -261,6 +255,11 @@ impl S3Client {
     s3_wrapper_call!(get_object, disable_all);
     s3_wrapper_call!(put_object, disable_all);
     s3_wrapper_call!(upload_part, disable_all);
+    s3_wrapper_call!(head_object, disable_all);
+    s3_wrapper_call!(complete_multipart_upload, disable_all);
+    s3_wrapper_call!(create_multipart_upload, disable_all);
+    s3_wrapper_call!(get_object_tagging, disable_all);
+    s3_wrapper_call!(get_object_attributes, disable_all);
     s3_wrapper_call!(copy_object, disable_copy_object);
     s3_wrapper_call!(upload_part_copy, disable_copy_object);
 }

@@ -214,13 +214,7 @@ impl S3 {
         key: &str,
         bucket: &str,
     ) -> result::Result<HeadObjectOutput, SdkError<HeadObjectError, HttpResponse>> {
-        self.client
-            .inner()
-            .head_object()
-            .bucket(bucket)
-            .key(key)
-            .send()
-            .await
+        self.client.head_object(|b| b.bucket(bucket).key(key)).await
     }
 
     /// Get the object tagging.
@@ -230,11 +224,7 @@ impl S3 {
         bucket: &str,
     ) -> result::Result<GetObjectTaggingOutput, SdkError<GetObjectTaggingError, HttpResponse>> {
         self.client
-            .inner()
-            .get_object_tagging()
-            .bucket(bucket)
-            .key(key)
-            .send()
+            .get_object_tagging(|b| b.bucket(bucket).key(key))
             .await
     }
 
@@ -266,14 +256,13 @@ impl S3 {
     ) -> Result<(String, Vec<ApiError>)> {
         let do_upload = |tagging, metadata, additional_checksum| async {
             self.client
-                .inner()
-                .create_multipart_upload()
-                .set_tagging(tagging)
-                .set_metadata(metadata)
-                .set_checksum_algorithm(additional_checksum)
-                .bucket(bucket)
-                .key(key)
-                .send()
+                .create_multipart_upload(|b| {
+                    b.set_tagging(tagging)
+                        .set_metadata(metadata)
+                        .set_checksum_algorithm(additional_checksum)
+                        .bucket(bucket)
+                        .key(key)
+                })
                 .await
         };
 
@@ -630,23 +619,21 @@ impl S3 {
         // Parts must be ordered.
         parts.sort_by_key(|a| a.part_number);
 
+        let parts = parts
+            .into_iter()
+            .map(|part| part.try_into())
+            .collect::<Result<Vec<_>>>()?;
         self.client
-            .inner()
-            .complete_multipart_upload()
-            .bucket(bucket)
-            .key(key)
-            .multipart_upload(
-                CompletedMultipartUpload::builder()
-                    .set_parts(Some(
-                        parts
-                            .into_iter()
-                            .map(|part| part.try_into())
-                            .collect::<Result<Vec<_>>>()?,
-                    ))
-                    .build(),
-            )
-            .upload_id(upload_id)
-            .send()
+            .complete_multipart_upload(|b| {
+                b.bucket(bucket)
+                    .key(key)
+                    .multipart_upload(
+                        CompletedMultipartUpload::builder()
+                            .set_parts(Some(parts))
+                            .build(),
+                    )
+                    .upload_id(upload_id)
+            })
             .await?;
 
         Ok(())

@@ -131,18 +131,16 @@ impl S3 {
         if let Some(ref attributes) = self.get_object_attributes {
             return Some(attributes);
         }
-
         let attributes = self
             .client
-            .inner()
-            .get_object_attributes()
-            .bucket(&self.bucket)
-            .key(SumsFile::format_target_file(&self.key))
-            .object_attributes(ObjectAttributes::Etag)
-            .object_attributes(ObjectAttributes::Checksum)
-            .object_attributes(ObjectAttributes::ObjectSize)
-            .object_attributes(ObjectAttributes::ObjectParts)
-            .send()
+            .get_object_attributes(|b| {
+                b.bucket(&self.bucket)
+                    .key(SumsFile::format_target_file(&self.key))
+                    .object_attributes(ObjectAttributes::Etag)
+                    .object_attributes(ObjectAttributes::Checksum)
+                    .object_attributes(ObjectAttributes::ObjectSize)
+                    .object_attributes(ObjectAttributes::ObjectParts)
+            })
             .await;
 
         match attributes {
@@ -161,17 +159,20 @@ impl S3 {
             return Ok(&self.head_object[&part_number]);
         }
 
-        let mut head = self
+        let part_number_i32 = part_number.map(i32::try_from).transpose()?;
+        let head_object = self
             .client
-            .inner()
-            .head_object()
-            .bucket(&self.bucket)
-            .key(SumsFile::format_target_file(&self.key))
-            .set_part_number(part_number.map(i32::try_from).transpose()?);
-        if !self.client.no_checksum_mode() {
-            head = head.checksum_mode(ChecksumMode::Enabled);
-        }
-        let head_object = head.send().await?;
+            .head_object(|mut b| {
+                b = b
+                    .bucket(&self.bucket)
+                    .key(SumsFile::format_target_file(&self.key))
+                    .set_part_number(part_number_i32);
+                if !self.client.no_checksum_mode() {
+                    b = b.checksum_mode(ChecksumMode::Enabled);
+                }
+                b
+            })
+            .await?;
 
         Ok(self.head_object.entry(part_number).or_insert(head_object))
     }
