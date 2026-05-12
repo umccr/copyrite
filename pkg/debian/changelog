@@ -1,3 +1,11 @@
+copyrite (0.4.0-1) unstable; urgency=low
+
+  * ci: check if assets are found on release by @mmalenic in https://github.com/umccr/copyrite/pull/73
+  * ci: docker.yml needs to use the same tag logic as release-bins.yml by @mmalenic in https://github.com/umccr/copyrite/pull/74
+  * feat: stalled stream override by @mmalenic in https://github.com/umccr/copyrite/pull/75
+
+ -- Marko Malenic <mmalenic1@gmail.com>  Tue, 12 May 2026 00:00:00 +0000
+
 copyrite (0.3.2-1) unstable; urgency=low
 
   * Release 0.3.2

@@ -14,13 +14,11 @@ WORKDIR /build
 
 # Install debian basics
 RUN \
-    # Set boolean \
     if [ "${TARGETPLATFORM#linux/}" = "arm64" ]; then \
       platform_url="aarch64-unknown-linux-gnu";  \
     else \
       platform_url="x86_64-unknown-linux-gnu"; \
     fi && \
-    # Install
     echo "Standard APT" 1>&2 && \
     apt update -yq && \
     apt upgrade -yq && \
