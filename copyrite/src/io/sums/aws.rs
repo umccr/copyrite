@@ -100,15 +100,15 @@ impl S3 {
 
     /// Get an existing sums file if it exists.
     pub async fn get_existing_sums(&self) -> Result<Option<SumsFile>> {
-        match self
+        let result = self
             .client
-            .inner()
-            .get_object()
-            .bucket(&self.bucket)
-            .key(SumsFile::format_sums_file(&self.key))
-            .send()
-            .await
-        {
+            .get_object(|b| {
+                b.bucket(&self.bucket)
+                    .key(SumsFile::format_sums_file(&self.key))
+            })
+            .await;
+
+        match result {
             Ok(sums) => {
                 let data = sums.body.collect().await?.to_vec();
                 let sums = SumsFile::read_from_slice(data.as_slice()).await?;
@@ -131,18 +131,16 @@ impl S3 {
         if let Some(ref attributes) = self.get_object_attributes {
             return Some(attributes);
         }
-
         let attributes = self
             .client
-            .inner()
-            .get_object_attributes()
-            .bucket(&self.bucket)
-            .key(SumsFile::format_target_file(&self.key))
-            .object_attributes(ObjectAttributes::Etag)
-            .object_attributes(ObjectAttributes::Checksum)
-            .object_attributes(ObjectAttributes::ObjectSize)
-            .object_attributes(ObjectAttributes::ObjectParts)
-            .send()
+            .get_object_attributes(|b| {
+                b.bucket(&self.bucket)
+                    .key(SumsFile::format_target_file(&self.key))
+                    .object_attributes(ObjectAttributes::Etag)
+                    .object_attributes(ObjectAttributes::Checksum)
+                    .object_attributes(ObjectAttributes::ObjectSize)
+                    .object_attributes(ObjectAttributes::ObjectParts)
+            })
             .await;
 
         match attributes {
@@ -161,17 +159,20 @@ impl S3 {
             return Ok(&self.head_object[&part_number]);
         }
 
-        let mut head = self
+        let part_number_i32 = part_number.map(i32::try_from).transpose()?;
+        let head_object = self
             .client
-            .inner()
-            .head_object()
-            .bucket(&self.bucket)
-            .key(SumsFile::format_target_file(&self.key))
-            .set_part_number(part_number.map(i32::try_from).transpose()?);
-        if !self.client.no_checksum_mode() {
-            head = head.checksum_mode(ChecksumMode::Enabled);
-        }
-        let head_object = head.send().await?;
+            .head_object(|mut b| {
+                b = b
+                    .bucket(&self.bucket)
+                    .key(SumsFile::format_target_file(&self.key))
+                    .set_part_number(part_number_i32);
+                if !self.client.no_checksum_mode() {
+                    b = b.checksum_mode(ChecksumMode::Enabled);
+                }
+                b
+            })
+            .await?;
 
         Ok(self.head_object.entry(part_number).or_insert(head_object))
     }
@@ -429,17 +430,15 @@ impl S3 {
 
     /// Get the object and convert it into an `AsyncRead`.
     pub async fn object_reader(&self) -> Result<impl AsyncRead + 'static> {
-        Ok(Box::new(
-            self.client
-                .inner()
-                .get_object()
-                .bucket(&self.bucket)
-                .key(SumsFile::format_target_file(&self.key))
-                .send()
-                .await?
-                .body
-                .into_async_read(),
-        ))
+        let response = self
+            .client
+            .get_object(|b| {
+                b.bucket(&self.bucket)
+                    .key(SumsFile::format_target_file(&self.key))
+            })
+            .await?;
+
+        Ok(Box::new(response.body.into_async_read()))
     }
 
     /// Get the object file size.
@@ -455,14 +454,14 @@ impl S3 {
     /// Write the sums file to the configured location using `PutObject`.
     pub async fn put_sums(&self, sums_file: &SumsFile) -> Result<()> {
         let key = SumsFile::format_sums_file(&self.key);
+        let body = ByteStream::from(sums_file.to_json_string()?.into_bytes());
         self.client
-            .inner()
-            .put_object()
-            .checksum_algorithm(ChecksumAlgorithm::Crc64Nvme)
-            .bucket(&self.bucket)
-            .key(&key)
-            .body(ByteStream::from(sums_file.to_json_string()?.into_bytes()))
-            .send()
+            .put_object(move |b| {
+                b.checksum_algorithm(ChecksumAlgorithm::Crc64Nvme)
+                    .bucket(&self.bucket)
+                    .key(&key)
+                    .body(body)
+            })
             .await?;
         Ok(())
     }

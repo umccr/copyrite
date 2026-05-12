@@ -1,14 +1,20 @@
 //! Module that handles all file IO
 //!
 
-use crate::cli::{Compatibility, CredentialProvider, Credentials};
+use crate::cli::{Compatibility, CredentialProvider, Credentials, StalledStreamProtection};
 use crate::error::Error::ParseError;
 use crate::error::{Error, Result};
 use aws_config::Region;
 use aws_credential_types::provider::ProvideCredentials;
+use aws_sdk_s3::client::customize::CustomizableOperation;
+use aws_sdk_s3::config::StalledStreamProtectionConfig;
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation;
 use aws_sdk_s3::{Client, config};
 use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
+use pastey::paste;
 use serde::Deserialize;
+use std::result;
 use std::sync::Arc;
 
 pub mod copy;
@@ -20,19 +26,64 @@ pub struct S3Client {
     inner: Arc<Client>,
     no_get_object_attributes: bool,
     no_checksum_mode: bool,
+    stalled_stream_protection: StalledStreamProtection,
+}
+
+/// Generate an `S3Client` wrapper method that calls the underlying S3 operation.
+macro_rules! s3_wrapper_call {
+    ($name:ident, $disable:ident) => {
+        paste! {
+            #[doc = concat!("A wrapper around `", stringify!($name), "` that overrides SSP and resolves the query.")]
+            pub async fn $name<F>(
+                &self,
+                configure: F,
+            ) -> result::Result<
+                operation::$name::[<$name:camel Output>],
+                SdkError<operation::$name::[<$name:camel Error>]>,
+            >
+            where
+                F: FnOnce(operation::$name::builders::[<$name:camel FluentBuilder>])
+                    -> operation::$name::builders::[<$name:camel FluentBuilder>],
+            {
+                let builder = configure(self.inner.$name());
+                self.ssp_override(
+                    builder.customize(),
+                    self.stalled_stream_protection.$disable(),
+                )
+                .send()
+                .await
+            }
+        }
+    };
 }
 
 impl S3Client {
-    /// Create a new S3Client.
+    /// Create a new S3Client with default SSP.
     pub fn new(
         client: Arc<Client>,
         no_get_object_attributes: bool,
         no_checksum_mode: bool,
     ) -> Self {
+        Self::with_stalled_stream_protection(
+            client,
+            no_get_object_attributes,
+            no_checksum_mode,
+            StalledStreamProtection::default(),
+        )
+    }
+
+    /// Create a new S3Client with SSP mode.
+    pub fn with_stalled_stream_protection(
+        client: Arc<Client>,
+        no_get_object_attributes: bool,
+        no_checksum_mode: bool,
+        stalled_stream_protection: StalledStreamProtection,
+    ) -> Self {
         Self {
             inner: client,
             no_get_object_attributes,
             no_checksum_mode,
+            stalled_stream_protection,
         }
     }
 
@@ -51,10 +102,12 @@ impl S3Client {
             compatibility.source_force_path_style(),
         )
         .await?;
-        Ok(Self::new(
+
+        Ok(Self::with_stalled_stream_protection(
             Arc::new(client),
             compatibility.source_no_get_object_attributes(),
             compatibility.source_no_checksum_mode(),
+            compatibility.source_stalled_stream_protection(),
         ))
     }
 
@@ -73,16 +126,13 @@ impl S3Client {
             compatibility.destination_force_path_style(),
         )
         .await?;
-        Ok(Self::new(
+
+        Ok(Self::with_stalled_stream_protection(
             Arc::new(client),
             compatibility.destination_no_get_object_attributes(),
             compatibility.destination_no_checksum_mode(),
+            compatibility.destination_stalled_stream_protection(),
         ))
-    }
-
-    /// Get the inner AWS S3 client.
-    pub fn inner(&self) -> &Arc<Client> {
-        &self.inner
     }
 
     /// Whether to avoid `GetObjectAttributes` calls.
@@ -93,6 +143,27 @@ impl S3Client {
     /// Whether to disable checksum mode.
     pub fn no_checksum_mode(&self) -> bool {
         self.no_checksum_mode
+    }
+
+    /// The SSP mode for this client.
+    pub fn stalled_stream_protection(&self) -> StalledStreamProtection {
+        self.stalled_stream_protection
+    }
+
+    /// Apply the SSP config override.
+    fn ssp_override<T, E, B>(
+        &self,
+        customize: CustomizableOperation<T, E, B>,
+        disable: bool,
+    ) -> CustomizableOperation<T, E, B> {
+        if disable {
+            customize.config_override(
+                config::Config::builder()
+                    .stalled_stream_protection(StalledStreamProtectionConfig::disabled()),
+            )
+        } else {
+            customize
+        }
     }
 
     /// Create an S3 client from the credentials provider, profile, region and endpoint url.
@@ -180,6 +251,17 @@ impl S3Client {
         )
         .await
     }
+
+    s3_wrapper_call!(get_object, disable_all);
+    s3_wrapper_call!(put_object, disable_all);
+    s3_wrapper_call!(upload_part, disable_all);
+    s3_wrapper_call!(head_object, disable_all);
+    s3_wrapper_call!(complete_multipart_upload, disable_all);
+    s3_wrapper_call!(create_multipart_upload, disable_all);
+    s3_wrapper_call!(get_object_tagging, disable_all);
+    s3_wrapper_call!(get_object_attributes, disable_all);
+    s3_wrapper_call!(copy_object, disable_copy_object);
+    s3_wrapper_call!(upload_part_copy, disable_copy_object);
 }
 
 /// The type of provider for the object.

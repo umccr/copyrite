@@ -214,13 +214,7 @@ impl S3 {
         key: &str,
         bucket: &str,
     ) -> result::Result<HeadObjectOutput, SdkError<HeadObjectError, HttpResponse>> {
-        self.client
-            .inner()
-            .head_object()
-            .bucket(bucket)
-            .key(key)
-            .send()
-            .await
+        self.client.head_object(|b| b.bucket(bucket).key(key)).await
     }
 
     /// Get the object tagging.
@@ -230,11 +224,7 @@ impl S3 {
         bucket: &str,
     ) -> result::Result<GetObjectTaggingOutput, SdkError<GetObjectTaggingError, HttpResponse>> {
         self.client
-            .inner()
-            .get_object_tagging()
-            .bucket(bucket)
-            .key(key)
-            .send()
+            .get_object_tagging(|b| b.bucket(bucket).key(key))
             .await
     }
 
@@ -266,14 +256,13 @@ impl S3 {
     ) -> Result<(String, Vec<ApiError>)> {
         let do_upload = |tagging, metadata, additional_checksum| async {
             self.client
-                .inner()
-                .create_multipart_upload()
-                .set_tagging(tagging)
-                .set_metadata(metadata)
-                .set_checksum_algorithm(additional_checksum)
-                .bucket(bucket)
-                .key(key)
-                .send()
+                .create_multipart_upload(|b| {
+                    b.set_tagging(tagging)
+                        .set_metadata(metadata)
+                        .set_checksum_algorithm(additional_checksum)
+                        .bucket(bucket)
+                        .key(key)
+                })
                 .await
         };
 
@@ -332,17 +321,16 @@ impl S3 {
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
         let do_copy = |tagging, tagging_set, metadata, metadata_set, additional_checksum| async {
             self.client
-                .inner()
-                .copy_object()
-                .tagging_directive(tagging)
-                .set_tagging(tagging_set)
-                .metadata_directive(metadata)
-                .set_metadata(metadata_set)
-                .set_checksum_algorithm(additional_checksum)
-                .copy_source(Self::copy_source(&source.key, &source.bucket))
-                .key(&destination.key)
-                .bucket(&destination.bucket)
-                .send()
+                .copy_object(move |b| {
+                    b.tagging_directive(tagging)
+                        .set_tagging(tagging_set)
+                        .metadata_directive(metadata)
+                        .set_metadata(metadata_set)
+                        .set_checksum_algorithm(additional_checksum)
+                        .copy_source(Self::copy_source(&source.key, &source.bucket))
+                        .key(&destination.key)
+                        .bucket(&destination.bucket)
+                })
                 .await
         };
 
@@ -433,22 +421,23 @@ impl S3 {
         };
 
         if let Some(part_number) = multi_part.part_number {
-            let part = self
+            let part_number_i32 = i32::try_from(part_number)?;
+            let range = multi_part
+                .format_range()
+                .ok_or_else(|| Error::aws_error("invalid range".to_string()))?;
+            let response = self
                 .client
-                .inner()
-                .upload_part_copy()
-                .upload_id(&upload_id)
-                .part_number(i32::try_from(part_number)?)
-                .key(&destination.key)
-                .bucket(&destination.bucket)
-                .copy_source(Self::copy_source(&source.key, &source.bucket))
-                .copy_source_range(
-                    multi_part
-                        .format_range()
-                        .ok_or_else(|| Error::aws_error("invalid range".to_string()))?,
-                )
-                .send()
-                .await?
+                .upload_part_copy(|b| {
+                    b.upload_id(&upload_id)
+                        .part_number(part_number_i32)
+                        .key(&destination.key)
+                        .bucket(&destination.bucket)
+                        .copy_source(Self::copy_source(&source.key, &source.bucket))
+                        .copy_source_range(range)
+                })
+                .await?;
+
+            let part = response
                 .copy_part_result
                 .ok_or_else(|| Error::aws_error("missing copy part result".to_string()))?;
 
@@ -480,18 +469,13 @@ impl S3 {
             return Ok(Default::default());
         }
 
+        let range = multi_part
+            .as_ref()
+            .and_then(|multi_part| multi_part.format_range());
+
         let result = self
             .client
-            .inner()
-            .get_object()
-            .bucket(&source.bucket)
-            .key(&source.key)
-            .set_range(
-                multi_part
-                    .as_ref()
-                    .and_then(|multi_part| multi_part.format_range()),
-            )
-            .send()
+            .get_object(|b| b.bucket(&source.bucket).key(&source.key).set_range(range))
             .await?;
 
         Ok(CopyContent::new(Box::new(result.body.into_async_read())))
@@ -507,17 +491,16 @@ impl S3 {
         let buf = Self::read_content(&mut content, None).await?;
 
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
-        let do_put = |tags, metadata, additional_checksum, buf| async {
+        let do_put = |tags, metadata, additional_checksum, buf: Vec<u8>| async {
             self.client
-                .inner()
-                .put_object()
-                .set_tagging(tags)
-                .set_metadata(metadata)
-                .set_checksum_algorithm(additional_checksum)
-                .bucket(&destination.bucket)
-                .key(&destination.key)
-                .body(ByteStream::from(buf))
-                .send()
+                .put_object(move |b| {
+                    b.set_tagging(tags)
+                        .set_metadata(metadata)
+                        .set_checksum_algorithm(additional_checksum)
+                        .bucket(&destination.bucket)
+                        .key(&destination.key)
+                        .body(ByteStream::from(buf))
+                })
                 .await
         };
 
@@ -594,17 +577,17 @@ impl S3 {
         };
 
         if let Some(part_number) = multi_part.part_number {
+            let part_number_i32 = i32::try_from(part_number)?;
             let part = self
                 .client
-                .inner()
-                .upload_part()
-                .upload_id(&upload_id)
-                .set_checksum_algorithm(additional_checksum)
-                .part_number(i32::try_from(part_number)?)
-                .key(&destination.key)
-                .bucket(&destination.bucket)
-                .body(ByteStream::from(buf))
-                .send()
+                .upload_part(|b| {
+                    b.upload_id(&upload_id)
+                        .set_checksum_algorithm(additional_checksum)
+                        .part_number(part_number_i32)
+                        .key(&destination.key)
+                        .bucket(&destination.bucket)
+                        .body(ByteStream::from(buf))
+                })
                 .await?;
 
             let mut result: CopyResult = (part, part_number, upload_id).into();
@@ -634,25 +617,23 @@ impl S3 {
         mut parts: Vec<Part>,
     ) -> Result<()> {
         // Parts must be ordered.
-        parts.sort_by(|a, b| a.part_number.cmp(&b.part_number));
+        parts.sort_by_key(|a| a.part_number);
 
+        let parts = parts
+            .into_iter()
+            .map(|part| part.try_into())
+            .collect::<Result<Vec<_>>>()?;
         self.client
-            .inner()
-            .complete_multipart_upload()
-            .bucket(bucket)
-            .key(key)
-            .multipart_upload(
-                CompletedMultipartUpload::builder()
-                    .set_parts(Some(
-                        parts
-                            .into_iter()
-                            .map(|part| part.try_into())
-                            .collect::<Result<Vec<_>>>()?,
-                    ))
-                    .build(),
-            )
-            .upload_id(upload_id)
-            .send()
+            .complete_multipart_upload(|b| {
+                b.bucket(bucket)
+                    .key(key)
+                    .multipart_upload(
+                        CompletedMultipartUpload::builder()
+                            .set_parts(Some(parts))
+                            .build(),
+                    )
+                    .upload_id(upload_id)
+            })
             .await?;
 
         Ok(())
