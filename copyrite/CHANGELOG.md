@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/umccr/copyrite/compare/v0.3.2...v0.4.0) - 2026-05-12
+
+### Added
+
+- add overrides for other S3 operations
+- add wrapper calls to s3 client with overrides
+- add SSP override options
+
+### Other
+
+- use wrapper functions when calling S3
+
 ## [0.3.2](https://github.com/umccr/copyrite/compare/v0.3.1...v0.3.2) - 2026-04-10
 
 ### Fixed
