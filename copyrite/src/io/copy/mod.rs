@@ -10,20 +10,29 @@ use crate::io::copy::file::FileBuilder;
 use crate::io::{Provider, S3Client};
 use dyn_clone::DynClone;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use tokio::io::{AsyncRead, empty};
 
 pub mod aws;
 pub mod file;
 
+/// A function that re-opens the copy content stream from its source. This is lazily loaded
+/// to reread the source instead of holding bytes in memory unnecessarily when re-trying
+/// best-effort tagging mode.
+pub type Reopen = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<CopyContent>> + Send>> + Send>;
+
 /// Content to download/upload with optional tags.
 pub struct CopyContent {
     data: Box<dyn AsyncRead + Sync + Send + Unpin>,
+    reopen: Option<Reopen>,
 }
 
 impl Default for CopyContent {
     fn default() -> Self {
         Self {
             data: Box::new(empty()),
+            reopen: None,
         }
     }
 }
@@ -31,7 +40,18 @@ impl Default for CopyContent {
 impl CopyContent {
     /// Create a new copy content struct.
     pub fn new(data: Box<dyn AsyncRead + Sync + Send + Unpin>) -> Self {
-        Self { data }
+        Self { data, reopen: None }
+    }
+
+    /// Attach a function that re-opens this stream from the source, so that an upload
+    /// can be retried.
+    pub fn with_reopen<F, Fut>(mut self, reopen: F) -> Self
+    where
+        F: Fn() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<CopyContent>> + Send + 'static,
+    {
+        self.reopen = Some(Box::new(move || Box::pin(reopen())));
+        self
     }
 }
 
