@@ -418,6 +418,7 @@ impl CopyTaskBuilder {
             source_copy,
             destination_copy,
             copy_mode,
+            tag_mode: this.tag_mode,
             object_size: settings.object_size,
             concurrency,
             state,
@@ -469,6 +470,7 @@ pub struct CopyTask {
     source_copy: Box<dyn ObjectCopy + Send + Sync>,
     destination_copy: Box<dyn ObjectCopy + Send + Sync>,
     copy_mode: CopyMode,
+    tag_mode: MetadataCopy,
     object_size: u64,
     concurrency: usize,
     state: CopyState,
@@ -620,7 +622,15 @@ impl CopyTask {
                 .await?
             }
             (CopyMode::DownloadUpload, None) => {
-                let data = self.source_copy.download(None).await?;
+                let mut data = self.source_copy.download(None).await?;
+                // Only best effort tagging retries the upload.
+                if self.tag_mode.is_best_effort() {
+                    let source = self.source_copy.clone();
+                    data = data.with_reopen(move || {
+                        let source = source.clone();
+                        async move { source.download(None).await }
+                    });
+                }
                 let upload = self
                     .destination_copy
                     .upload(data, None, &self.state)
