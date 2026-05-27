@@ -9,6 +9,7 @@ use crate::io::S3Client;
 use crate::io::copy::{CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part};
 use aws_sdk_s3::operation::get_object_tagging::{GetObjectTaggingError, GetObjectTaggingOutput};
 use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
+use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
 use aws_sdk_s3::operation::upload_part::UploadPartOutput;
 use aws_sdk_s3::types::{
     ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart, CopyPartResult, MetadataDirective,
@@ -16,10 +17,15 @@ use aws_sdk_s3::types::{
 };
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_runtime_api::client::result::SdkError;
+use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
+use futures_util::TryStreamExt;
+use http_body::Frame;
+use http_body_util::StreamBody;
 use std::collections::HashMap;
 use std::result;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio_util::io::ReaderStream;
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
@@ -481,74 +487,122 @@ impl S3 {
         Ok(CopyContent::new(Box::new(result.body.into_async_read())))
     }
 
-    /// Put the object to S3.
-    pub async fn put_object(
+    /// Wrap an async reader into a `ByteStream` that streams its contents lazily.
+    fn stream_body(reader: Box<dyn AsyncRead + Sync + Send + Unpin>) -> ByteStream {
+        let stream = ReaderStream::new(reader).map_ok(Frame::data);
+        ByteStream::new(SdkBody::from_body_1_x(StreamBody::new(stream)))
+    }
+
+    /// Put the object to S3 by streaming the content directly to the destination.
+    pub async fn put_object(&self, content: CopyContent, state: &CopyState) -> Result<CopyResult> {
+        // Best effort tagging needs to reissue the upload without tags.
+        if self.tag_mode.is_best_effort() {
+            return self.put_object_best_effort(content, state).await;
+        }
+
+        let destination = self.get_destination()?;
+        self.send_put_object(
+            content.data,
+            state.tags(),
+            state.metadata(),
+            state.additional_ctx().map(ChecksumAlgorithm::from),
+            i64::try_from(state.size())?,
+            destination.bucket.clone(),
+            destination.key.clone(),
+        )
+        .await?;
+
+        CopyResult::new(None, None, state.size(), vec![])
+    }
+
+    /// Send a streaming `PutObject` request.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_put_object(
         &self,
-        mut content: CopyContent,
+        reader: Box<dyn AsyncRead + Sync + Send + Unpin>,
+        tags: Option<String>,
+        metadata: Option<HashMap<String, String>>,
+        additional_checksum: Option<ChecksumAlgorithm>,
+        content_length: i64,
+        bucket: String,
+        key: String,
+    ) -> result::Result<PutObjectOutput, SdkError<PutObjectError, HttpResponse>> {
+        let body = Self::stream_body(reader);
+        self.client
+            .put_object(move |b| {
+                b.set_tagging(tags)
+                    .set_metadata(metadata)
+                    .set_checksum_algorithm(additional_checksum)
+                    .content_length(content_length)
+                    .bucket(bucket)
+                    .key(key)
+                    .body(body)
+            })
+            .await
+    }
+
+    /// Put the object to S3 for best effort tagging. This will take into account access denied
+    /// errors and re-try if needed.
+    async fn put_object_best_effort(
+        &self,
+        content: CopyContent,
         state: &CopyState,
     ) -> Result<CopyResult> {
         let destination = self.get_destination()?;
-        let buf = Self::read_content(&mut content, None).await?;
-
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
-        let do_put = |tags, metadata, additional_checksum, buf: Vec<u8>| async {
-            self.client
-                .put_object(move |b| {
-                    b.set_tagging(tags)
-                        .set_metadata(metadata)
-                        .set_checksum_algorithm(additional_checksum)
-                        .bucket(&destination.bucket)
-                        .key(&destination.key)
-                        .body(ByteStream::from(buf))
-                })
-                .await
+        let content_length = i64::try_from(state.size())?;
+
+        let result = self
+            .send_put_object(
+                content.data,
+                state.tags(),
+                state.metadata().clone(),
+                additional_checksum.clone(),
+                content_length,
+                destination.bucket.clone(),
+                destination.key.clone(),
+            )
+            .await;
+
+        let err = match result {
+            Ok(_) => return CopyResult::new(None, None, state.size(), vec![]),
+            Err(err) => err,
         };
 
-        let result = do_put(
-            state.tags(),
-            state.metadata(),
-            additional_checksum.clone(),
-            buf.clone(),
+        // Only retry without tags on access denied.
+        let api_error = ApiError::from(&err);
+        let Some(reopen) = content.reopen.filter(|_| api_error.is_access_denied()) else {
+            return Err(err.into());
+        };
+
+        let content = reopen().await?;
+        self.send_put_object(
+            content.data,
+            None,
+            state.metadata.clone(),
+            additional_checksum,
+            content_length,
+            destination.bucket.clone(),
+            destination.key.clone(),
         )
-        .await;
+        .await?;
 
-        // Retry if this is a best effort copy and the error was access denied.
-        let (_, err) = if let Err(ref err) = result {
-            let err = ApiError::from(err);
-            if self.tag_mode.is_best_effort() && err.is_access_denied() {
-                let result = do_put(None, state.metadata(), additional_checksum, buf).await?;
-
-                (result, vec![err])
-            } else {
-                (result?, vec![])
-            }
-        } else {
-            (result?, vec![])
-        };
-
-        CopyResult::new(None, None, state.size(), err)
+        CopyResult::new(None, None, state.size(), vec![api_error])
     }
 
-    /// Read the copy content into a buffer.
+    /// Read the copy content for a multipart upload into a buffer.
     async fn read_content(
         content: &mut CopyContent,
-        multi_part: Option<&MultiPartOptions>,
+        multi_part: &MultiPartOptions,
     ) -> Result<Vec<u8>> {
-        if let Some(multi_part) = multi_part {
-            if multi_part.part_number.is_none() {
-                return Ok(Vec::new());
-            }
-
-            let mut buf = vec![0; usize::try_from(multi_part.bytes_transferred())?];
-            content.data.read_exact(&mut buf).await?;
-
-            Ok(buf)
-        } else {
-            let mut buf = vec![];
-            content.data.read_to_end(&mut buf).await?;
-
-            Ok(buf)
+        if multi_part.part_number.is_none() {
+            return Ok(Vec::new());
         }
+
+        let mut buf = vec![0; usize::try_from(multi_part.bytes_transferred())?];
+        content.data.read_exact(&mut buf).await?;
+
+        Ok(buf)
     }
 
     /// Upload objects using multi part uploads.
@@ -559,7 +613,7 @@ impl S3 {
         state: &CopyState,
     ) -> Result<CopyResult> {
         let destination = self.get_destination()?;
-        let buf = Self::read_content(&mut content, Some(&multi_part)).await?;
+        let buf = Self::read_content(&mut content, &multi_part).await?;
 
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
         // Create the upload id if it doesn't exist or use the existing one.
