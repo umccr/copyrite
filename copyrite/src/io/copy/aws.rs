@@ -24,7 +24,7 @@ use http_body::Frame;
 use http_body_util::StreamBody;
 use std::collections::HashMap;
 use std::result;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::AsyncRead;
 use tokio_util::io::ReaderStream;
 
 /// Build an S3 sums object.
@@ -590,30 +590,14 @@ impl S3 {
         CopyResult::new(None, None, state.size(), vec![api_error])
     }
 
-    /// Read the copy content for a multipart upload into a buffer.
-    async fn read_content(
-        content: &mut CopyContent,
-        multi_part: &MultiPartOptions,
-    ) -> Result<Vec<u8>> {
-        if multi_part.part_number.is_none() {
-            return Ok(Vec::new());
-        }
-
-        let mut buf = vec![0; usize::try_from(multi_part.bytes_transferred())?];
-        content.data.read_exact(&mut buf).await?;
-
-        Ok(buf)
-    }
-
     /// Upload objects using multi part uploads.
     pub async fn put_object_multipart(
         &self,
-        mut content: CopyContent,
+        content: CopyContent,
         multi_part: MultiPartOptions,
         state: &CopyState,
     ) -> Result<CopyResult> {
         let destination = self.get_destination()?;
-        let buf = Self::read_content(&mut content, &multi_part).await?;
 
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
         // Create the upload id if it doesn't exist or use the existing one.
@@ -632,15 +616,17 @@ impl S3 {
 
         if let Some(part_number) = multi_part.part_number {
             let part_number_i32 = i32::try_from(part_number)?;
+            let content_length = i64::try_from(multi_part.bytes_transferred())?;
             let part = self
                 .client
                 .upload_part(|b| {
                     b.upload_id(&upload_id)
                         .set_checksum_algorithm(additional_checksum)
+                        .content_length(content_length)
                         .part_number(part_number_i32)
                         .key(&destination.key)
                         .bucket(&destination.bucket)
-                        .body(ByteStream::from(buf))
+                        .body(Self::stream_body(content.data))
                 })
                 .await?;
 
