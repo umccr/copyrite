@@ -6,7 +6,9 @@ use crate::cli::MetadataCopy;
 use crate::error::Error::{CopyError, ParseError};
 use crate::error::{ApiError, Error, Result};
 use crate::io::S3Client;
-use crate::io::copy::{CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part};
+use crate::io::copy::{
+    CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part, Reopen,
+};
 use aws_sdk_s3::operation::get_object_tagging::{GetObjectTaggingError, GetObjectTaggingOutput};
 use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
 use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
@@ -19,13 +21,26 @@ use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
-use futures_util::TryStreamExt;
+use bytes::Bytes;
+use futures_util::{StreamExt, TryStreamExt};
 use http_body::Frame;
 use http_body_util::StreamBody;
 use std::collections::HashMap;
+use std::future::Future;
+use std::io;
+use std::pin::Pin;
 use std::result;
+use std::sync::{Arc, Mutex};
+use futures_util::stream::poll_fn;
 use tokio::io::AsyncRead;
+use tokio::sync::mpsc;
 use tokio_util::io::ReaderStream;
+
+/// The number of chunks buffered when re-trying an SDK body.
+const REOPEN_CHANNEL_CAPACITY: usize = 16;
+
+/// The read buffer capacity used when streaming a reader into an upload body.
+const READER_STREAM_CAPACITY: usize = 64 * 1024;
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
@@ -465,14 +480,15 @@ impl S3 {
         }
     }
 
-    /// Get the object from S3.
+    /// Get the object from S3. The returned content carries a reopen function that re-issues the
+    /// same ranged get.
     pub async fn get_object(&self, multi_part: Option<MultiPartOptions>) -> Result<CopyContent> {
         let source = self.get_source()?;
 
         if let Some(multipart) = &multi_part
             && multipart.part_number.is_none()
         {
-            return Ok(Default::default());
+            return Ok(CopyContent::empty());
         }
 
         let range = multi_part
@@ -484,13 +500,69 @@ impl S3 {
             .get_object(|b| b.bucket(&source.bucket).key(&source.key).set_range(range))
             .await?;
 
-        Ok(CopyContent::new(Box::new(result.body.into_async_read())))
+        let self_clone = self.clone();
+        CopyContent::builder(Box::new(result.body.into_async_read()))
+            .with_reopen(move || self_clone.reopen_get(multi_part.clone()))
+            .build()
     }
 
-    /// Wrap an async reader into a `ByteStream` that streams its contents lazily.
-    fn stream_body(reader: Box<dyn AsyncRead + Sync + Send + Unpin>) -> ByteStream {
-        let stream = ReaderStream::new(reader).map_ok(Frame::data);
-        ByteStream::new(SdkBody::from_body_1_x(StreamBody::new(stream)))
+    /// Re-derive the object stream from the source.
+    fn reopen_get(
+        &self,
+        multi_part: Option<MultiPartOptions>,
+    ) -> Pin<Box<dyn Future<Output = Result<CopyContent>> + Send>> {
+        let self_clone = self.clone();
+        Box::pin(async move { self_clone.get_object(multi_part).await })
+    }
+
+    /// Wrap an async reader into an `SdkBody`.
+    fn reader_body(reader: Box<dyn AsyncRead + Sync + Send + Unpin>) -> SdkBody {
+        let stream = ReaderStream::with_capacity(reader, READER_STREAM_CAPACITY).map_ok(Frame::data);
+        SdkBody::from_body_1_x(StreamBody::new(stream))
+    }
+
+    /// Build a streaming `SdkBody` that re-tries its data from the source. This allows the SDK body
+    /// to be re-tried automatically when needed.
+    fn reopen_body(reopen: Arc<Reopen>) -> SdkBody {
+        let (tx, mut rx) =
+            mpsc::channel::<result::Result<Bytes, io::Error>>(REOPEN_CHANNEL_CAPACITY);
+        tokio::spawn(async move {
+            match (*reopen)().await {
+                Ok(content) => {
+                    let mut stream = ReaderStream::with_capacity(content.data, READER_STREAM_CAPACITY);
+                    while let Some(chunk) = stream.next().await {
+                        if tx.send(chunk).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(Err(io::Error::other(err.to_string()))).await;
+                }
+            }
+        });
+
+        let stream = poll_fn(move |cx| rx.poll_recv(cx)).map_ok(Frame::data);
+        SdkBody::from_body_1_x(StreamBody::new(stream))
+    }
+
+    /// Build a retryable streaming `ByteStream`.
+    fn retryable_body(
+        initial: Option<Box<dyn AsyncRead + Sync + Send + Unpin>>,
+        reopen: Arc<Reopen>,
+    ) -> ByteStream {
+        let initial = Mutex::new(initial);
+        ByteStream::new(SdkBody::retryable(move || {
+            match initial.lock().unwrap_or_else(|err| err.into_inner()).take() {
+                Some(reader) => Self::reader_body(reader),
+                None => Self::reopen_body(Arc::clone(&reopen)),
+            }
+        }))
+    }
+
+    /// Build the retryable upload body for a copy content.
+    fn upload_body(content: CopyContent) -> ByteStream {
+        Self::retryable_body(Some(content.data), Arc::new(content.reopen))
     }
 
     /// Put the object to S3 by streaming the content directly to the destination.
@@ -502,32 +574,30 @@ impl S3 {
 
         let destination = self.get_destination()?;
         self.send_put_object(
-            content.data,
+            destination,
+            Self::upload_body(content),
             state.tags(),
             state.metadata(),
             state.additional_ctx().map(ChecksumAlgorithm::from),
             i64::try_from(state.size())?,
-            destination.bucket.clone(),
-            destination.key.clone(),
         )
         .await?;
 
         CopyResult::new(None, None, state.size(), vec![])
     }
 
-    /// Send a streaming `PutObject` request.
-    #[allow(clippy::too_many_arguments)]
+    /// Send a streaming `PutObject` request to the destination.
     async fn send_put_object(
         &self,
-        reader: Box<dyn AsyncRead + Sync + Send + Unpin>,
+        destination: &BucketKey,
+        body: ByteStream,
         tags: Option<String>,
         metadata: Option<HashMap<String, String>>,
         additional_checksum: Option<ChecksumAlgorithm>,
         content_length: i64,
-        bucket: String,
-        key: String,
     ) -> result::Result<PutObjectOutput, SdkError<PutObjectError, HttpResponse>> {
-        let body = Self::stream_body(reader);
+        let bucket = destination.bucket.clone();
+        let key = destination.key.clone();
         self.client
             .put_object(move |b| {
                 b.set_tagging(tags)
@@ -552,15 +622,17 @@ impl S3 {
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
         let content_length = i64::try_from(state.size())?;
 
+        let CopyContent { data, reopen } = content;
+        let reopen = Arc::new(reopen);
+
         let result = self
             .send_put_object(
-                content.data,
+                destination,
+                Self::retryable_body(Some(data), Arc::clone(&reopen)),
                 state.tags(),
-                state.metadata().clone(),
+                state.metadata(),
                 additional_checksum.clone(),
                 content_length,
-                destination.bucket.clone(),
-                destination.key.clone(),
             )
             .await;
 
@@ -571,19 +643,17 @@ impl S3 {
 
         // Only retry without tags on access denied.
         let api_error = ApiError::from(&err);
-        let Some(reopen) = content.reopen.filter(|_| api_error.is_access_denied()) else {
+        if !api_error.is_access_denied() {
             return Err(err.into());
-        };
+        }
 
-        let content = reopen().await?;
         self.send_put_object(
-            content.data,
+            destination,
+            Self::retryable_body(None, reopen),
             None,
-            state.metadata.clone(),
+            state.metadata(),
             additional_checksum,
             content_length,
-            destination.bucket.clone(),
-            destination.key.clone(),
         )
         .await?;
 
@@ -626,7 +696,7 @@ impl S3 {
                         .part_number(part_number_i32)
                         .key(&destination.key)
                         .bucket(&destination.bucket)
-                        .body(Self::stream_body(content.data))
+                        .body(Self::upload_body(content))
                 })
                 .await?;
 
@@ -695,7 +765,7 @@ impl ObjectCopy for S3 {
     }
 
     async fn download(&self, multi_part: Option<MultiPartOptions>) -> Result<CopyContent> {
-        Ok(self.get_object(multi_part).await?)
+        self.get_object(multi_part).await
     }
 
     async fn upload(
