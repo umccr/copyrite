@@ -5,7 +5,9 @@ use crate::checksum::file::SumsFile;
 use crate::error::Error::CopyError;
 use crate::error::Result;
 use crate::io::copy::{CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy};
+use std::future::Future;
 use std::io::SeekFrom;
+use std::pin::Pin;
 use tokio::fs::copy;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio::{fs, io};
@@ -70,13 +72,14 @@ impl File {
         Ok(copy(&self.get_source()?, self.get_destination()?).await?)
     }
 
-    /// Read the source into memory.
+    /// Read the source into memory. The returned content carries a reopen factory that re-reads the
+    /// same range, so the upload body can be re-derived from the source on a retry.
     pub async fn read(&self, multi_part_options: Option<MultiPartOptions>) -> Result<CopyContent> {
         let mut file = fs::File::open(self.get_source()?).await?;
 
         // Read only the specified range if multipart is being used.
         let file: Box<dyn AsyncRead + Send + Sync + Unpin> =
-            if let Some(multipart) = multi_part_options {
+            if let Some(multipart) = &multi_part_options {
                 file.seek(SeekFrom::Start(multipart.start)).await?;
 
                 let size = multipart
@@ -88,7 +91,21 @@ impl File {
                 Box::new(file)
             };
 
-        Ok(CopyContent::new(file))
+        let self_clone = self.clone();
+        CopyContent::builder(file)
+            .with_reopen(move || {
+                self_clone.reopen_read(multi_part_options.clone())
+            })
+            .build()
+    }
+
+    /// Re-read the source range.
+    fn reopen_read(
+        &self,
+        multi_part_options: Option<MultiPartOptions>,
+    ) -> Pin<Box<dyn Future<Output = Result<CopyContent>> + Send>> {
+        let self_clone = self.clone();
+        Box::pin(async move { self_clone.read(multi_part_options).await })
     }
 
     /// Write the data to the destination.
