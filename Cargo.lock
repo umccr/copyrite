@@ -948,6 +948,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "base64",
+ "bytes",
  "clap",
  "console",
  "crc32c",
