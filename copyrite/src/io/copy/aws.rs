@@ -22,6 +22,7 @@ use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
 use bytes::Bytes;
+use futures_util::stream::poll_fn;
 use futures_util::{StreamExt, TryStreamExt};
 use http_body::Frame;
 use http_body_util::StreamBody;
@@ -31,7 +32,6 @@ use std::io;
 use std::pin::Pin;
 use std::result;
 use std::sync::{Arc, Mutex};
-use futures_util::stream::poll_fn;
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
 use tokio_util::io::ReaderStream;
@@ -517,7 +517,8 @@ impl S3 {
 
     /// Wrap an async reader into an `SdkBody`.
     fn reader_body(reader: Box<dyn AsyncRead + Sync + Send + Unpin>) -> SdkBody {
-        let stream = ReaderStream::with_capacity(reader, READER_STREAM_CAPACITY).map_ok(Frame::data);
+        let stream =
+            ReaderStream::with_capacity(reader, READER_STREAM_CAPACITY).map_ok(Frame::data);
         SdkBody::from_body_1_x(StreamBody::new(stream))
     }
 
@@ -529,7 +530,8 @@ impl S3 {
         tokio::spawn(async move {
             match (*reopen)().await {
                 Ok(content) => {
-                    let mut stream = ReaderStream::with_capacity(content.data, READER_STREAM_CAPACITY);
+                    let mut stream =
+                        ReaderStream::with_capacity(content.data, READER_STREAM_CAPACITY);
                     while let Some(chunk) = stream.next().await {
                         if tx.send(chunk).await.is_err() {
                             break;
@@ -798,5 +800,252 @@ impl ObjectCopy for S3 {
 
         self.initialize_state(source.key.to_string(), source.bucket.to_string())
             .await
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::io::copy::CopyContent;
+    use aws_sdk_s3::Client;
+    use aws_sdk_s3::config::SharedAsyncSleep;
+    use aws_sdk_s3::config::retry::RetryConfig;
+    use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadOutput;
+    use aws_sdk_s3::operation::get_object::GetObjectOutput;
+    use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
+    use aws_sdk_s3::operation::upload_part::UploadPartOutput;
+    use aws_smithy_async::rt::sleep::TokioSleep;
+    use aws_smithy_mocks::{MockResponseInterceptor, Rule, RuleMode, mock};
+    use aws_smithy_types::byte_stream::ByteStream;
+    use aws_smithy_types::error::ErrorMetadata;
+    use std::sync::Arc;
+    use tokio::io::AsyncReadExt;
+
+    const BUCKET: &str = "bucket";
+    const KEY: &str = "key";
+    const BODY: &[u8] = b"test";
+
+    /// Build a mock client that enables real retries with backoff so the SDK retry layer actually
+    /// re-drives the request body through the reopen factory.
+    fn retrying_mock_client(rules: &[&Rule]) -> Client {
+        let mut interceptor = MockResponseInterceptor::new().rule_mode(RuleMode::MatchAny);
+        for rule in rules {
+            interceptor = interceptor.with_rule(rule);
+        }
+
+        Client::from_conf(
+            aws_sdk_s3::config::Config::builder()
+                .with_test_defaults_v2()
+                .http_client(aws_smithy_mocks::create_mock_http_client())
+                .sleep_impl(SharedAsyncSleep::new(TokioSleep::new()))
+                .retry_config(RetryConfig::standard().with_max_attempts(3))
+                .interceptor(interceptor)
+                .build(),
+        )
+    }
+
+    /// A `get_object` rule that streams the test body.
+    fn get_object_rule() -> Rule {
+        mock!(Client::get_object)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .sequence()
+            .output(|| {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from_static(BODY))
+                    .build()
+            })
+            .repeatedly()
+            .build()
+    }
+
+    /// Build an S3 source from a mock client.
+    fn s3_source(client: Client) -> S3 {
+        S3Builder::default()
+            .with_client(S3Client::new(Arc::new(client), false, false))
+            .with_source(BUCKET, KEY)
+            .build()
+            .unwrap()
+    }
+
+    /// Build an S3 destination from a mock client.
+    fn s3_destination(client: Client, tag_mode: MetadataCopy) -> S3 {
+        S3Builder::default()
+            .with_client(S3Client::new(Arc::new(client), false, false))
+            .with_copy_tags(tag_mode)
+            .with_destination(BUCKET, KEY)
+            .build()
+            .unwrap()
+    }
+
+    /// Test copy state.
+    fn copy_state() -> CopyState {
+        CopyState::new(BODY.len() as u64, Some("tag=value".to_string()), None)
+    }
+
+    /// Download the mock source.
+    async fn download<F, Fut>(get_object: &Rule, upload: F) -> Result<CopyResult>
+    where
+        F: FnOnce(CopyContent) -> Fut,
+        Fut: Future<Output = Result<CopyResult>>,
+    {
+        let source = s3_source(retrying_mock_client(&[get_object]));
+        let content = source.download(None).await?;
+        upload(content).await
+    }
+
+    /// Download the mock source then upload to a copy mode destination backed by `put_object`.
+    async fn test_download(get_object: &Rule, put_object: &Rule) -> Result<CopyResult> {
+        download(get_object, |content| {
+            let destination =
+                s3_destination(retrying_mock_client(&[put_object]), MetadataCopy::Copy);
+            async move { destination.put_object(content, &copy_state()).await }
+        })
+        .await
+    }
+
+    /// A `put_object` rule that returns 503 `failures` times and then succeeds.
+    fn test_put_object(failures: usize) -> Rule {
+        mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .sequence()
+            .http_status(503, None)
+            .times(failures)
+            .output(|| PutObjectOutput::builder().build())
+            .build()
+    }
+
+    /// A `put_object` rule that always returns 503.
+    fn test_put_object_failing() -> Rule {
+        mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .sequence()
+            .http_status(503, None)
+            .repeatedly()
+            .build()
+    }
+
+    #[tokio::test]
+    async fn put_object_retries() {
+        let get_object = get_object_rule();
+        let put_object = test_put_object(2);
+
+        let result = test_download(&get_object, &put_object).await;
+        assert!(result.is_ok());
+        assert_eq!(put_object.num_calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn put_object_retries_exceeded() {
+        let get_object = get_object_rule();
+        let put_object = test_put_object_failing();
+
+        let result = test_download(&get_object, &put_object).await;
+        assert!(result.is_err());
+        assert_eq!(put_object.num_calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn put_object_best_effort() {
+        let get_object = get_object_rule();
+        let put_object = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .sequence()
+            .error(|| {
+                PutObjectError::generic(ErrorMetadata::builder().code("AccessDenied").build())
+            })
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+
+        let result = download(&get_object, |content| {
+            let destination = s3_destination(
+                retrying_mock_client(&[&put_object]),
+                MetadataCopy::BestEffort,
+            );
+            async move { destination.put_object(content, &copy_state()).await }
+        })
+        .await
+        .unwrap();
+        assert_eq!(put_object.num_calls(), 2);
+        assert_eq!(result.api_errors.len(), 1);
+        assert!(result.api_errors[0].is_access_denied());
+    }
+
+    #[tokio::test]
+    async fn put_object_best_effort_propagates() {
+        let get_object = get_object_rule();
+        let put_object = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .sequence()
+            .error(|| {
+                PutObjectError::generic(ErrorMetadata::builder().code("InvalidRequest").build())
+            })
+            .repeatedly()
+            .build();
+
+        let result = download(&get_object, |content| {
+            let destination = s3_destination(
+                retrying_mock_client(&[&put_object]),
+                MetadataCopy::BestEffort,
+            );
+            async move { destination.put_object(content, &copy_state()).await }
+        })
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn upload_part_retries_transient_error() {
+        let get_object = get_object_rule();
+        let create = mock!(Client::create_multipart_upload)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .sequence()
+            .output(|| {
+                CreateMultipartUploadOutput::builder()
+                    .upload_id("upload-id")
+                    .build()
+            })
+            .repeatedly()
+            .build();
+        let upload_part = mock!(Client::upload_part)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .sequence()
+            .http_status(503, None)
+            .times(2)
+            .output(|| UploadPartOutput::builder().e_tag("etag").build())
+            .build();
+
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+        let options = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: BODY.len() as u64,
+            ..Default::default()
+        };
+        let content = source.download(Some(options.clone())).await.unwrap();
+
+        let destination = s3_destination(
+            retrying_mock_client(&[&create, &upload_part]),
+            MetadataCopy::Copy,
+        );
+        let result = destination
+            .put_object_multipart(content, options, &copy_state())
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(upload_part.num_calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn reopen_reproduces_source() {
+        let get_object = get_object_rule();
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+
+        let content = source.download(None).await.unwrap();
+        let mut reopened = (content.reopen)().await.unwrap();
+
+        let mut buf = Vec::new();
+        reopened.data.read_to_end(buf.as_mut()).await.unwrap();
+        assert_eq!(buf, BODY);
     }
 }

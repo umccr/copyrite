@@ -93,9 +93,7 @@ impl File {
 
         let self_clone = self.clone();
         CopyContent::builder(file)
-            .with_reopen(move || {
-                self_clone.reopen_read(multi_part_options.clone())
-            })
+            .with_reopen(move || self_clone.reopen_read(multi_part_options.clone()))
             .build()
     }
 
@@ -222,5 +220,92 @@ impl ObjectCopy for File {
         let source = self.get_source()?;
 
         Self::initialize_state(source).await
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const BODY: &[u8] = b"the quick brown fox jumps over the lazy dog";
+
+    async fn read_all(content: CopyContent) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut data = content.data;
+        data.read_to_end(&mut buf).await.unwrap();
+        buf
+    }
+
+    async fn write_source(dir: &std::path::Path) -> String {
+        let path = dir.join("source");
+        let mut file = fs::File::create(&path).await.unwrap();
+        file.write_all(BODY).await.unwrap();
+        file.flush().await.unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    #[tokio::test]
+    async fn reopen_reproduces_source() {
+        let tmp = tempdir().unwrap();
+        let source = write_source(tmp.path()).await;
+        let file = File::new(Some(source), None);
+
+        let content = file.download(None).await.unwrap();
+        assert_eq!(read_all(content).await, BODY);
+
+        let content = file.download(None).await.unwrap();
+        let reopened = (content.reopen)().await.unwrap();
+        assert_eq!(read_all(reopened).await, BODY);
+    }
+
+    #[tokio::test]
+    async fn reopen_reproduces_parts() {
+        let tmp = tempdir().unwrap();
+        let source = write_source(tmp.path()).await;
+        let file = File::new(Some(source), None);
+
+        let options = MultiPartOptions {
+            part_number: Some(1),
+            start: 4,
+            end: 19,
+            ..Default::default()
+        };
+        let expected = &BODY[4..19];
+
+        let content = file.download(Some(options.clone())).await.unwrap();
+        assert_eq!(read_all(content).await, expected);
+
+        // Reopen must re-read the identical range.
+        let content = file.download(Some(options)).await.unwrap();
+        let reopened = (content.reopen)().await.unwrap();
+        assert_eq!(read_all(reopened).await, expected);
+    }
+
+    #[tokio::test]
+    async fn download_upload() {
+        let tmp = tempdir().unwrap();
+        let source = write_source(tmp.path()).await;
+        let destination = tmp.path().join("destination");
+
+        let source_file = File::new(Some(source), None);
+        let destination_file = File::new(None, Some(destination.to_string_lossy().to_string()));
+        let state = CopyState::new(BODY.len() as u64, None, None);
+
+        let content = source_file.download(None).await.unwrap();
+        destination_file
+            .upload(content, None, &state)
+            .await
+            .unwrap();
+
+        let mut written = Vec::new();
+        fs::File::open(&destination)
+            .await
+            .unwrap()
+            .read_to_end(&mut written)
+            .await
+            .unwrap();
+        assert_eq!(written, BODY);
     }
 }
