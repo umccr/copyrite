@@ -18,40 +18,59 @@ pub mod aws;
 pub mod file;
 
 /// A function that re-opens the copy content stream from its source. This is lazily loaded
-/// to reread the source instead of holding bytes in memory unnecessarily when re-trying
-/// best-effort tagging mode.
-pub type Reopen = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<CopyContent>> + Send>> + Send>;
+/// to reread the source instead of holding bytes in memory unnecessarily when re-trying.
+/// The reason this exists instead of using the default SDK mechanism is because we want to
+/// re-try explicitly when doing best-effort tagging mode.
+pub type Reopen =
+    Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<CopyContent>> + Send>> + Send + Sync>;
 
-/// Content to download/upload with optional tags.
+/// Content to download/upload, with a re-try function. Constructed using [`CopyContent::builder`].
 pub struct CopyContent {
     data: Box<dyn AsyncRead + Sync + Send + Unpin>,
-    reopen: Option<Reopen>,
+    reopen: Reopen,
 }
 
-impl Default for CopyContent {
-    fn default() -> Self {
+impl CopyContent {
+    /// Building a copy content from a data stream.
+    pub fn builder(data: Box<dyn AsyncRead + Sync + Send + Unpin>) -> CopyContentBuilder {
+        CopyContentBuilder { data, reopen: None }
+    }
+
+    /// Create an empty copy content placeholder.
+    pub fn empty() -> Self {
         Self {
             data: Box::new(empty()),
-            reopen: None,
+            reopen: Box::new(|| Box::pin(async { Ok(CopyContent::empty()) })),
         }
     }
 }
 
-impl CopyContent {
-    /// Create a new copy content struct.
-    pub fn new(data: Box<dyn AsyncRead + Sync + Send + Unpin>) -> Self {
-        Self { data, reopen: None }
-    }
+/// Builder for [`CopyContent`].
+pub struct CopyContentBuilder {
+    data: Box<dyn AsyncRead + Sync + Send + Unpin>,
+    reopen: Option<Reopen>,
+}
 
-    /// Attach a function that re-opens this stream from the source, so that an upload
-    /// can be retried.
+impl CopyContentBuilder {
+    /// Attach a function that re-opens this stream from the source, so that an upload can be
+    /// retried by re-reading the source rather than buffering it.
     pub fn with_reopen<F, Fut>(mut self, reopen: F) -> Self
     where
-        F: Fn() -> Fut + Send + 'static,
+        F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<CopyContent>> + Send + 'static,
     {
         self.reopen = Some(Box::new(move || Box::pin(reopen())));
         self
+    }
+
+    /// Build the copy content, failing if no reope was provided.
+    pub fn build(self) -> Result<CopyContent> {
+        Ok(CopyContent {
+            data: self.data,
+            reopen: self
+                .reopen
+                .ok_or_else(|| CopyError("copy content requires a reopen function".to_string()))?,
+        })
     }
 }
 
