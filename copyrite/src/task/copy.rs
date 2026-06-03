@@ -156,7 +156,7 @@ impl CopyTaskBuilder {
 
     /// Return whether single part is available.
     fn is_single_part(object_size: u64, single_part_limit: u64) -> bool {
-        object_size < single_part_limit
+        object_size <= single_part_limit
     }
 
     /// Find the best preferred multipart part size for an object, if a valid one exists.
@@ -600,26 +600,24 @@ impl CopyTask {
                 }
             } else {
                 // Otherwise, concurrently run the upload tasks.
+                let mut upload_tasks = Vec::with_capacity(self.concurrency);
                 for result in join_all(copy_tasks).await {
                     let (options, result) = result?;
-                    let mut tasks = Vec::with_capacity(self.concurrency);
 
                     let upload_fn = upload_fn.clone();
                     let state = self.state.clone();
-                    tasks.push(tokio::spawn(async move {
+                    upload_tasks.push(tokio::spawn(async move {
                         upload_fn(result?, options, state).await
                     }));
+                }
 
-                    join_all(tasks).await.into_iter().try_for_each(|result| {
-                        let result = result??;
-                        upload_id = result.upload_id;
-                        push_part(&mut parts, result.part);
-                        self.update_bytes(result.bytes_transferred);
-                        self.n_retries += result.n_retries;
-                        self.recoverable_errors.extend(result.api_errors);
-
-                        Ok::<_, Error>(())
-                    })?;
+                for result in join_all(upload_tasks).await {
+                    let result = result??;
+                    upload_id = result.upload_id;
+                    push_part(&mut parts, result.part);
+                    self.update_bytes(result.bytes_transferred);
+                    self.n_retries += result.n_retries;
+                    self.recoverable_errors.extend(result.api_errors);
                 }
             }
         }
