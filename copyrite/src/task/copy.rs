@@ -150,12 +150,31 @@ impl CopyTaskBuilder {
             return false;
         }
 
-        object_size.div_ceil(part_size) < max_parts
+        // This should allow up to and including max_parts, i.e. 10000 for S3.
+        object_size.div_ceil(part_size) <= max_parts
     }
 
     /// Return whether single part is available.
     fn is_single_part(object_size: u64, single_part_limit: u64) -> bool {
         object_size < single_part_limit
+    }
+
+    /// Find the best preferred multipart part size for an object, if a valid one exists.
+    fn preferred_multipart_part_size(
+        object_size: u64,
+        max_parts: u64,
+        max_part_size: u64,
+        min_part_size: u64,
+    ) -> Option<u64> {
+        PREFERRED_PART_SIZES.iter().copied().find(|part_size| {
+            Self::is_multipart(
+                object_size,
+                *part_size,
+                max_parts,
+                max_part_size,
+                min_part_size,
+            )
+        })
     }
 
     /// Determine the settings from an existing sums file.
@@ -197,12 +216,28 @@ impl CopyTaskBuilder {
             return Ok(CopySettings::new(None, ctx.clone(), info.size));
         }
 
-        // If none of the above apply, then extract the best additional checksum to use.
-        Ok(CopySettings::new(
-            None,
-            sums.checksums.keys().next().cloned().unwrap_or_default(),
+        // If none of the above apply, fall back based on the object size, keeping the best
+        // available checksum as the additional context to set on the copy.
+        let additional_ctx = sums.checksums.keys().next().cloned().unwrap_or_default();
+        if Self::is_single_part(info.size, info.max_part_size) {
+            Ok(CopySettings::new(None, additional_ctx, info.size))
+        } else if let Some(part_size) = Self::preferred_multipart_part_size(
             info.size,
-        ))
+            info.max_parts,
+            info.max_part_size,
+            info.min_part_size,
+        ) {
+            Ok(CopySettings::new(
+                Some(part_size),
+                additional_ctx,
+                info.size,
+            ))
+        } else {
+            Err(CopyError(format!(
+                "failed to find a valid part size for object size `{}`",
+                info.size
+            )))
+        }
     }
 
     /// Determine the settings to use for multipart or single part uploads, and any additional
@@ -299,14 +334,12 @@ impl CopyTaskBuilder {
         };
         // Use multipart if the size reaches the threshold.
         if size > threshold {
-            let part_size = PREFERRED_PART_SIZES.iter().find(|part_size| {
-                Self::is_multipart(size, **part_size, max_parts, max_part_size, min_part_size)
-            });
-
-            return if let Some(part_size) = part_size {
+            return if let Some(part_size) =
+                Self::preferred_multipart_part_size(size, max_parts, max_part_size, min_part_size)
+            {
                 Ok((
                     self,
-                    CopySettings::new(Some(*part_size), additional_ctx, size),
+                    CopySettings::new(Some(part_size), additional_ctx, size),
                 ))
             } else {
                 Err(err_fn())
@@ -696,6 +729,7 @@ impl CopyTask {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
+    use crate::checksum::file::Checksum;
     use crate::io::sums::aws::test::{
         mock_multi_part_etag_only_rule, mock_single_part_etag_only_rule,
     };
@@ -707,10 +741,58 @@ pub(crate) mod test {
     use aws_sdk_s3::operation::head_object::HeadObjectOutput;
     use aws_sdk_s3::types::error::NoSuchKey;
     use aws_smithy_mocks::{Rule, RuleMode, mock, mock_client};
+    use std::str::FromStr;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::fs::File;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn is_multipart_allows_exactly_max_parts() {
+        let exactly_max = 10141870 * 10000;
+        assert!(CopyTaskBuilder::is_multipart(
+            exactly_max,
+            10141870,
+            10000,
+            5368709120,
+            5242880
+        ));
+        assert!(!CopyTaskBuilder::is_multipart(
+            exactly_max + 1,
+            10141870,
+            10000,
+            5368709120,
+            5242880
+        ));
+    }
+
+    #[test]
+    fn invalid_settings_fallback_to_multipart() {
+        let builder = CopyTaskBuilder::default();
+        let destination = Provider::try_from("s3://bucket/key").unwrap();
+
+        let ctx = Ctx::from_str("md5-aws-200mib-200mib-400mib").unwrap();
+        let mut sums = SumsFile::default();
+        sums.add_checksum(
+            ctx,
+            Checksum::new("d41d8cd98f00b204e9800998ecf8427e".to_string()),
+        ); // pragma: allowlist secret
+
+        let size = 6 * 1024 * 1024 * 1024;
+        let info = ObjectInfo {
+            size,
+            max_parts: 10000,
+            max_part_size: 5368709120,
+            min_part_size: 5242880,
+        };
+
+        let settings = builder
+            .use_settings_from_sums(&sums, info, destination)
+            .unwrap();
+
+        // The copy should use a multipart here.
+        assert!(settings.part_size.is_some());
+    }
 
     #[tokio::test]
     async fn test_copy() -> Result<()> {
