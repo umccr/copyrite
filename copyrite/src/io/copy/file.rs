@@ -112,12 +112,26 @@ impl File {
         mut data: CopyContent,
         multipart: Option<MultiPartOptions>,
     ) -> Result<u64> {
+        // Determine the part number for this write. A multipart write with no part number is the
+        // completion step, which writes nothing.
+        let part_number = if let Some(multipart) = &multipart {
+            if multipart.part_number.is_none() {
+                return Ok(0);
+            }
+            multipart.part_number
+        } else {
+            None
+        };
+
         let destination = self.get_destination()?;
-        // Append to an existing file or create a new one.
-        let mut file = if fs::try_exists(&destination)
-            .await
-            .is_ok_and(|exists| exists)
-        {
+
+        // The first part should truncate an existing file.
+        let append = if let Some(part_number) = part_number {
+            part_number > 1
+        } else {
+            false
+        };
+        let mut file = if append {
             fs::OpenOptions::new()
                 .append(true)
                 .write(true)
@@ -128,10 +142,6 @@ impl File {
         };
 
         let total = if let Some(multipart) = multipart {
-            if multipart.part_number.is_none() {
-                return Ok(0);
-            }
-
             io::copy(
                 &mut data.data.take(multipart.bytes_transferred()),
                 &mut file,
