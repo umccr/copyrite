@@ -305,7 +305,6 @@ mod test {
         }
         let source = File::new(Some(source_path.to_string_lossy().to_string()), None);
 
-        // Stale content from a previous run that must be overwritten, not appended to.
         let destination_path = tmp.path().join("destination");
         {
             let mut file = fs::File::create(&destination_path).await.unwrap();
