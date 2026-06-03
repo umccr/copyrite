@@ -795,6 +795,11 @@ impl ObjectCopy for S3 {
         5242880
     }
 
+    fn max_object_size(&self) -> u64 {
+        // S3 objects can be at most 5 TiB.
+        5497558138880
+    }
+
     async fn initialize_state(&self) -> Result<CopyState> {
         let source = self.get_source()?;
 

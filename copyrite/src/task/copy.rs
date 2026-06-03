@@ -265,6 +265,15 @@ impl CopyTaskBuilder {
         let max_parts = destination_copy.max_parts();
         let min_part_size = destination_copy.min_part_size();
 
+        // Refuse objects larger than the destination's maximum object.
+        let max_object_size = destination_copy.max_object_size();
+        if size > max_object_size {
+            return Err(CopyError(format!(
+                "object size `{}` exceeds the maximum: `{}`",
+                size, max_object_size
+            )));
+        }
+
         // Only use the sums file if the size is not set at the source.
         let sums = if self.part_size.is_none() {
             let mut object = ObjectSumsBuilder::default()
