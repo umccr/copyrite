@@ -79,7 +79,7 @@ pub struct MultiPartOptions {
     pub(crate) part_number: Option<u64>,
     pub(crate) start: u64,
     pub(crate) end: u64,
-    pub(crate) parts: Vec<Part>,
+    pub(crate) parts: Option<Vec<Part>>,
     pub(crate) upload_id: Option<String>,
 }
 
@@ -228,6 +228,11 @@ pub trait ObjectCopy: DynClone {
 
     /// The minimum part size for multipart copies.
     fn min_part_size(&self) -> u64;
+
+    /// The maximum total object size supported by the destination.
+    fn max_object_size(&self) -> u64 {
+        u64::MAX
+    }
 
     /// Get the size of the object.
     async fn initialize_state(&self) -> Result<CopyState>;

@@ -468,11 +468,14 @@ impl S3 {
 
             Ok(result)
         } else {
+            let parts = multi_part.parts.ok_or_else(|| {
+                Error::aws_error("missing parts for multipart completion".to_string())
+            })?;
             self.complete_multipart_upload(
                 &destination.key,
                 &destination.bucket,
                 upload_id.to_string(),
-                multi_part.parts,
+                parts,
             )
             .await?;
 
@@ -708,11 +711,14 @@ impl S3 {
 
             Ok(result)
         } else {
+            let parts = multi_part.parts.ok_or_else(|| {
+                Error::aws_error("missing parts for multipart completion".to_string())
+            })?;
             self.complete_multipart_upload(
                 &destination.key,
                 &destination.bucket,
                 upload_id.to_string(),
-                multi_part.parts,
+                parts,
             )
             .await?;
 
@@ -793,6 +799,11 @@ impl ObjectCopy for S3 {
 
     fn min_part_size(&self) -> u64 {
         5242880
+    }
+
+    fn max_object_size(&self) -> u64 {
+        // S3 objects can be at most 50 TiB.
+        54975581388800
     }
 
     async fn initialize_state(&self) -> Result<CopyState> {

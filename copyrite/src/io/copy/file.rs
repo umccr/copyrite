@@ -112,12 +112,26 @@ impl File {
         mut data: CopyContent,
         multipart: Option<MultiPartOptions>,
     ) -> Result<u64> {
+        // Determine the part number for this write. A multipart write with no part number is the
+        // completion step, which writes nothing.
+        let part_number = if let Some(multipart) = &multipart {
+            if multipart.part_number.is_none() {
+                return Ok(0);
+            }
+            multipart.part_number
+        } else {
+            None
+        };
+
         let destination = self.get_destination()?;
-        // Append to an existing file or create a new one.
-        let mut file = if fs::try_exists(&destination)
-            .await
-            .is_ok_and(|exists| exists)
-        {
+
+        // The first part should truncate an existing file.
+        let append = if let Some(part_number) = part_number {
+            part_number > 1
+        } else {
+            false
+        };
+        let mut file = if append {
             fs::OpenOptions::new()
                 .append(true)
                 .write(true)
@@ -128,10 +142,6 @@ impl File {
         };
 
         let total = if let Some(multipart) = multipart {
-            if multipart.part_number.is_none() {
-                return Ok(0);
-            }
-
             io::copy(
                 &mut data.data.take(multipart.bytes_transferred()),
                 &mut file,
@@ -281,6 +291,62 @@ mod test {
         let content = file.download(Some(options)).await.unwrap();
         let reopened = (content.reopen)().await.unwrap();
         assert_eq!(read_all(reopened).await, expected);
+    }
+
+    #[tokio::test]
+    async fn multipart_write_truncates_stale_destination() {
+        let tmp = tempdir().unwrap();
+
+        let source_path = tmp.path().join("source");
+        {
+            let mut file = fs::File::create(&source_path).await.unwrap();
+            file.write_all(b"test").await.unwrap();
+            file.flush().await.unwrap();
+        }
+        let source = File::new(Some(source_path.to_string_lossy().to_string()), None);
+
+        let destination_path = tmp.path().join("destination");
+        {
+            let mut file = fs::File::create(&destination_path).await.unwrap();
+            file.write_all(b"previous").await.unwrap();
+            file.flush().await.unwrap();
+        }
+        let destination = File::new(None, Some(destination_path.to_string_lossy().to_string()));
+
+        let state = CopyState::new(10, None, None);
+        let part1 = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: 5,
+            ..Default::default()
+        };
+        let part2 = MultiPartOptions {
+            part_number: Some(2),
+            start: 5,
+            end: 10,
+            ..Default::default()
+        };
+
+        let content = source.download(Some(part1.clone())).await.unwrap();
+        destination
+            .upload(content, Some(part1), &state)
+            .await
+            .unwrap();
+
+        let content = source.download(Some(part2.clone())).await.unwrap();
+        destination
+            .upload(content, Some(part2), &state)
+            .await
+            .unwrap();
+
+        let mut written = Vec::new();
+        fs::File::open(&destination_path)
+            .await
+            .unwrap()
+            .read_to_end(&mut written)
+            .await
+            .unwrap();
+        assert_eq!(written, b"test");
     }
 
     #[tokio::test]
