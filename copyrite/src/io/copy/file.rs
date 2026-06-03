@@ -294,6 +294,63 @@ mod test {
     }
 
     #[tokio::test]
+    async fn multipart_write_truncates_stale_destination() {
+        let tmp = tempdir().unwrap();
+
+        let source_path = tmp.path().join("source");
+        {
+            let mut file = fs::File::create(&source_path).await.unwrap();
+            file.write_all(b"test").await.unwrap();
+            file.flush().await.unwrap();
+        }
+        let source = File::new(Some(source_path.to_string_lossy().to_string()), None);
+
+        // Stale content from a previous run that must be overwritten, not appended to.
+        let destination_path = tmp.path().join("destination");
+        {
+            let mut file = fs::File::create(&destination_path).await.unwrap();
+            file.write_all(b"previous").await.unwrap();
+            file.flush().await.unwrap();
+        }
+        let destination = File::new(None, Some(destination_path.to_string_lossy().to_string()));
+
+        let state = CopyState::new(10, None, None);
+        let part1 = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: 5,
+            ..Default::default()
+        };
+        let part2 = MultiPartOptions {
+            part_number: Some(2),
+            start: 5,
+            end: 10,
+            ..Default::default()
+        };
+
+        let content = source.download(Some(part1.clone())).await.unwrap();
+        destination
+            .upload(content, Some(part1), &state)
+            .await
+            .unwrap();
+
+        let content = source.download(Some(part2.clone())).await.unwrap();
+        destination
+            .upload(content, Some(part2), &state)
+            .await
+            .unwrap();
+
+        let mut written = Vec::new();
+        fs::File::open(&destination_path)
+            .await
+            .unwrap()
+            .read_to_end(&mut written)
+            .await
+            .unwrap();
+        assert_eq!(written, b"test");
+    }
+
+    #[tokio::test]
     async fn download_upload() {
         let tmp = tempdir().unwrap();
         let source = write_source(tmp.path()).await;
