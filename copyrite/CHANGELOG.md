@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/umccr/copyrite/compare/v0.4.0...v0.5.0) - 2026-06-03
+
+### Added
+
+- add max object size setting
+- add re-open read for aws based operations
+- add re-open read for file based operations
+- add streaming to multipart as well
+- add with_reopen to copy when using best effort copying
+- add re-open handle to allow re-fetching the source when required
+
+### Fixed
+
+- max object size should be 50 TiB not 5 TiB
+- append on existing data for file copy
+- correctly run upload tasks concurrently, single-part should be inclusive
+- guard against invalid single-part copy attempts, and change < to <= in multipart detection
+- apply reopen logic to avoid holding memory while using put object
+
+### Other
+
+- fmt
+- add S3 tests for max size and single part check
+- add file based tests for append/truncate
+- avoid unnecessary clone on object info
+- add test cases targeting retries and re-open
+- add bytes dependency
+- make the CopyContent re-open function required
+
 ## [0.4.0](https://github.com/umccr/copyrite/compare/v0.3.2...v0.4.0) - 2026-05-12
 
 ### Added
