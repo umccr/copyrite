@@ -566,7 +566,7 @@ impl CopyTask {
                 if end > self.object_size {
                     end = self.object_size;
                 }
-                
+
                 let options = MultiPartOptions {
                     part_number: Some(*part_number),
                     start,
