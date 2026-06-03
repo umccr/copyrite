@@ -79,7 +79,7 @@ pub struct MultiPartOptions {
     pub(crate) part_number: Option<u64>,
     pub(crate) start: u64,
     pub(crate) end: u64,
-    pub(crate) parts: Vec<Part>,
+    pub(crate) parts: Option<Vec<Part>>,
     pub(crate) upload_id: Option<String>,
 }
 

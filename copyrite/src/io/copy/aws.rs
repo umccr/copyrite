@@ -468,11 +468,14 @@ impl S3 {
 
             Ok(result)
         } else {
+            let parts = multi_part.parts.ok_or_else(|| {
+                Error::aws_error("missing parts for multipart completion".to_string())
+            })?;
             self.complete_multipart_upload(
                 &destination.key,
                 &destination.bucket,
                 upload_id.to_string(),
-                multi_part.parts,
+                parts,
             )
             .await?;
 
@@ -708,11 +711,14 @@ impl S3 {
 
             Ok(result)
         } else {
+            let parts = multi_part.parts.ok_or_else(|| {
+                Error::aws_error("missing parts for multipart completion".to_string())
+            })?;
             self.complete_multipart_upload(
                 &destination.key,
                 &destination.bucket,
                 upload_id.to_string(),
-                multi_part.parts,
+                parts,
             )
             .await?;
 

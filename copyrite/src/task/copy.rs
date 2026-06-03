@@ -566,13 +566,13 @@ impl CopyTask {
                 if end > self.object_size {
                     end = self.object_size;
                 }
-
+                
                 let options = MultiPartOptions {
                     part_number: Some(*part_number),
                     start,
                     end,
                     upload_id: upload_id.clone(),
-                    parts: parts.clone(),
+                    parts: None,
                 };
 
                 let state = self.state.clone();
@@ -622,13 +622,14 @@ impl CopyTask {
             }
         }
 
-        // Complete the upload
+        // Complete the upload. The completion step is the only operation that needs the
+        // accumulated parts.
         let options = MultiPartOptions {
             part_number: None,
             start,
             end,
             upload_id: upload_id.clone(),
-            parts: parts.clone(),
+            parts: Some(parts.clone()),
         };
         let result = download_fn(options.clone(), self.state.clone()).await?;
         let upload = upload_fn(result, options, self.state.clone()).await?;
