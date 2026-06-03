@@ -15,10 +15,14 @@ pastey = "0.2"
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "test-util", "io-util", "io-std", "fs"] }
+tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 async-stream = "0.3"
 async-trait = "0.1"
-dyn-clone = "1.0"
+dyn-clone = "1"
+bytes = "1"
+http-body = "1"
+http-body-util = "0.1"
 
 # Checksums
 md-5 = "0.11"
@@ -56,6 +60,7 @@ envy = "0.4"
 dotenvy = "0.15"
 
 aws-smithy-mocks = "0.2"
+aws-smithy-async = { version = "1", features = ["rt-tokio"] }
 
 [[bench]]
 name = "generate"

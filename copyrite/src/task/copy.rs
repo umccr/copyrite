@@ -620,6 +620,8 @@ impl CopyTask {
                 .await?
             }
             (CopyMode::DownloadUpload, None) => {
+                // `download` attaches a reopen factory, so the upload body is retryable: the SDK
+                // can retry transient failures without buffering the object.
                 let data = self.source_copy.download(None).await?;
                 let upload = self
                     .destination_copy
@@ -636,7 +638,7 @@ impl CopyTask {
 
                 self.run_multipart(
                     part_size,
-                    |option, _| async move { source.download(Some(option.clone())).await },
+                    |option, _| async move { source.download(Some(option)).await },
                     |data, options, state| async move {
                         destination.upload(data, Some(options), &state).await
                     },
