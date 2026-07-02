@@ -29,7 +29,7 @@ struct TestConfig {
 
 impl TestConfig {
     fn load() -> Result<Self> {
-        dotenv()?;
+        dotenv().ok();
 
         let mut env: Self = prefixed("COPYRITE_TEST_").from_env()?;
 
