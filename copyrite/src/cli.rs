@@ -120,24 +120,34 @@ impl Command {
 
         match self.commands {
             Subcommands::Generate(generate_args) => {
-                let stats = generate_args
+                match generate_args
                     .generate(self.optimization, vec![client], true)
                     .await
-                    .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
-                if let Some(sums) = stats.sums {
-                    sums.iter()
-                        .try_for_each(|sums| Self::print_stats(&sums, pretty_json, false))?;
-                } else {
-                    Self::print_stats(&stats, pretty_json, ui)?;
+                {
+                    Ok(stats) => {
+                        if let Some(sums) = stats.sums {
+                            sums.iter().try_for_each(|sums| {
+                                Self::print_stats(&sums, pretty_json, false)
+                            })?;
+                        } else {
+                            Self::print_stats(&stats, pretty_json, ui)?;
+                        }
+                    }
+                    Err(err) => {
+                        Self::report_failure(err.with_elapsed(now.elapsed()), pretty_json, ui)?
+                    }
                 }
             }
             Subcommands::Check(check_args) => {
-                let output = check_args
+                match check_args
                     .check(self.optimization, write_sums_file, false, vec![client])
                     .await
-                    .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
-
-                Self::print_stats(&output, pretty_json, ui)?;
+                {
+                    Ok(output) => Self::print_stats(&output, pretty_json, ui)?,
+                    Err(err) => {
+                        Self::report_failure(err.with_elapsed(now.elapsed()), pretty_json, ui)?
+                    }
+                }
             }
             Subcommands::Copy(copy_args) => {
                 let destination_client = self
@@ -145,7 +155,7 @@ impl Command {
                     .destination_client(&self.compatibility)
                     .await?;
 
-                let output = copy_args
+                match copy_args
                     .copy(
                         client,
                         destination_client,
@@ -155,9 +165,12 @@ impl Command {
                         ui,
                     )
                     .await
-                    .map_err(|err| Box::new(err.with_elapsed(now.elapsed())))?;
-
-                Self::print_stats(&output, pretty_json, ui)?;
+                {
+                    Ok(output) => Self::print_stats(&output, pretty_json, ui)?,
+                    Err(err) => {
+                        Self::report_failure(err.with_elapsed(now.elapsed()), pretty_json, ui)?
+                    }
+                }
             }
         }
 
@@ -178,6 +191,22 @@ impl Command {
         }
 
         Ok(())
+    }
+
+    /// Report a failure in a subcommand. This function takes into account whether the stats block
+    /// and output mode is `--ui`. A failure still produces a valid JSON stats block, unless `--ui`
+    /// is used.
+    fn report_failure<T>(stats: T, pretty_json: bool, ui: bool) -> Result<()>
+    where
+        T: Serialize,
+        Box<T>: Into<Error>,
+    {
+        if ui {
+            return Err(Box::new(stats).into());
+        }
+
+        Self::print_stats(&stats, pretty_json, ui)?;
+        std::process::exit(1);
     }
 }
 
