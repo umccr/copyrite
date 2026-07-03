@@ -1,3 +1,9 @@
+copyrite (0.5.1-1) unstable; urgency=low
+
+  * feat: improve error print output by @mmalenic in https://github.com/umccr/copyrite/pull/87
+
+ -- Marko Malenic <mmalenic1@gmail.com>  Fri, 03 Jul 2026 00:00:00 +0000
+
 copyrite (0.5.0-1) unstable; urgency=low
 
   * fix: in-memory bytes by @mmalenic in https://github.com/umccr/copyrite/pull/79

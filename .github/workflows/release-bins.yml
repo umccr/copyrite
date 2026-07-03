@@ -38,7 +38,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
@@ -68,19 +68,23 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.get-release.outputs.tag }}
+      - name: Get package version from release tag
+        run: |
+          version="${{ needs.get-release.outputs.tag }}"
+          echo "PKG_VERSION=${version#v}" >> "$GITHUB_ENV"
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y rpm debhelper build-essential
+        run: sudo apt-get update && sudo apt-get install -y rpm debhelper build-essential devscripts
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Build RPM package
-        run: rpmbuild --define "_topdir $(pwd)/rpmbuild" --build-in-place --nodeps -bb pkg/rpm/copyrite.spec
+        run: rpmbuild --define "_topdir $(pwd)/rpmbuild" --define "version ${PKG_VERSION}" --build-in-place --nodeps -bb pkg/rpm/copyrite.spec
       - name: Release RPM assets
         uses: softprops/action-gh-release@v2
         with:
@@ -91,8 +95,13 @@ jobs:
       - name: Build Debian package
         env:
           DEB_BUILD_OPTIONS: noautodbgsym
+          DEBEMAIL: mmalenic1@gmail.com
+          DEBFULLNAME: Marko Malenic
         run: |
           cp -r pkg/debian .
+          if [ "$(dpkg-parsechangelog -S Version)" != "${PKG_VERSION}-1" ]; then
+            dch --newversion "${PKG_VERSION}-1" --distribution unstable "Release ${PKG_VERSION}"
+          fi
           dpkg-buildpackage --build=binary --no-sign
       - name: Release Debian assets
         uses: softprops/action-gh-release@v2
