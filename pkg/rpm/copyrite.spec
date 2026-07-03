@@ -1,10 +1,12 @@
+%{!?version: %global version 0.5.1}
+
 Name:           copyrite
-Version:        0.4.0
+Version:        %{version}
 Release:        1%{?dist}
 Summary:        CLI tool for efficient checksum and copy operations across object stores
 
 License:        MIT
-URL:            https://github.com/mmalenic/copyrite
+URL:            https://github.com/umccr/copyrite
 
 %global debug_package %{nil}
 
@@ -21,6 +23,9 @@ install -D target/release/%{name} %{buildroot}%{_bindir}/%{name}
 %{_bindir}/%{name}
 
 %changelog
+* Fri Jul 03 2026 Marko Malenic <mmalenic1@gmail.com> - 0.5.1-1
+- feat: improve error print output by @mmalenic in https://github.com/umccr/copyrite/pull/87
+
 * Thu Jun 04 2026 Marko Malenic <mmalenic1@gmail.com> - 0.5.0-1
 - fix: in-memory bytes by @mmalenic in https://github.com/umccr/copyrite/pull/79
 - fix: max part size copy by @mmalenic in https://github.com/umccr/copyrite/pull/82

@@ -49,7 +49,7 @@ jobs:
           provenance: false
           platforms: "linux/amd64,linux/arm64"
           build-args: |
-            GITHUB_REPO_RELEASES_URL=https://github.com/umccr/cloud-checksum/releases/download
+            GITHUB_REPO_RELEASES_URL=https://github.com/umccr/copyrite/releases/download
             PACKAGE_VERSION=v${{ steps.tag.outputs.tag }}
           push: true
           tags: |
