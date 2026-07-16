@@ -170,6 +170,7 @@ impl S3Client {
 
     /// Create an S3 client from the credentials provider, profile, region and endpoint url.
     /// Any fields set in `overrides` take precedence over the resolved credential provider values.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_s3_client(
         provider: &CredentialProvider,
         profile: Option<&str>,
