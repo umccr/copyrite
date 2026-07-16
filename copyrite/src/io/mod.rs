@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use aws_config::Region;
 use aws_credential_types::provider::ProvideCredentials;
 use aws_sdk_s3::client::customize::CustomizableOperation;
-use aws_sdk_s3::config::StalledStreamProtectionConfig;
+use aws_sdk_s3::config::{RequestChecksumCalculation, StalledStreamProtectionConfig};
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation;
 use aws_sdk_s3::{Client, config};
@@ -100,6 +100,7 @@ impl S3Client {
             credentials.effective_source_secret(),
             credentials.source_overrides(),
             compatibility.source_force_path_style(),
+            compatibility.source_no_request_checksum(),
         )
         .await?;
 
@@ -124,6 +125,7 @@ impl S3Client {
             credentials.effective_destination_secret(),
             credentials.destination_overrides(),
             compatibility.destination_force_path_style(),
+            compatibility.destination_no_request_checksum(),
         )
         .await?;
 
@@ -176,6 +178,7 @@ impl S3Client {
         secret: Option<&str>,
         overrides: CredentialOverrides,
         force_path_style: bool,
+        no_request_checksum: bool,
     ) -> Result<Client> {
         let mut loader = aws_config::defaults(BehaviorVersion::latest());
 
@@ -220,14 +223,22 @@ impl S3Client {
             };
 
             let merged = overrides.merge_with(base.as_ref())?;
-            config::Builder::from(&sdk_config)
+            let mut builder = config::Builder::from(&sdk_config)
                 .credentials_provider(merged)
-                .force_path_style(force_path_style)
-                .build()
+                .force_path_style(force_path_style);
+            if no_request_checksum {
+                builder = builder
+                    .request_checksum_calculation(RequestChecksumCalculation::WhenRequired);
+            }
+            builder.build()
         } else {
-            config::Builder::from(&sdk_config)
-                .force_path_style(force_path_style)
-                .build()
+            let mut builder = config::Builder::from(&sdk_config)
+                .force_path_style(force_path_style);
+            if no_request_checksum {
+                builder = builder
+                    .request_checksum_calculation(RequestChecksumCalculation::WhenRequired);
+            }
+            builder.build()
         };
 
         Ok(Client::from_conf(s3_config))
@@ -247,6 +258,7 @@ impl S3Client {
             None,
             None,
             no_overrides,
+            false,
             false,
         )
         .await
