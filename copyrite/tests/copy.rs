@@ -103,6 +103,7 @@ async fn copy_test() -> Result<()> {
         config.secret.as_deref(),
         no_overrides,
         config.is_s3_compatible(),
+        config.is_s3_compatible(),
     )
     .await?;
 
