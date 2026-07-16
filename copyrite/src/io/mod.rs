@@ -227,16 +227,15 @@ impl S3Client {
                 .credentials_provider(merged)
                 .force_path_style(force_path_style);
             if no_request_checksum {
-                builder = builder
-                    .request_checksum_calculation(RequestChecksumCalculation::WhenRequired);
+                builder =
+                    builder.request_checksum_calculation(RequestChecksumCalculation::WhenRequired);
             }
             builder.build()
         } else {
-            let mut builder = config::Builder::from(&sdk_config)
-                .force_path_style(force_path_style);
+            let mut builder = config::Builder::from(&sdk_config).force_path_style(force_path_style);
             if no_request_checksum {
-                builder = builder
-                    .request_checksum_calculation(RequestChecksumCalculation::WhenRequired);
+                builder =
+                    builder.request_checksum_calculation(RequestChecksumCalculation::WhenRequired);
             }
             builder.build()
         };
