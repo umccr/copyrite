@@ -7,6 +7,7 @@ use crate::error::{ApiError, Error, Result};
 use crate::io::S3Client;
 use crate::io::sums::{ObjectSums, ObjectSumsBuilder};
 use crate::stats::{CheckComparison, ChecksumPair};
+use crate::task::ClientInput;
 use clap::ValueEnum;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -17,44 +18,33 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::{fmt, mem, result};
 
 /// Build a check task.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CheckTaskBuilder {
-    files: Vec<String>,
+    inputs: Vec<ClientInput>,
     sums_files: Vec<(String, SumsFile)>,
     group_by: GroupBy,
     update: bool,
-    clients: Vec<Option<S3Client>>,
-}
-
-impl Default for CheckTaskBuilder {
-    fn default() -> Self {
-        Self {
-            files: Default::default(),
-            sums_files: Default::default(),
-            group_by: Default::default(),
-            update: Default::default(),
-            // Ensure at least one element in the vector to repeat.
-            clients: vec![None],
-        }
-    }
 }
 
 impl CheckTaskBuilder {
-    /// Set the input files.
+    /// Set the inputs, each paired with the client used to access it.
+    pub fn with_inputs(mut self, inputs: Vec<ClientInput>) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
+    /// Set the input files without any clients.
     pub fn with_input_files(mut self, files: Vec<String>) -> Self {
-        self.files = files;
+        self.inputs = files
+            .into_iter()
+            .map(|file| ClientInput::new(file, None))
+            .collect();
         self
     }
 
     /// Set the sums file directly without reading from input files.
     pub fn with_sums_files(mut self, files: Vec<(String, SumsFile)>) -> Self {
         self.sums_files = files;
-        self
-    }
-
-    /// Set the S3 client to use for each input file.
-    pub fn with_clients(mut self, clients: Vec<S3Client>) -> Self {
-        self.clients = clients.into_iter().map(Some).collect();
         self
     }
 
@@ -70,77 +60,80 @@ impl CheckTaskBuilder {
         self
     }
 
-    /// Set the S3 client to use.
-    pub fn with_client(mut self, client: S3Client) -> Self {
-        self.clients = vec![Some(client)];
-        self
-    }
-
     /// Build a check task.
-    pub async fn build(mut self) -> Result<CheckTask> {
+    pub async fn build(self) -> Result<CheckTask> {
         let group_by = self.group_by;
+        let update = self.update;
 
-        // Remove elements that are already set by in-memory sums files.
-        let in_memory = self
-            .sums_files
-            .iter()
-            .map(|(sums, _)| sums)
-            .collect::<Vec<_>>();
-        self.files.retain(|file| !in_memory.contains(&file));
+        // Locations already provided as in-memory sums files are not re-read from their source.
+        let mut sums_by_location: BTreeMap<String, SumsFile> =
+            self.sums_files.into_iter().collect();
+        let mut existing_states = Vec::new();
+        let mut to_read = Vec::new();
+        for input in self.inputs {
+            let location = input.location().to_string();
+            match sums_by_location.remove(&location) {
+                Some(sums) => existing_states.push((location, sums, input.client())),
+                None => to_read.push(input),
+            }
+        }
+        // Any in-memory sums without a matching input are still included, without a client.
+        for (location, sums) in sums_by_location {
+            existing_states.push((location, sums, None));
+        }
 
-        let task_client = self.clients.first().cloned().flatten();
-        let (objects, errors): (Vec<_>, Vec<_>) = join_all(
-            self.files
-                .into_iter()
-                .zip(self.clients.into_iter().cycle())
-                .map(|(file, client)| async move {
-                    let mut sums = ObjectSumsBuilder::default()
-                        .set_client(client)
-                        .build(file.to_string())
-                        .await?;
+        let (read_objects, errors): (Vec<_>, Vec<_>) =
+            join_all(to_read.into_iter().map(|input| async move {
+                let (location, client) = input.into_inner();
+                let mut sums = ObjectSumsBuilder::default()
+                    .set_client(client)
+                    .build(location)
+                    .await?;
 
-                    let file_size = sums.file_size().await?;
-                    let existing = sums
-                        .sums_file()
-                        .await?
-                        .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
+                let file_size = sums.file_size().await?;
+                let existing = sums
+                    .sums_file()
+                    .await?
+                    .unwrap_or_else(|| SumsFile::new(file_size, Default::default()));
 
-                    let errors = sums.api_errors();
-                    Ok((
-                        (
-                            SumsKey((existing, sums.location())),
-                            BTreeSet::from_iter(vec![State::ObjectSums(sums)]),
-                        ),
-                        errors,
-                    ))
-                }),
-        )
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .unzip();
+                let errors = sums.api_errors();
+                Ok((
+                    (
+                        SumsKey((existing, sums.location())),
+                        BTreeSet::from_iter(vec![State::ObjectSums(sums)]),
+                    ),
+                    errors,
+                ))
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .unzip();
 
-        let mut objects = BTreeMap::from_iter(objects);
+        let mut objects = BTreeMap::from_iter(read_objects);
         let errors = HashSet::from_iter(
             errors
                 .into_iter()
                 .flat_map(|err| err.into_iter().collect::<Vec<_>>()),
         );
 
-        for (location, sums) in self.sums_files {
+        for (location, sums, client) in existing_states {
             objects.insert(
                 SumsKey((sums.clone(), location.to_string())),
-                BTreeSet::from_iter(vec![State::ExistingSums((location, sums))]),
+                BTreeSet::from_iter(vec![State::ExistingSums {
+                    location,
+                    sums,
+                    client,
+                }]),
             );
         }
 
         Ok(CheckTask {
             objects: CheckObjects(objects),
             group_by,
-            update: self.update,
+            update,
             recoverable_errors: errors,
-            client: task_client,
             ..Default::default()
         })
     }
@@ -161,7 +154,11 @@ pub enum GroupBy {
 #[derive(Clone)]
 pub enum State {
     ObjectSums(Box<dyn ObjectSums + Send>),
-    ExistingSums((String, SumsFile)),
+    ExistingSums {
+        location: String,
+        sums: SumsFile,
+        client: Option<S3Client>,
+    },
 }
 
 impl State {
@@ -169,7 +166,7 @@ impl State {
     pub fn location(&self) -> String {
         match self {
             State::ObjectSums(object) => object.location(),
-            State::ExistingSums((location, _)) => location.to_string(),
+            State::ExistingSums { location, .. } => location.to_string(),
         }
     }
 
@@ -177,7 +174,7 @@ impl State {
     pub async fn sums_file(&mut self) -> Result<Option<SumsFile>> {
         match self {
             State::ObjectSums(object) => object.sums_file().await,
-            State::ExistingSums((_, sums)) => Ok(Some(sums.clone())),
+            State::ExistingSums { sums, .. } => Ok(Some(sums.clone())),
         }
     }
 
@@ -191,12 +188,14 @@ impl State {
 
     /// Write the sums file to the location. If no object sums are used then this creates a new
     /// object sums to write the file.
-    pub async fn write_sums_file(&self, sums: &SumsFile, client: Option<S3Client>) -> Result<()> {
+    pub async fn write_sums_file(&self, sums: &SumsFile) -> Result<()> {
         match self {
             State::ObjectSums(object) => object.write_sums_file(sums).await,
-            State::ExistingSums((location, _)) => {
+            State::ExistingSums {
+                location, client, ..
+            } => {
                 ObjectSumsBuilder::default()
-                    .set_client(client)
+                    .set_client(client.clone())
                     .build(location.to_string())
                     .await?
                     .write_sums_file(sums)
@@ -329,7 +328,6 @@ pub struct CheckTask {
     update: bool,
     compared_directly: Vec<CheckComparison>,
     updated: Vec<String>,
-    client: Option<S3Client>,
     recoverable_errors: HashSet<ApiError>,
 }
 
@@ -417,7 +415,6 @@ impl CheckTask {
 
     async fn do_check(&mut self) -> Result<()> {
         let update = self.update && matches!(self.group_by, GroupBy::Equality);
-        let client = self.client.clone();
         match self.group_by {
             GroupBy::Equality => self.merge_same().await,
             GroupBy::Comparability => self.merge_comparable().await,
@@ -432,7 +429,7 @@ impl CheckTask {
 
                     self.recoverable_errors.extend(location.api_errors());
                     if current.as_ref() != Some(file) {
-                        location.write_sums_file(file, client.clone()).await?;
+                        location.write_sums_file(file).await?;
                         updated_sums.push(location.location());
                     }
                 }
@@ -502,13 +499,94 @@ impl CheckTask {
 pub(crate) mod test {
     use super::*;
     use crate::checksum::file::Checksum;
+    use crate::checksum::standard::test::EXPECTED_MD5_SUM;
     use crate::error::Error;
     use crate::io::sums::file::FileBuilder;
     use crate::test::TEST_FILE_SIZE;
     use anyhow::Result;
+    use aws_sdk_s3::Client;
+    use aws_sdk_s3::operation::get_object::GetObjectError;
+    use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
+    use aws_sdk_s3::types::error::{NoSuchKey, NotFound};
+    use aws_smithy_mocks::{RuleMode, mock, mock_client};
     use std::collections::BTreeMap;
     use std::path::Path;
+    use std::sync::Arc;
     use tempfile::{TempDir, tempdir};
+
+    #[tokio::test]
+    async fn build_each_input_with_client() -> Result<()> {
+        let head = mock!(Client::head_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(|| {
+                HeadObjectOutput::builder()
+                    .e_tag(EXPECTED_MD5_SUM)
+                    .content_length(100)
+                    .build()
+            });
+        let get_sums = mock!(Client::get_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key.sums"))
+            .then_error(|| GetObjectError::NoSuchKey(NoSuchKey::builder().build()));
+        let destination_rules = vec![head, get_sums];
+        let destination_client = S3Client::new(
+            Arc::new(mock_client!(
+                aws_sdk_s3,
+                RuleMode::Sequential,
+                destination_rules.as_slice()
+            )),
+            true,
+            true,
+        );
+
+        let source_head = mock!(Client::head_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_error(|| HeadObjectError::NotFound(NotFound::builder().build()));
+        let source_rules = vec![source_head];
+        let source_client = S3Client::new(
+            Arc::new(mock_client!(
+                aws_sdk_s3,
+                RuleMode::Sequential,
+                source_rules.as_slice()
+            )),
+            true,
+            true,
+        );
+
+        let in_memory_location = "in-memory".to_string();
+        let s3_location = "s3://bucket/key".to_string();
+        let in_memory_sums = SumsFile::new(
+            Some(100),
+            BTreeMap::from_iter(vec![(
+                "md5".parse()?,
+                Checksum::new(EXPECTED_MD5_SUM.to_string()),
+            )]),
+        );
+
+        let task = CheckTaskBuilder::default()
+            .with_inputs(vec![
+                ClientInput::new(in_memory_location.clone(), Some(source_client)),
+                ClientInput::new(s3_location.clone(), Some(destination_client)),
+            ])
+            .with_sums_files(vec![(in_memory_location, in_memory_sums)])
+            .build()
+            .await?;
+
+        let entry = task
+            .state_objects()
+            .keys()
+            .find(|key| key.0.1 == s3_location)
+            .unwrap();
+        assert!(
+            entry
+                .0
+                .0
+                .checksums
+                .values()
+                .any(|checksum| checksum == &Checksum::new(EXPECTED_MD5_SUM.to_string()))
+        );
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_check() -> Result<()> {
