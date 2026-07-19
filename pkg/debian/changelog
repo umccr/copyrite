@@ -1,3 +1,15 @@
+copyrite (0.7.0-1) unstable; urgency=low
+
+  * fix: pairing clients with their source/destination location properly by @mmalenic in https://github.com/umccr/copyrite/pull/97
+
+ -- Marko Malenic <mmalenic1@gmail.com>  Mon, 21 Jul 2026 00:00:00 +0000
+
+copyrite (0.6.0-1) unstable; urgency=low
+
+  * fix: option to disable request checksums by @andrewpatto in https://github.com/umccr/copyrite/pull/94
+
+ -- Marko Malenic <mmalenic1@gmail.com>  Wed, 16 Jul 2026 00:00:00 +0000
+
 copyrite (0.5.1-1) unstable; urgency=low
 
   * feat: improve error print output by @mmalenic in https://github.com/umccr/copyrite/pull/87
