@@ -1,4 +1,4 @@
-%{!?version: %global version 0.5.1}
+%{!?version: %global version 0.7.0}
 
 Name:           copyrite
 Version:        %{version}
@@ -23,6 +23,12 @@ install -D target/release/%{name} %{buildroot}%{_bindir}/%{name}
 %{_bindir}/%{name}
 
 %changelog
+* Mon Jul 21 2026 Marko Malenic <mmalenic1@gmail.com> - 0.7.0-1
+- fix: pairing clients with their source/destination location properly by @mmalenic in https://github.com/umccr/copyrite/pull/97
+
+* Wed Jul 16 2026 Marko Malenic <mmalenic1@gmail.com> - 0.6.0-1
+- fix: option to disable request checksums by @andrewpatto in https://github.com/umccr/copyrite/pull/94
+
 * Fri Jul 03 2026 Marko Malenic <mmalenic1@gmail.com> - 0.5.1-1
 - feat: improve error print output by @mmalenic in https://github.com/umccr/copyrite/pull/87
 

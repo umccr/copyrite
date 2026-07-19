@@ -11,6 +11,7 @@ use crate::io::sums::channel::ChannelReader;
 use crate::io::{CredentialOverrides, Provider};
 use crate::stats;
 use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateStats};
+use crate::task::ClientInput;
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::CopyTaskBuilder;
 use crate::task::generate::{GenerateTaskBuilder, SumCtxPairs};
@@ -120,8 +121,13 @@ impl Command {
 
         match self.commands {
             Subcommands::Generate(generate_args) => {
+                let inputs = generate_args
+                    .input
+                    .iter()
+                    .map(|input| ClientInput::new(input.clone(), Some(client.clone())))
+                    .collect();
                 match generate_args
-                    .generate(self.optimization, vec![client], true)
+                    .generate(self.optimization, inputs, true)
                     .await
                 {
                     Ok(stats) => {
@@ -139,8 +145,13 @@ impl Command {
                 }
             }
             Subcommands::Check(check_args) => {
+                let inputs = check_args
+                    .input
+                    .iter()
+                    .map(|input| ClientInput::new(input.clone(), Some(client.clone())))
+                    .collect();
                 match check_args
-                    .check(self.optimization, write_sums_file, false, vec![client])
+                    .check(self.optimization, write_sums_file, false, inputs)
                     .await
                 {
                     Ok(output) => Self::print_stats(&output, pretty_json, ui)?,
@@ -280,7 +291,7 @@ impl Generate {
     pub async fn generate(
         self,
         optimization: Optimization,
-        clients: Vec<S3Client>,
+        inputs: Vec<ClientInput>,
         write_sums_file: bool,
     ) -> stats::Result<GenerateStats> {
         if self.input[0] == "-" {
@@ -291,7 +302,7 @@ impl Generate {
                 .with_verify(self.verify)
                 .with_context(self.checksum)
                 .with_reader(reader)
-                .set_client(clients.first().cloned())
+                .set_client(inputs.first().and_then(ClientInput::client))
                 .build()
                 .await?
                 .run()
@@ -312,8 +323,7 @@ impl Generate {
 
             if self.missing {
                 let now = Instant::now();
-                let (ctxs, group_by) =
-                    Check::comparable_check(self.input.clone(), clients.clone()).await?;
+                let (ctxs, group_by) = Check::comparable_check(inputs.clone()).await?;
                 let (objects, compared, updated, api_errors) = ctxs.into_inner();
                 check_stats = Some(
                     CheckStats::new(
@@ -329,19 +339,22 @@ impl Generate {
 
                 let ctxs = SumCtxPairs::from_comparable(objects)?;
                 if let Some(ctxs) = ctxs {
-                    for (ctx, client) in ctxs
-                        .into_inner()
-                        .into_iter()
-                        .zip(clients.clone().into_iter().cycle())
-                    {
+                    for ctx in ctxs.into_inner() {
                         let (input, ctx) = ctx.into_inner();
+                        // Select the client that belongs to this location by matching it against
+                        // the input list.
+                        let client = inputs
+                            .iter()
+                            .find(|client_input| client_input.location() == input.as_str())
+                            .and_then(ClientInput::client)
+                            .or_else(|| inputs.first().and_then(ClientInput::client));
                         let task = GenerateTaskBuilder::default()
                             .with_overwrite(self.force_overwrite)
                             .with_verify(self.verify)
                             .with_input_file_name(input.to_string())
                             .with_context(vec![ctx])
                             .with_capacity(optimization.channel_capacity)
-                            .with_client(client)
+                            .set_client(client)
                             .set_write(write_sums_file)
                             .build()
                             .await?
@@ -364,14 +377,15 @@ impl Generate {
                 }
             };
 
-            for (input, client) in self.input.into_iter().zip(clients.into_iter().cycle()) {
+            for client_input in inputs {
+                let (input, client) = client_input.into_inner();
                 let task = GenerateTaskBuilder::default()
                     .with_overwrite(self.force_overwrite)
                     .with_verify(self.verify)
                     .with_input_file_name(input.to_string())
                     .with_context(self.checksum.clone())
                     .with_capacity(optimization.channel_capacity)
-                    .with_client(client)
+                    .set_client(client)
                     .set_write(write_sums_file)
                     .build()
                     .await?
@@ -422,15 +436,11 @@ pub struct Check {
 
 impl Check {
     /// Perform a check for comparability on the input files.
-    pub async fn comparable_check(
-        input: Vec<String>,
-        clients: Vec<S3Client>,
-    ) -> Result<(CheckTask, GroupBy)> {
+    pub async fn comparable_check(inputs: Vec<ClientInput>) -> Result<(CheckTask, GroupBy)> {
         Ok((
             CheckTaskBuilder::default()
-                .with_input_files(input)
+                .with_inputs(inputs)
                 .with_group_by(GroupBy::Comparability)
-                .with_clients(clients)
                 .build()
                 .await?
                 .run()
@@ -454,19 +464,18 @@ impl Check {
         optimization: Optimization,
         write_sums_file: bool,
         verify: bool,
-        clients: Vec<S3Client>,
+        inputs: Vec<ClientInput>,
     ) -> stats::Result<CheckStats> {
         let now = Instant::now();
         let group_by = self.group_by;
 
         let mut builder = CheckTaskBuilder::default()
             .with_group_by(group_by)
-            .with_input_files(self.input.clone())
-            .with_update(self.update)
-            .with_clients(clients.clone());
+            .with_inputs(inputs.clone())
+            .with_update(self.update);
         let mut generate_stats = None;
         if self.missing {
-            let (ctxs, _) = Check::comparable_check(self.input.clone(), clients.clone()).await?;
+            let (ctxs, _) = Check::comparable_check(inputs.clone()).await?;
             let checksum = Check::generate_sums(ctxs);
 
             let mut stats = Generate {
@@ -476,7 +485,7 @@ impl Check {
                 force_overwrite: false,
                 verify,
             }
-            .generate(optimization, clients.clone(), write_sums_file)
+            .generate(optimization, inputs.clone(), write_sums_file)
             .await
             .map_err(|stats| CheckStats::from_generate_task(group_by, *stats))?;
             let sums = stats
@@ -691,20 +700,18 @@ impl Copy {
         verify: bool,
         write_sums_file: bool,
     ) -> stats::Result<CheckStats> {
-        let input = vec![self.source.to_string(), self.destination.to_string()];
+        let inputs = vec![
+            ClientInput::new(self.source.to_string(), Some(source_client)),
+            ClientInput::new(self.destination.to_string(), Some(destination_client)),
+        ];
 
         let result = Check {
-            input,
+            input: vec![self.source.to_string(), self.destination.to_string()],
             update: write_sums_file,
             group_by: GroupBy::Equality,
             missing: true,
         }
-        .check(
-            optimization,
-            write_sums_file,
-            verify,
-            vec![source_client, destination_client],
-        )
+        .check(optimization, write_sums_file, verify, inputs)
         .await?;
 
         Ok(result)
