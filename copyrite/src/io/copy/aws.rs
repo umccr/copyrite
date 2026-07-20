@@ -138,7 +138,11 @@ impl From<(CopyPartResult, u64, String)> for CopyResult {
                 crc32_c: part.checksum_crc32_c,
                 sha1: part.checksum_sha1,
                 sha256: part.checksum_sha256,
+                sha512: part.checksum_sha512,
                 crc64_nvme: part.checksum_crc64_nvme,
+                xxhash64: part.checksum_xxhash64,
+                xxhash3: part.checksum_xxhash3,
+                xxhash128: part.checksum_xxhash128,
                 e_tag: part.e_tag,
                 part_number,
             },
@@ -156,7 +160,11 @@ impl From<(UploadPartOutput, u64, String)> for CopyResult {
                 crc32_c: part.checksum_crc32_c,
                 sha1: part.checksum_sha1,
                 sha256: part.checksum_sha256,
+                sha512: part.checksum_sha512,
                 crc64_nvme: part.checksum_crc64_nvme,
+                xxhash64: part.checksum_xxhash64,
+                xxhash3: part.checksum_xxhash3,
+                xxhash128: part.checksum_xxhash128,
                 e_tag: part.e_tag,
                 part_number,
             },
@@ -175,7 +183,11 @@ impl TryFrom<Part> for CompletedPart {
             .set_checksum_crc32_c(part.crc32_c)
             .set_checksum_sha1(part.sha1)
             .set_checksum_sha256(part.sha256)
+            .set_checksum_sha512(part.sha512)
             .set_checksum_crc64_nvme(part.crc64_nvme)
+            .set_checksum_xxhash64(part.xxhash64)
+            .set_checksum_xxhash3(part.xxhash3)
+            .set_checksum_xxhash128(part.xxhash128)
             .set_e_tag(part.e_tag)
             .set_part_number(Some(i32::try_from(part.part_number)?))
             .build())

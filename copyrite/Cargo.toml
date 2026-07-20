@@ -31,6 +31,7 @@ sha2 = "0.11"
 crc32fast = "1"
 crc32c = "0.6"
 crc64fast-nvme = "1"
+xxhash-rust = { version = "0.8", features = ["xxh64", "xxh3"] }
 
 # Value parsing
 serde = { version = "1", features = ["derive"] }

@@ -102,7 +102,11 @@ pub struct Part {
     pub(crate) crc32_c: Option<String>,
     pub(crate) sha1: Option<String>,
     pub(crate) sha256: Option<String>,
+    pub(crate) sha512: Option<String>,
     pub(crate) crc64_nvme: Option<String>,
+    pub(crate) xxhash64: Option<String>,
+    pub(crate) xxhash3: Option<String>,
+    pub(crate) xxhash128: Option<String>,
     pub(crate) e_tag: Option<String>,
     pub(crate) part_number: u64,
 }

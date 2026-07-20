@@ -141,6 +141,10 @@ impl From<Ctx> for ChecksumAlgorithm {
             StandardCtx::CRC32(_, _) => ChecksumAlgorithm::Crc32,
             StandardCtx::SHA1(_) => ChecksumAlgorithm::Sha1,
             StandardCtx::SHA256(_) => ChecksumAlgorithm::Sha256,
+            StandardCtx::SHA512(_) => ChecksumAlgorithm::Sha512,
+            StandardCtx::XXHash64(_) => ChecksumAlgorithm::Xxhash64,
+            StandardCtx::XXHash3(_) => ChecksumAlgorithm::Xxhash3,
+            StandardCtx::XXHash128(_) => ChecksumAlgorithm::Xxhash128,
             // By default, set some algorithm if the context doesn't line up.
             _ => ChecksumAlgorithm::Crc64Nvme,
         }

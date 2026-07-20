@@ -214,9 +214,13 @@ impl S3 {
             // Every other checksum has part checksums available if uploaded using multipart uploads.
             StandardCtx::SHA1(_) => head.checksum_sha1(),
             StandardCtx::SHA256(_) => head.checksum_sha256(),
+            StandardCtx::SHA512(_) => head.checksum_sha512(),
             StandardCtx::CRC32(_, _) => head.checksum_crc32(),
             StandardCtx::CRC32C(_, _) => head.checksum_crc32_c(),
             StandardCtx::CRC64NVME(_, _) => head.checksum_crc64_nvme(),
+            StandardCtx::XXHash64(_) => head.checksum_xxhash64(),
+            StandardCtx::XXHash3(_) => head.checksum_xxhash3(),
+            StandardCtx::XXHash128(_) => head.checksum_xxhash128(),
             _ => None,
         };
 
@@ -229,9 +233,13 @@ impl S3 {
             // Every checksum other than `ETag` has part checksums available if uploaded using multipart uploads.
             StandardCtx::SHA1(_) => part.checksum_sha1(),
             StandardCtx::SHA256(_) => part.checksum_sha256(),
+            StandardCtx::SHA512(_) => part.checksum_sha512(),
             StandardCtx::CRC32(_, _) => part.checksum_crc32(),
             StandardCtx::CRC32C(_, _) => part.checksum_crc32_c(),
             StandardCtx::CRC64NVME(_, _) => part.checksum_crc64_nvme(),
+            StandardCtx::XXHash64(_) => part.checksum_xxhash64(),
+            StandardCtx::XXHash3(_) => part.checksum_xxhash3(),
+            StandardCtx::XXHash128(_) => part.checksum_xxhash128(),
             // There are no part checksums for `ETag`s.
             _ => None,
         };
@@ -398,7 +406,15 @@ impl S3 {
             .await?;
         self.add_checksum(&mut sums_file, StandardCtx::sha256())
             .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::sha512())
+            .await?;
         self.add_checksum(&mut sums_file, StandardCtx::crc64nvme())
+            .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::xxhash64())
+            .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::xxhash3())
+            .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::xxhash128())
             .await?;
 
         if sums_file.checksums.is_empty() {
