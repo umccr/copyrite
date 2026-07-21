@@ -16,6 +16,7 @@ use aws_sdk_s3::operation::get_object_attributes::GetObjectAttributesOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::{
     ChecksumAlgorithm, ChecksumMode, ChecksumType, ObjectAttributes, ObjectPart,
+    ServerSideEncryption,
 };
 use aws_smithy_types::byte_stream::ByteStream;
 use base64::Engine;
@@ -23,6 +24,35 @@ use base64::prelude::BASE64_STANDARD;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use tokio::io::AsyncRead;
+
+/// A raw checksum value retrieved from S3 metadata, with its encoding so that it can be
+/// decoded correctly. Additional checksums are base64 encoded, whereas `ETag`s are hex encoded.
+#[derive(Debug, Clone)]
+pub enum RawSum {
+    /// A base64 encoded additional checksum.
+    Additional(String),
+    /// A hex encoded `ETag`.
+    ETag(String),
+}
+
+impl RawSum {
+    /// Create an additional checksum.
+    pub fn additional(sum: &str) -> Self {
+        Self::Additional(sum.to_string())
+    }
+
+    /// Create an etag-based checksum.
+    pub fn e_tag(sum: &str) -> Self {
+        Self::ETag(sum.to_string())
+    }
+
+    /// Get the raw string value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Additional(sum) | Self::ETag(sum) => sum,
+        }
+    }
+}
 
 /// Build an S3 sums object.
 #[derive(Debug, Default)]
@@ -177,61 +207,78 @@ impl S3 {
         Ok(self.head_object.entry(part_number).or_insert(head_object))
     }
 
-    /// Is this an additional checksum, i.e. not an `ETag`.
-    fn is_additional_checksum(ctx: &StandardCtx) -> bool {
-        !matches!(ctx, StandardCtx::MD5(_))
-    }
+    /// Decode a raw checksum into bytes. Additional checksums are base64 encoded when returned
+    /// from the SDK, whereas the `ETag` is hex encoded.
+    fn decode_sum(sum: &RawSum) -> Result<Vec<u8>> {
+        let value = sum.as_str().trim_matches('"');
+        let value = value.split('-').next().unwrap_or(value);
 
-    /// Decode the base64 encoded checksum if it is an additional checksum. All additional
-    /// checksums (not including the `ETag`) are base64 encoded when returned from the SDK.
-    /// The `ETag` is hex encoded.
-    fn decode_sum(ctx: &StandardCtx, sum: String) -> Result<Vec<u8>> {
-        let sum = sum
-            .trim_matches('"')
-            .split("-")
-            .next()
-            .unwrap_or_else(|| &sum);
-
-        if Self::is_additional_checksum(ctx) {
-            let data = BASE64_STANDARD
-                .decode(sum.as_bytes())
-                .map_err(|_| ParseError(format!("failed to decode base64 checksum: {}", sum)))?;
-
-            Ok(data)
-        } else {
-            Ok(hex::decode(sum.as_bytes())
-                .map_err(|_| ParseError(format!("failed to decode hex `ETag`: {}", sum)))?)
+        match sum {
+            RawSum::Additional(_) => BASE64_STANDARD
+                .decode(value.as_bytes())
+                .map_err(|_| ParseError(format!("failed to decode base64 checksum: {}", value))),
+            RawSum::ETag(_) => hex::decode(value.as_bytes())
+                .map_err(|_| ParseError(format!("failed to decode hex `ETag`: {}", value))),
         }
     }
 
-    /// Get the AWS checksum value from `HeadObject`.
-    pub async fn aws_sums_from_ctx(&mut self, ctx: &StandardCtx) -> Result<Option<String>> {
+    /// Get the AWS checksum value from `HeadObject`. For MD5 this prefers the native
+    /// `x-amz-checksum-md5` additional checksum. It falls back to the `ETag` only when the
+    /// `ETag` is a usable MD5, i.e. the object is not encrypted with SSE-KMS, SSE-C or others.
+    pub async fn aws_sums_from_ctx(&mut self, ctx: &StandardCtx) -> Result<Option<RawSum>> {
         let head = self.head_object(None).await?;
 
         let sum = match ctx {
-            // There are no part checksums for e_tags.
-            StandardCtx::MD5(_) => head.e_tag(),
-            // Every other checksum has part checksums available if uploaded using multipart uploads.
-            StandardCtx::SHA1(_) => head.checksum_sha1(),
-            StandardCtx::SHA256(_) => head.checksum_sha256(),
-            StandardCtx::CRC32(_, _) => head.checksum_crc32(),
-            StandardCtx::CRC32C(_, _) => head.checksum_crc32_c(),
-            StandardCtx::CRC64NVME(_, _) => head.checksum_crc64_nvme(),
+            StandardCtx::MD5(_) => {
+                if let Some(md5) = head.checksum_md5() {
+                    Some(RawSum::additional(md5))
+                } else if Self::etag_is_md5(head) {
+                    head.e_tag().map(|e_tag| RawSum::ETag(e_tag.to_string()))
+                } else {
+                    None
+                }
+            }
+            // Every other checksum is an additional checksum, with part checksums available if
+            // uploaded using multipart uploads.
+            StandardCtx::SHA1(_) => head.checksum_sha1().map(RawSum::additional),
+            StandardCtx::SHA256(_) => head.checksum_sha256().map(RawSum::additional),
+            StandardCtx::SHA512(_) => head.checksum_sha512().map(RawSum::additional),
+            StandardCtx::CRC32(_, _) => head.checksum_crc32().map(RawSum::additional),
+            StandardCtx::CRC32C(_, _) => head.checksum_crc32_c().map(RawSum::additional),
+            StandardCtx::CRC64NVME(_, _) => head.checksum_crc64_nvme().map(RawSum::additional),
+            StandardCtx::XXHash64(_) => head.checksum_xxhash64().map(RawSum::additional),
+            StandardCtx::XXHash3(_) => head.checksum_xxhash3().map(RawSum::additional),
+            StandardCtx::XXHash128(_) => head.checksum_xxhash128().map(RawSum::additional),
             _ => None,
         };
 
-        Ok(sum.map(|sum| sum.to_string()))
+        Ok(sum)
+    }
+
+    /// Whether the `ETag` can be treated as an MD5. This is only the case for unencrypted objects
+    /// and those encrypted with SSE-S3, which preserve the MD5 `ETag`.
+    fn etag_is_md5(head: &HeadObjectOutput) -> bool {
+        matches!(
+            head.server_side_encryption(),
+            None | Some(ServerSideEncryption::Aes256)
+        ) && head.sse_customer_algorithm().is_none()
     }
 
     /// Get the AWS checksum part from `ObjectPart`.
     pub fn aws_parts_from_ctx(ctx: &StandardCtx, part: &ObjectPart) -> Option<String> {
         let sum = match ctx {
+            // The native MD5 additional checksum carries part checksums, unlike the `ETag`.
+            StandardCtx::MD5(_) => part.checksum_md5(),
             // Every checksum other than `ETag` has part checksums available if uploaded using multipart uploads.
             StandardCtx::SHA1(_) => part.checksum_sha1(),
             StandardCtx::SHA256(_) => part.checksum_sha256(),
+            StandardCtx::SHA512(_) => part.checksum_sha512(),
             StandardCtx::CRC32(_, _) => part.checksum_crc32(),
             StandardCtx::CRC32C(_, _) => part.checksum_crc32_c(),
             StandardCtx::CRC64NVME(_, _) => part.checksum_crc64_nvme(),
+            StandardCtx::XXHash64(_) => part.checksum_xxhash64(),
+            StandardCtx::XXHash3(_) => part.checksum_xxhash3(),
+            StandardCtx::XXHash128(_) => part.checksum_xxhash128(),
             // There are no part checksums for `ETag`s.
             _ => None,
         };
@@ -336,7 +383,7 @@ impl S3 {
             _ => None,
         };
 
-        let sum = Self::decode_sum(&ctx, sum)?;
+        let digest = Self::decode_sum(&sum)?;
 
         // Create the AWS context with the available information. This can be a composite checksum
         // with a part size, or a regular context otherwise.
@@ -359,7 +406,7 @@ impl S3 {
             _ => Ctx::Regular(ctx),
         };
 
-        let checksum = Checksum::new(ctx.digest_to_string(&sum));
+        let checksum = Checksum::new(ctx.digest_to_string(&digest));
         sums_file.add_checksum(ctx, checksum);
 
         Ok(())
@@ -398,7 +445,15 @@ impl S3 {
             .await?;
         self.add_checksum(&mut sums_file, StandardCtx::sha256())
             .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::sha512())
+            .await?;
         self.add_checksum(&mut sums_file, StandardCtx::crc64nvme())
+            .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::xxhash64())
+            .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::xxhash3())
+            .await?;
+        self.add_checksum(&mut sums_file, StandardCtx::xxhash128())
             .await?;
 
         if sums_file.checksums.is_empty() {
@@ -527,6 +582,7 @@ pub(crate) mod test {
     const EXPECTED_SHA256_PART_5: &str = "laScT3WEixthSDryDZwNEA+U5URMQ1Q8EXOO48F4v78="; // pragma: allowlist secret
 
     const EXPECTED_SHA256_PART_3_4_CONCAT: &str = "pWWT3JcI0KGHFujswlkNCTl1JfsSRpbmHyMcYIbjBQA="; // pragma: allowlist secret
+    const EXPECTED_MD5_SUM_BASE64: &str = "2T5xh5BU8gXt6Q01yAgcpQ=="; // pragma: allowlist secret
 
     #[tokio::test]
     pub async fn test_multi_part_with_sha256_different_part_sizes() -> anyhow::Result<()> {
@@ -668,6 +724,96 @@ pub(crate) mod test {
         let mut s3 = S3Builder::default()
             .with_client(S3Client::new(
                 Arc::new(mock_single_part_etag_only()),
+                false,
+                false,
+            ))
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
+            .build()?;
+
+        let sums = s3.sums_from_metadata().await?.split();
+        let expected = generate_for(TEST_FILE_NAME, vec!["md5"], true, false)
+            .await?
+            .split();
+
+        assert_all_same(sums, expected);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    pub async fn test_md5_prefers_native_over_etag() -> Result<()> {
+        let mut s3 = s3_with_head(|b| {
+            b.e_tag(format!("\"{}\"", EXPECTED_MD5_SUM))
+                .checksum_md5(EXPECTED_MD5_SUM_BASE64)
+        })?;
+
+        let sum = s3.aws_sums_from_ctx(&StandardCtx::md5()).await?;
+        assert!(matches!(sum, Some(RawSum::Additional(sum)) if sum == EXPECTED_MD5_SUM_BASE64));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    pub async fn test_md5_falls_back_to_etag() -> Result<()> {
+        let mut s3 = s3_with_head(|b| b.e_tag(format!("\"{}\"", EXPECTED_MD5_SUM)))?;
+
+        let sum = s3.aws_sums_from_ctx(&StandardCtx::md5()).await?;
+        assert!(matches!(sum, Some(RawSum::ETag(_))));
+        assert_eq!(
+            S3::decode_sum(&sum.unwrap())?,
+            S3::decode_sum(&RawSum::additional(EXPECTED_MD5_SUM_BASE64))?
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    pub async fn test_md5_suppressed_sse_kms_native() -> Result<()> {
+        let mut s3 = s3_with_head(|b| {
+            b.e_tag(format!("\"{}\"", EXPECTED_MD5_SUM))
+                .server_side_encryption(ServerSideEncryption::AwsKms)
+        })?;
+
+        assert!(s3.aws_sums_from_ctx(&StandardCtx::md5()).await?.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    pub async fn test_md5_native_used_with_sse_kms() -> Result<()> {
+        let mut s3 = s3_with_head(|b| {
+            b.e_tag(format!("\"{}\"", EXPECTED_MD5_SUM))
+                .checksum_md5(EXPECTED_MD5_SUM_BASE64)
+                .server_side_encryption(ServerSideEncryption::AwsKms)
+        })?;
+
+        let sum = s3.aws_sums_from_ctx(&StandardCtx::md5()).await?;
+        assert!(matches!(sum, Some(RawSum::Additional(sum)) if sum == EXPECTED_MD5_SUM_BASE64));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    pub async fn test_md5_etag_used_for_sse_s3() -> Result<()> {
+        let mut s3 = s3_with_head(|b| {
+            b.e_tag(format!("\"{}\"", EXPECTED_MD5_SUM))
+                .server_side_encryption(ServerSideEncryption::Aes256)
+        })?;
+
+        assert!(matches!(
+            s3.aws_sums_from_ctx(&StandardCtx::md5()).await?,
+            Some(RawSum::ETag(_))
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    pub async fn test_single_part_native_md5() -> anyhow::Result<()> {
+        let mut s3 = S3Builder::default()
+            .with_client(S3Client::new(
+                Arc::new(mock_single_part_native_md5()),
                 false,
                 false,
             ))
@@ -967,5 +1113,53 @@ pub(crate) mod test {
                         .build()
                 }),
         ]
+    }
+
+    fn s3_with_head(
+        build: impl FnOnce(HeadObjectOutputBuilder) -> HeadObjectOutputBuilder,
+    ) -> Result<S3> {
+        let head = build(HeadObjectOutputBuilder::default()).build();
+        let rule = mock!(Client::head_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(move || head.clone());
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&rule]);
+
+        S3Builder::default()
+            .with_client(S3Client::new(Arc::new(client), false, false))
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
+            .build()
+    }
+
+    fn mock_single_part_native_md5() -> Client {
+        let get_object_attributes = mock!(Client::get_object_attributes)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(|| {
+                GetObjectAttributesOutput::builder()
+                    .e_tag(EXPECTED_MD5_SUM)
+                    .checksum(
+                        types::Checksum::builder()
+                            .checksum_md5(EXPECTED_MD5_SUM_BASE64)
+                            .build(),
+                    )
+                    .object_size(TEST_FILE_SIZE as i64)
+                    .build()
+            });
+
+        let head_object = mock!(Client::head_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(|| {
+                HeadObjectOutputBuilder::default()
+                    .e_tag(format!("\"{}\"", EXPECTED_MD5_SUM))
+                    .checksum_md5(EXPECTED_MD5_SUM_BASE64)
+                    .content_length(TEST_FILE_SIZE as i64)
+                    .build()
+            });
+
+        mock_client!(
+            aws_sdk_s3,
+            RuleMode::Sequential,
+            &[&head_object, &get_object_attributes]
+        )
     }
 }

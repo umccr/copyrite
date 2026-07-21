@@ -910,12 +910,23 @@ pub enum Checksum {
     SHA1,
     /// Calculate the SHA256 checksum.
     SHA256,
+    /// Calculate the SHA512 checksum.
+    SHA512,
     /// Calculate a CRC32.
     CRC32,
     /// Calculate a CRC32C.
     CRC32C,
     /// Calculate a CRC64NVME.
     CRC64NVME,
+    /// Calculate the XXHash64 checksum.
+    #[value(name = "xxhash64")]
+    XXHash64,
+    /// Calculate the XXHash3 64-bit checksum.
+    #[value(name = "xxhash3")]
+    XXHash3,
+    /// Calculate the XXHash128 checksum.
+    #[value(name = "xxhash128")]
+    XXHash128,
     /// Calculate the QuickXor checksum.
     QuickXor,
 }
