@@ -139,6 +139,7 @@ impl From<Ctx> for ChecksumAlgorithm {
             StandardCtx::CRC64NVME(_, _) => ChecksumAlgorithm::Crc64Nvme,
             StandardCtx::CRC32C(_, _) => ChecksumAlgorithm::Crc32C,
             StandardCtx::CRC32(_, _) => ChecksumAlgorithm::Crc32,
+            StandardCtx::MD5(_) => ChecksumAlgorithm::Md5,
             StandardCtx::SHA1(_) => ChecksumAlgorithm::Sha1,
             StandardCtx::SHA256(_) => ChecksumAlgorithm::Sha256,
             StandardCtx::SHA512(_) => ChecksumAlgorithm::Sha512,

@@ -369,17 +369,24 @@ impl StandardCtx {
 
 #[cfg(test)]
 pub(crate) mod test {
+    use super::StandardCtx;
     use crate::checksum::test::test_checksum;
     use anyhow::Result;
+    use std::str::FromStr;
 
     pub(crate) const EXPECTED_MD5_SUM: &str = "d93e71879054f205ede90d35c8081ca5"; // pragma: allowlist secret
     pub(crate) const EXPECTED_SHA1_SUM: &str = "3eafdb6ad3a27167e0db70fccc40d0614307dabf"; // pragma: allowlist secret
     pub(crate) const EXPECTED_SHA256_SUM: &str =
         "29ffbd53cbe43179ab2fa62dbd958c0ec30b340ab50ce7c785e8a7a4b4771e39"; // pragma: allowlist secret
+    pub(crate) const EXPECTED_SHA512_SUM: &str =
+        "601bda6e0b7f39f8ed92aa4d9125b34c0321b6eb36622dcf0c8ed96847693e55fdd8f083b56746629369752d5ec6566a61eca2d41796245784595b3a6cf52f1e"; // pragma: allowlist secret
     pub(crate) const EXPECTED_CRC32_BE_SUM: &str = "3320f39e";
     pub(crate) const EXPECTED_CRC32_LE_SUM: &str = "9ef32033";
     pub(crate) const EXPECTED_CRC32C_BE_SUM: &str = "4920106a";
     pub(crate) const EXPECTED_CRC32C_LE_SUM: &str = "6a102049";
+    pub(crate) const EXPECTED_XXHASH64_SUM: &str = "fde75bc952b2835f";
+    pub(crate) const EXPECTED_XXHASH3_SUM: &str = "3e714f0e42a90f5f";
+    pub(crate) const EXPECTED_XXHASH128_SUM: &str = "01c124e0c0eaf1903e714f0e42a90f5f";
 
     #[tokio::test]
     async fn test_md5() -> Result<()> {
@@ -414,5 +421,61 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_crc32c_le() -> Result<()> {
         test_checksum("crc32c-le", EXPECTED_CRC32C_LE_SUM).await
+    }
+
+    #[tokio::test]
+    async fn test_sha512() -> Result<()> {
+        test_checksum("sha512", EXPECTED_SHA512_SUM).await
+    }
+
+    #[tokio::test]
+    async fn test_xxhash64() -> Result<()> {
+        test_checksum("xxhash64", EXPECTED_XXHASH64_SUM).await
+    }
+
+    #[tokio::test]
+    async fn test_xxhash3() -> Result<()> {
+        test_checksum("xxhash3", EXPECTED_XXHASH3_SUM).await
+    }
+
+    #[tokio::test]
+    async fn test_xxhash128() -> Result<()> {
+        test_checksum("xxhash128", EXPECTED_XXHASH128_SUM).await
+    }
+
+    #[test]
+    fn test_xxhash64_known() -> Result<()> {
+        assert_eq!(
+            hex::encode(StandardCtx::xxhash64().finalize()?),
+            "ef46db3751d8e999"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_xxhash3_known() -> Result<()> {
+        assert_eq!(
+            hex::encode(StandardCtx::xxhash3().finalize()?),
+            "2d06800538d394c2"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_xxhash128_known() -> Result<()> {
+        assert_eq!(
+            hex::encode(StandardCtx::xxhash128().finalize()?),
+            "99aa06d3014798d86001c324468d497f"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_new_checksums_name_round_trip() -> Result<()> {
+        for name in ["sha512", "xxhash64", "xxhash3", "xxhash128"] {
+            let ctx = StandardCtx::from_str(name)?;
+            assert_eq!(ctx.to_string(), name);
+        }
+        Ok(())
     }
 }
