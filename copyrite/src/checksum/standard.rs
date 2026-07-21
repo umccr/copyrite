@@ -283,12 +283,8 @@ impl StandardCtx {
                 Endianness::LittleEndian => ctx.take().expect(msg).finish().to_le_bytes().to_vec(),
                 Endianness::BigEndian => ctx.take().expect(msg).finish().to_be_bytes().to_vec(),
             },
-            StandardCtx::XXHash64(ctx) => {
-                ctx.take().expect(msg).digest().to_be_bytes().to_vec()
-            }
-            StandardCtx::XXHash3(ctx) => {
-                ctx.take().expect(msg).digest().to_be_bytes().to_vec()
-            }
+            StandardCtx::XXHash64(ctx) => ctx.take().expect(msg).digest().to_be_bytes().to_vec(),
+            StandardCtx::XXHash3(ctx) => ctx.take().expect(msg).digest().to_be_bytes().to_vec(),
             StandardCtx::XXHash128(ctx) => {
                 ctx.take().expect(msg).digest128().to_be_bytes().to_vec()
             }
@@ -378,15 +374,14 @@ pub(crate) mod test {
     pub(crate) const EXPECTED_SHA1_SUM: &str = "3eafdb6ad3a27167e0db70fccc40d0614307dabf"; // pragma: allowlist secret
     pub(crate) const EXPECTED_SHA256_SUM: &str =
         "29ffbd53cbe43179ab2fa62dbd958c0ec30b340ab50ce7c785e8a7a4b4771e39"; // pragma: allowlist secret
-    pub(crate) const EXPECTED_SHA512_SUM: &str =
-        "601bda6e0b7f39f8ed92aa4d9125b34c0321b6eb36622dcf0c8ed96847693e55fdd8f083b56746629369752d5ec6566a61eca2d41796245784595b3a6cf52f1e"; // pragma: allowlist secret
+    pub(crate) const EXPECTED_SHA512_SUM: &str = "601bda6e0b7f39f8ed92aa4d9125b34c0321b6eb36622dcf0c8ed96847693e55fdd8f083b56746629369752d5ec6566a61eca2d41796245784595b3a6cf52f1e"; // pragma: allowlist secret
     pub(crate) const EXPECTED_CRC32_BE_SUM: &str = "3320f39e";
     pub(crate) const EXPECTED_CRC32_LE_SUM: &str = "9ef32033";
     pub(crate) const EXPECTED_CRC32C_BE_SUM: &str = "4920106a";
     pub(crate) const EXPECTED_CRC32C_LE_SUM: &str = "6a102049";
-    pub(crate) const EXPECTED_XXHASH64_SUM: &str = "fde75bc952b2835f";
-    pub(crate) const EXPECTED_XXHASH3_SUM: &str = "3e714f0e42a90f5f";
-    pub(crate) const EXPECTED_XXHASH128_SUM: &str = "01c124e0c0eaf1903e714f0e42a90f5f";
+    pub(crate) const EXPECTED_XXHASH64_SUM: &str = "fde75bc952b2835f"; // pragma: allowlist secret
+    pub(crate) const EXPECTED_XXHASH3_SUM: &str = "3e714f0e42a90f5f"; // pragma: allowlist secret
+    pub(crate) const EXPECTED_XXHASH128_SUM: &str = "01c124e0c0eaf1903e714f0e42a90f5f"; // pragma: allowlist secret
 
     #[tokio::test]
     async fn test_md5() -> Result<()> {
@@ -447,7 +442,7 @@ pub(crate) mod test {
     fn test_xxhash64_known() -> Result<()> {
         assert_eq!(
             hex::encode(StandardCtx::xxhash64().finalize()?),
-            "ef46db3751d8e999"
+            "ef46db3751d8e999" // pragma: allowlist secret
         );
         Ok(())
     }
@@ -456,7 +451,7 @@ pub(crate) mod test {
     fn test_xxhash3_known() -> Result<()> {
         assert_eq!(
             hex::encode(StandardCtx::xxhash3().finalize()?),
-            "2d06800538d394c2"
+            "2d06800538d394c2" // pragma: allowlist secret
         );
         Ok(())
     }
@@ -465,7 +460,7 @@ pub(crate) mod test {
     fn test_xxhash128_known() -> Result<()> {
         assert_eq!(
             hex::encode(StandardCtx::xxhash128().finalize()?),
-            "99aa06d3014798d86001c324468d497f"
+            "99aa06d3014798d86001c324468d497f" // pragma: allowlist secret
         );
         Ok(())
     }
