@@ -379,6 +379,8 @@ pub(crate) mod test {
     pub(crate) const EXPECTED_CRC32_LE_SUM: &str = "9ef32033";
     pub(crate) const EXPECTED_CRC32C_BE_SUM: &str = "4920106a";
     pub(crate) const EXPECTED_CRC32C_LE_SUM: &str = "6a102049";
+    pub(crate) const EXPECTED_CRC64NVME_BE_SUM: &str = "8827608f74ffad7b"; // pragma: allowlist secret
+    pub(crate) const EXPECTED_CRC64NVME_LE_SUM: &str = "7badff748f602788"; // pragma: allowlist secret
     pub(crate) const EXPECTED_XXHASH64_SUM: &str = "fde75bc952b2835f"; // pragma: allowlist secret
     pub(crate) const EXPECTED_XXHASH3_SUM: &str = "3e714f0e42a90f5f"; // pragma: allowlist secret
     pub(crate) const EXPECTED_XXHASH128_SUM: &str = "01c124e0c0eaf1903e714f0e42a90f5f"; // pragma: allowlist secret
@@ -416,6 +418,16 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_crc32c_le() -> Result<()> {
         test_checksum("crc32c-le", EXPECTED_CRC32C_LE_SUM).await
+    }
+
+    #[tokio::test]
+    async fn test_crc64nvme_be() -> Result<()> {
+        test_checksum("crc64nvme", EXPECTED_CRC64NVME_BE_SUM).await
+    }
+
+    #[tokio::test]
+    async fn test_crc64nvme_le() -> Result<()> {
+        test_checksum("crc64nvme-le", EXPECTED_CRC64NVME_LE_SUM).await
     }
 
     #[tokio::test]

@@ -143,6 +143,7 @@ impl From<(CopyPartResult, u64, String)> for CopyResult {
                 xxhash64: part.checksum_xxhash64,
                 xxhash3: part.checksum_xxhash3,
                 xxhash128: part.checksum_xxhash128,
+                md5: part.checksum_md5,
                 e_tag: part.e_tag,
                 part_number,
             },
@@ -165,6 +166,7 @@ impl From<(UploadPartOutput, u64, String)> for CopyResult {
                 xxhash64: part.checksum_xxhash64,
                 xxhash3: part.checksum_xxhash3,
                 xxhash128: part.checksum_xxhash128,
+                md5: part.checksum_md5,
                 e_tag: part.e_tag,
                 part_number,
             },
@@ -188,6 +190,7 @@ impl TryFrom<Part> for CompletedPart {
             .set_checksum_xxhash64(part.xxhash64)
             .set_checksum_xxhash3(part.xxhash3)
             .set_checksum_xxhash128(part.xxhash128)
+            .set_checksum_md5(part.md5)
             .set_e_tag(part.e_tag)
             .set_part_number(Some(i32::try_from(part.part_number)?))
             .build())
@@ -1057,6 +1060,53 @@ mod test {
 
         assert!(result.is_ok());
         assert_eq!(upload_part.num_calls(), 3);
+    }
+
+    #[test]
+    fn per_part_checksums_round_trip() -> Result<()> {
+        let output = UploadPartOutput::builder()
+            .checksum_crc32("crc32")
+            .checksum_crc32_c("crc32c")
+            .checksum_sha1("sha1")
+            .checksum_sha256("sha256")
+            .checksum_sha512("sha512")
+            .checksum_crc64_nvme("crc64nvme")
+            .checksum_xxhash64("xxhash64")
+            .checksum_xxhash3("xxhash3")
+            .checksum_xxhash128("xxhash128")
+            .checksum_md5("md5")
+            .e_tag("etag")
+            .build();
+        let completed: CompletedPart = CopyResult::from((output, 1u64, "id".to_string()))
+            .part
+            .expect("missing part")
+            .try_into()?;
+
+        assert_eq!(completed.checksum_crc32(), Some("crc32"));
+        assert_eq!(completed.checksum_crc32_c(), Some("crc32c"));
+        assert_eq!(completed.checksum_sha1(), Some("sha1"));
+        assert_eq!(completed.checksum_sha256(), Some("sha256"));
+        assert_eq!(completed.checksum_sha512(), Some("sha512"));
+        assert_eq!(completed.checksum_crc64_nvme(), Some("crc64nvme"));
+        assert_eq!(completed.checksum_xxhash64(), Some("xxhash64"));
+        assert_eq!(completed.checksum_xxhash3(), Some("xxhash3"));
+        assert_eq!(completed.checksum_xxhash128(), Some("xxhash128"));
+        assert_eq!(completed.checksum_md5(), Some("md5"));
+        assert_eq!(completed.e_tag(), Some("etag"));
+
+        let copy_part = CopyPartResult::builder()
+            .checksum_md5("md5")
+            .checksum_sha512("sha512")
+            .checksum_xxhash128("xxhash128")
+            .build();
+        let part = CopyResult::from((copy_part, 1u64, "id".to_string()))
+            .part
+            .expect("missing part");
+        assert_eq!(part.md5.as_deref(), Some("md5"));
+        assert_eq!(part.sha512.as_deref(), Some("sha512"));
+        assert_eq!(part.xxhash128.as_deref(), Some("xxhash128"));
+
+        Ok(())
     }
 
     #[tokio::test]

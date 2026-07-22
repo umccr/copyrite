@@ -14,9 +14,14 @@ async fn channel_reader(path: &Path) {
         .with_context(vec![
             "sha1".parse().unwrap(),
             "sha256".parse().unwrap(),
+            "sha512".parse().unwrap(),
             "md5".parse().unwrap(),
             "crc32".parse().unwrap(),
             "crc32c".parse().unwrap(),
+            "crc64nvme".parse().unwrap(),
+            "xxhash64".parse().unwrap(),
+            "xxhash3".parse().unwrap(),
+            "xxhash128".parse().unwrap(),
         ])
         .with_reader(reader)
         .build()
