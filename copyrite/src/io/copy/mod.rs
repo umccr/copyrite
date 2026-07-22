@@ -107,6 +107,7 @@ pub struct Part {
     pub(crate) xxhash64: Option<String>,
     pub(crate) xxhash3: Option<String>,
     pub(crate) xxhash128: Option<String>,
+    pub(crate) md5: Option<String>,
     pub(crate) e_tag: Option<String>,
     pub(crate) part_number: u64,
 }

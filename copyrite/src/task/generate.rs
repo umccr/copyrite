@@ -445,8 +445,9 @@ pub(crate) mod test {
     use crate::checksum::aws_etag::test::expected_md5_1gib;
     use crate::checksum::standard::StandardCtx;
     use crate::checksum::standard::test::{
-        EXPECTED_CRC32_BE_SUM, EXPECTED_CRC32C_BE_SUM, EXPECTED_MD5_SUM, EXPECTED_SHA1_SUM,
-        EXPECTED_SHA256_SUM,
+        EXPECTED_CRC32_BE_SUM, EXPECTED_CRC32C_BE_SUM, EXPECTED_CRC64NVME_BE_SUM, EXPECTED_MD5_SUM,
+        EXPECTED_SHA1_SUM, EXPECTED_SHA256_SUM, EXPECTED_SHA512_SUM, EXPECTED_XXHASH3_SUM,
+        EXPECTED_XXHASH64_SUM, EXPECTED_XXHASH128_SUM,
     };
     use crate::io::sums::channel::test::channel_reader;
     use crate::io::sums::file::FileBuilder;
@@ -493,7 +494,19 @@ pub(crate) mod test {
             name,
             true,
             false,
-            vec!["sha1", "sha256", "md5", "aws-etag-1gib", "crc32", "crc32c"],
+            vec![
+                "sha1",
+                "sha256",
+                "sha512",
+                "md5",
+                "aws-etag-1gib",
+                "crc32",
+                "crc32c",
+                "crc64nvme",
+                "xxhash64",
+                "xxhash3",
+                "xxhash128",
+            ],
             EXPECTED_MD5_SUM,
         )
         .await
@@ -508,7 +521,18 @@ pub(crate) mod test {
             name,
             false,
             true,
-            vec!["sha1", "sha256", "aws-etag-1gib", "crc32", "crc32c"],
+            vec![
+                "sha1",
+                "sha256",
+                "sha512",
+                "aws-etag-1gib",
+                "crc32",
+                "crc32c",
+                "crc64nvme",
+                "xxhash64",
+                "xxhash3",
+                "xxhash128",
+            ],
             EXPECTED_MD5_SUM,
         )
         .await
@@ -523,7 +547,18 @@ pub(crate) mod test {
             name,
             false,
             false,
-            vec!["sha1", "sha256", "aws-etag-1gib", "crc32", "crc32c"],
+            vec![
+                "sha1",
+                "sha256",
+                "sha512",
+                "aws-etag-1gib",
+                "crc32",
+                "crc32c",
+                "crc64nvme",
+                "xxhash64",
+                "xxhash3",
+                "xxhash128",
+            ],
             "123",
         )
         .await
@@ -587,6 +622,22 @@ pub(crate) mod test {
             Checksum::new(EXPECTED_SHA256_SUM.to_string())
         );
         assert_eq!(
+            file.checksums[&"sha512".parse()?],
+            Checksum::new(EXPECTED_SHA512_SUM.to_string())
+        );
+        assert_eq!(
+            file.checksums[&"xxhash64".parse()?],
+            Checksum::new(EXPECTED_XXHASH64_SUM.to_string())
+        );
+        assert_eq!(
+            file.checksums[&"xxhash3".parse()?],
+            Checksum::new(EXPECTED_XXHASH3_SUM.to_string())
+        );
+        assert_eq!(
+            file.checksums[&"xxhash128".parse()?],
+            Checksum::new(EXPECTED_XXHASH128_SUM.to_string())
+        );
+        assert_eq!(
             file.checksums[&"md5-aws-1073741824b".parse()?],
             Checksum::new(expected_md5_1gib().to_string())
         );
@@ -597,6 +648,10 @@ pub(crate) mod test {
         assert_eq!(
             file.checksums[&"crc32c".parse()?],
             Checksum::new(EXPECTED_CRC32C_BE_SUM.to_string())
+        );
+        assert_eq!(
+            file.checksums[&"crc64nvme".parse()?],
+            Checksum::new(EXPECTED_CRC64NVME_BE_SUM.to_string())
         );
 
         Ok(())
