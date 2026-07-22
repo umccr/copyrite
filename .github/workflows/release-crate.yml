@@ -21,6 +21,27 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
+        id: release-plz
         uses: MarcoIeni/release-plz-action@v0.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # This control regenerating the debian/rpm packages when release-plz creates a PR.
+      - name: Check out the release PR branch
+        if: ${{ steps.release-plz.outputs.prs_created == 'true' }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ fromJSON(steps.release-plz.outputs.pr).head_branch }}
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Regenerate packaging changelogs
+        if: ${{ steps.release-plz.outputs.prs_created == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo xtask changelog
+      - name: Commit packaging changelogs to the release PR
+        if: ${{ steps.release-plz.outputs.prs_created == 'true' }}
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: "chore: regenerate Debian and RPM changelogs"
+          file_pattern: pkg/debian/changelog pkg/rpm/copyrite.spec
+          branch: ${{ fromJSON(steps.release-plz.outputs.pr).head_branch }}
