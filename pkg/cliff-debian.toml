@@ -8,7 +8,6 @@ body = """copyrite ({{ version | trim_start_matches(pat="v") }}-1) unstable; urg
  -- Marko Malenic <mmalenic1@gmail.com>  {% set c = commits | first %}{{ c.committer.timestamp | date(format="%a, %d %b %Y %H:%M:%S %z", timezone="UTC") }}
 
 """
-footer = ""
 trim = false
 
 [git]

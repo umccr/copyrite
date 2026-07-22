@@ -5,7 +5,6 @@ body = """{% set c = commits | first %}* {{ c.committer.timestamp | date(format=
 {% for commit in commits %}- {{ commit.message | split(pat="\n") | first | trim | upper_first }}{% if commit.remote.username %} (@{{ commit.remote.username }}){% endif %}
 {% endfor %}
 """
-footer = ""
 trim = false
 
 [git]

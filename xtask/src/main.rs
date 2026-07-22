@@ -98,7 +98,8 @@ fn run_cliff(root: &Path, config_path: &Path, tag: &str) -> Result<String> {
     let mut buf = Vec::new();
     git_cliff::write_changelog(&opt, changelog, &mut buf).context("rendering changelog")?;
 
-    String::from_utf8(buf).context("changelog output not UTF-8")
+    let rendered = String::from_utf8(buf).context("changelog output not UTF-8")?;
+    Ok(format!("{}\n", rendered.trim_end()))
 }
 
 /// Replace everything from the spec's `%changelog` line onwards with `entries`.

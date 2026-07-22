@@ -23,19 +23,28 @@ install -D target/release/%{name} %{buildroot}%{_bindir}/%{name}
 %{_bindir}/%{name}
 
 %changelog
-* Wed Jul 22 2026 Marko Malenic <mmalenic1@gmail.com> - 0.7.0-1
+* Wed Jul 22 2026 Marko Malenic <mmalenic1@gmail.com> - 0.8.0-1
+- Add debian/rpm changelog and package regeneration
 - Add new checksums to tests and properly run md5 through parts (@mmalenic)
 - Add md5 sum support and also fix encryption-based etag support (@mmalenic)
 - Add checksum tests for md5, xxhash, sha512 (@mmalenic)
 - Add xxhash variants, md5 and sha512 (@mmalenic)
+
+* Sun Jul 19 2026 Marko Malenic <mmalenic1@gmail.com> - 0.7.0-1
 - Add pkg changelogs (@mmalenic)
 - Pairing clients with their source/destination location properly (@mmalenic)
+
+* Thu Jul 16 2026 Marko Malenic <mmalenic1@gmail.com> - 0.6.0-1
 - Update CHANGELOG to remove fixed entries (@andrewpatto)
 - Fix clippy (@andrewpatto)
 - Fix fmt (@andrewpatto)
 - Introduced an option that disables request checksums (which had been enabled automatically in the AWS SDK) (@andrewpatto)
+
+* Fri Jul 03 2026 Marko Malenic <mmalenic1@gmail.com> - 0.5.1-1
 - Add release for 0.5.1, and use glibc 2.34 for greater compatibility (@mmalenic)
 - Improve error print output (@mmalenic)
+
+* Wed Jun 03 2026 Marko Malenic <mmalenic1@gmail.com> - 0.5.0-1
 - Fmt (@mmalenic)
 - Max object size should be 50 TiB not 5 TiB (@mmalenic)
 - Add S3 tests for max size and single part check (@mmalenic)
@@ -217,5 +226,3 @@ install -D target/release/%{name} %{buildroot}%{_bindir}/%{name}
 - Add basic outline of concurrent checksums (@mmalenic)
 - Add basic skeleton with argument parsing (@mmalenic)
 - Initial commit (@andrewpatto)
-
-

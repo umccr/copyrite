@@ -1,17 +1,38 @@
-copyrite (0.7.0-1) unstable; urgency=low
+copyrite (0.8.0-1) unstable; urgency=low
 
+  * Add debian/rpm changelog and package regeneration
   * Add new checksums to tests and properly run md5 through parts (@mmalenic)
   * Add md5 sum support and also fix encryption-based etag support (@mmalenic)
   * Add checksum tests for md5, xxhash, sha512 (@mmalenic)
   * Add xxhash variants, md5 and sha512 (@mmalenic)
+
+ -- Marko Malenic <mmalenic1@gmail.com>  Wed, 22 Jul 2026 22:32:25 +0000
+
+copyrite (0.7.0-1) unstable; urgency=low
+
   * Add pkg changelogs (@mmalenic)
   * Pairing clients with their source/destination location properly (@mmalenic)
+
+ -- Marko Malenic <mmalenic1@gmail.com>  Sun, 19 Jul 2026 23:39:33 +0000
+
+copyrite (0.6.0-1) unstable; urgency=low
+
   * Update CHANGELOG to remove fixed entries (@andrewpatto)
   * Fix clippy (@andrewpatto)
   * Fix fmt (@andrewpatto)
   * Introduced an option that disables request checksums (which had been enabled automatically in the AWS SDK) (@andrewpatto)
+
+ -- Marko Malenic <mmalenic1@gmail.com>  Thu, 16 Jul 2026 05:51:26 +0000
+
+copyrite (0.5.1-1) unstable; urgency=low
+
   * Add release for 0.5.1, and use glibc 2.34 for greater compatibility (@mmalenic)
   * Improve error print output (@mmalenic)
+
+ -- Marko Malenic <mmalenic1@gmail.com>  Fri, 03 Jul 2026 05:31:58 +0000
+
+copyrite (0.5.0-1) unstable; urgency=low
+
   * Fmt (@mmalenic)
   * Max object size should be 50 TiB not 5 TiB (@mmalenic)
   * Add S3 tests for max size and single part check (@mmalenic)
@@ -31,7 +52,7 @@ copyrite (0.7.0-1) unstable; urgency=low
   * Add with_reopen to copy when using best effort copying (@mmalenic)
   * Add re-open handle to allow re-fetching the source when required (@mmalenic)
 
- -- Marko Malenic <mmalenic1@gmail.com>  Wed, 22 Jul 2026 02:54:42 +0000
+ -- Marko Malenic <mmalenic1@gmail.com>  Wed, 03 Jun 2026 21:41:53 +0000
 
 copyrite (0.4.0-1) unstable; urgency=low
 
@@ -225,5 +246,3 @@ copyrite (0.1.0-1) unstable; urgency=low
   * Initial commit (@andrewpatto)
 
  -- Marko Malenic <mmalenic1@gmail.com>  Tue, 15 Apr 2025 22:48:40 +0000
-
-
