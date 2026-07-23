@@ -146,6 +146,40 @@ impl From<&CheckStats> for Option<ChecksumPair> {
     }
 }
 
+/// The reason a copy was considered successful or was skipped.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CopySuccessReason {
+    /// The matching checksum that determined the copy was correct, if a checksum comparison
+    /// was performed. This is absent when the copy was skipped for a reason unrelated to
+    /// checksums, such as the source and destination being the same object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) checksum_match: Option<ChecksumPair>,
+    /// A message describing why the copy succeeded or was skipped.
+    pub(crate) message: String,
+}
+
+impl CopySuccessReason {
+    /// Create a new copy reason.
+    pub fn new(checksum_match: Option<ChecksumPair>, message: impl Into<String>) -> Self {
+        Self {
+            checksum_match,
+            message: message.into(),
+        }
+    }
+
+    /// Create a copy reason with only a message and no checksum match.
+    pub fn message(message: impl Into<String>) -> Self {
+        Self::new(None, message)
+    }
+}
+
+impl From<&CheckStats> for Option<CopySuccessReason> {
+    fn from(stats: &CheckStats) -> Self {
+        Option::<ChecksumPair>::from(stats)
+            .map(|checksum_match| CopySuccessReason::new(Some(checksum_match), "checksums match"))
+    }
+}
+
 /// A list of checksum pair "reasons".
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ChecksumStats(Vec<ChecksumPair>);
@@ -313,11 +347,13 @@ pub struct CopyStats {
     pub(crate) sums_mismatch: bool,
     /// The mode of the copy, either server-side or download-upload.
     pub(crate) copy_mode: CopyMode,
-    /// The reason a copy was considered successful. This shows the matching checksum that
-    /// determines that the copy completed correctly. If the copy was skipped, this shows the
-    /// matching checksum.
+    /// The reason a copy was considered successful or was skipped.
+    ///
+    /// For checksum-verified copies this contains the matching checksum. For copies skipped
+    /// for other reasons, such as the source and destination being the same object, only the
+    /// message is populated.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) reason: Option<ChecksumPair>,
+    pub(crate) success_reason: Option<CopySuccessReason>,
     /// The number of retries if there was permission issues for copying metadata or tags.
     pub(crate) n_retries: u64,
     /// Stats from checking sums to ensure that the copy was successful.
@@ -342,7 +378,7 @@ impl From<Error> for Box<CopyStats> {
 
 impl From<CopyTaskError> for Box<CopyStats> {
     fn from(err: CopyTaskError) -> Self {
-        let mut stats = CopyStats::from_task(err.task, None, false, false);
+        let mut stats = CopyStats::from_task(err.task, None, false, false, None);
         stats.unrecoverable_error = Some(err.error);
         Box::new(stats)
     }
@@ -366,7 +402,7 @@ impl CopyStats {
             skipped,
             sums_mismatch,
             copy_mode,
-            reason: Option::<ChecksumPair>::from(&check_stats),
+            success_reason: Option::<CopySuccessReason>::from(&check_stats),
             n_retries: 0,
             api_errors: Default::default(),
             check_stats: Some(check_stats),
@@ -380,6 +416,7 @@ impl CopyStats {
         check_stats: Option<CheckStats>,
         skipped: bool,
         sums_mismatch: bool,
+        reason: Option<CopySuccessReason>,
     ) -> Self {
         Self {
             elapsed_seconds: 0.0,
@@ -389,7 +426,7 @@ impl CopyStats {
             skipped,
             sums_mismatch,
             copy_mode: copy_task.copy_mode(),
-            reason: check_stats.as_ref().and_then(Option::<ChecksumPair>::from),
+            success_reason: reason,
             n_retries: copy_task.n_retries(),
             api_errors: copy_task.api_errors(),
             check_stats,

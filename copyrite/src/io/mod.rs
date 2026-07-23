@@ -362,13 +362,10 @@ impl Provider {
 
     /// Check whether two providers refer to the same object.
     pub fn is_same_location(&self, other: &Provider) -> bool {
-        if self == other {
-            return true;
-        }
-
-        // S3 matching is handled by the equality comparison above. This canonicalizes the path
-        // in order to check files too.
         match (self, other) {
+            (source @ Provider::S3 { .. }, destination @ Provider::S3 { .. }) => {
+                source == destination
+            }
             (Provider::File { file: self_file }, Provider::File { file: other_file }) => {
                 let self_path = Path::new(self_file.as_str());
                 let other_path = Path::new(other_file.as_str());
