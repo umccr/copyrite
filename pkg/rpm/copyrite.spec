@@ -23,8 +23,12 @@ install -D target/release/%{name} %{buildroot}%{_bindir}/%{name}
 %{_bindir}/%{name}
 
 %changelog
-* Wed Jul 22 2026 Marko Malenic <mmalenic1@gmail.com> - 0.8.0-1
-- Add debian/rpm changelog and package regeneration
+* Thu Jul 23 2026 Marko Malenic <mmalenic1@gmail.com> - 0.8.0-1
+- Introduce copy success reason to better track why a copy was successful or skipped (@mmalenic)
+- Add xtask alias (@mmalenic)
+- Add check to ensure that copying when source == destination doesn't fail (@mmalenic)
+- Remove newlines and restructure changelogs (@mmalenic)
+- Add debian/rpm changelog and package regeneration (@mmalenic)
 - Add new checksums to tests and properly run md5 through parts (@mmalenic)
 - Add md5 sum support and also fix encryption-based etag support (@mmalenic)
 - Add checksum tests for md5, xxhash, sha512 (@mmalenic)

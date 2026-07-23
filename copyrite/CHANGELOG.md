@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/umccr/copyrite/compare/copyrite-v0.7.0...copyrite-v0.8.0) - 2026-07-23
+
+### Added
+
+- [**breaking**] introduce copy success reason to better track why a copy was successful or skipped
+- add md5 sum support and also fix encryption-based etag support
+- add xxhash variants, md5 and sha512
+
+### Fixed
+
+- add check to ensure that copying when source == destination doesn't fail
+- add new checksums to tests and properly run md5 through parts
+
+### Other
+
+- add checksum tests for md5, xxhash, sha512
+
 ## [0.7.0](https://github.com/umccr/copyrite/compare/v0.6.0...v0.7.0) - 2026-07-19
 
 ### Fixed
