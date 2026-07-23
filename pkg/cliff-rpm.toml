@@ -1,0 +1,30 @@
+# git-cliff configuration that renders RPM %changelog entries using `cargo xtask changelog`.
+
+[changelog]
+body = """{% set c = commits | first %}* {{ c.committer.timestamp | date(format="%a %b %d %Y", timezone="UTC") }} Marko Malenic <mmalenic1@gmail.com> - {{ version | trim_start_matches(pat="v") }}-1
+{% for commit in commits %}- {{ commit.message | split(pat="\n") | first | trim | upper_first }}{% if commit.remote.username %} (@{{ commit.remote.username }}){% endif %}
+{% endfor %}
+"""
+trim = false
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+commit_parsers = [
+  { message = "^Merge ", skip = true },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore: release", skip = true },
+  { message = "^chore\\(deps", skip = true },
+  { message = ".*", group = "changes" },
+]
+protect_breaking_commits = false
+filter_commits = false
+tag_pattern = "v?[0-9]*"
+skip_tags = ".*-rc.*"
+topo_order = false
+sort_commits = "newest"
+
+[remote.github]
+owner = "umccr"
+repo = "copyrite"

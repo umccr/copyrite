@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+publish = false
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+git-cliff = { version = "2.13", default-features = false, features = ["github"] }
