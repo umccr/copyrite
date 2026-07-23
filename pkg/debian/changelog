@@ -1,12 +1,16 @@
 copyrite (0.8.0-1) unstable; urgency=low
 
-  * Add debian/rpm changelog and package regeneration
+  * Introduce copy success reason to better track why a copy was successful or skipped (@mmalenic)
+  * Add xtask alias (@mmalenic)
+  * Add check to ensure that copying when source == destination doesn't fail (@mmalenic)
+  * Remove newlines and restructure changelogs (@mmalenic)
+  * Add debian/rpm changelog and package regeneration (@mmalenic)
   * Add new checksums to tests and properly run md5 through parts (@mmalenic)
   * Add md5 sum support and also fix encryption-based etag support (@mmalenic)
   * Add checksum tests for md5, xxhash, sha512 (@mmalenic)
   * Add xxhash variants, md5 and sha512 (@mmalenic)
 
- -- Marko Malenic <mmalenic1@gmail.com>  Wed, 22 Jul 2026 22:32:25 +0000
+ -- Marko Malenic <mmalenic1@gmail.com>  Thu, 23 Jul 2026 05:34:22 +0000
 
 copyrite (0.7.0-1) unstable; urgency=low
 
