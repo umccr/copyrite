@@ -3,14 +3,14 @@
 
 use crate::checksum::Ctx;
 use crate::error::Error;
-use crate::error::Error::{CheckError, GenerateError, ParseError};
+use crate::error::Error::{CheckError, CopyError, GenerateError, ParseError};
 use crate::error::Result;
 use crate::io::S3Client;
 use crate::io::sums::ObjectSumsBuilder;
 use crate::io::sums::channel::ChannelReader;
 use crate::io::{CredentialOverrides, Provider};
 use crate::stats;
-use crate::stats::{CheckStats, ChecksumPair, CopyStats, GenerateStats};
+use crate::stats::{CheckStats, CopyStats, CopySuccessReason, GenerateStats};
 use crate::task::ClientInput;
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::CopyTaskBuilder;
@@ -729,6 +729,65 @@ impl Copy {
     ) -> stats::Result<CopyStats> {
         let now = Instant::now();
 
+        // Verify the source exists before continuing.
+        let source_exists = ObjectSumsBuilder::default()
+            .set_client(Some(source_client.clone()))
+            .build(self.source.to_string())
+            .await?
+            .file_size()
+            .await
+            .is_ok_and(|size| size.is_some());
+
+        if !source_exists {
+            let err_msg = format!("source does not exist: {}", self.source);
+            return Err(Box::new(CopyStats {
+                elapsed_seconds: 0.0,
+                source: self.source,
+                destination: self.destination,
+                bytes_transferred: 0,
+                copy_mode: self.copy_mode,
+                success_reason: None,
+                skipped: false,
+                sums_mismatch: false,
+                n_retries: 0,
+                api_errors: HashSet::new(),
+                check_stats: None,
+                unrecoverable_error: Some(CopyError(err_msg)),
+            }));
+        }
+
+        // If source and destination refer to the same object, treat as a no-op.
+        if Provider::try_from(self.source.as_str())?
+            .is_same_location(&Provider::try_from(self.destination.as_str())?)
+        {
+            if ui {
+                println!(
+                    "{} source and destination are the same ({}), nothing to copy",
+                    style("warning:").yellow().bold(),
+                    self.source
+                );
+            }
+
+            let copy_stats = CopyStats {
+                elapsed_seconds: 0.0,
+                source: self.source,
+                destination: self.destination,
+                bytes_transferred: 0,
+                copy_mode: self.copy_mode,
+                success_reason: Some(CopySuccessReason::message(
+                    "source and destination are the same object",
+                )),
+                skipped: true,
+                sums_mismatch: false,
+                n_retries: 0,
+                api_errors: HashSet::new(),
+                check_stats: None,
+                unrecoverable_error: None,
+            };
+
+            return Ok(copy_stats.with_elapsed(now.elapsed()));
+        }
+
         let mut exists = false;
         if !self.no_skip {
             if ui {
@@ -770,14 +829,18 @@ impl Copy {
                     })?;
 
                 if check_stats.groups.len() == 1 {
-                    let reason = Option::<ChecksumPair>::from(&check_stats);
+                    let reason = Option::<CopySuccessReason>::from(&check_stats).or_else(|| {
+                        Some(CopySuccessReason::message(
+                            "destination already matches source",
+                        ))
+                    });
                     let copy_stats = CopyStats {
                         elapsed_seconds: 0.0,
                         source: self.source,
                         destination: self.destination,
                         bytes_transferred: 0,
                         copy_mode: self.copy_mode,
-                        reason: reason.clone(),
+                        success_reason: reason.clone(),
                         skipped: true,
                         sums_mismatch: false,
                         n_retries: 0,
@@ -788,11 +851,13 @@ impl Copy {
 
                     let elapsed = now.elapsed();
                     if ui {
-                        if let Some(reason) = reason {
+                        if let Some(reason) = reason
+                            && let Some(checksum_match) = reason.checksum_match
+                        {
                             println!(
                                 "  {} {} sums match, skipping copy!",
                                 style("·").bold(),
-                                style(reason.kind).green()
+                                style(checksum_match.kind).green()
                             );
                         }
                         println!("Done in {}", HumanDuration(elapsed));
@@ -866,17 +931,28 @@ impl Copy {
                     .with_elapsed(now.elapsed())
                 })?;
 
-            if ui && let Some(reason) = Option::<ChecksumPair>::from(&check_stats) {
+            let reason = Option::<CopySuccessReason>::from(&check_stats)
+                .or_else(|| Some(CopySuccessReason::message("copy verified")));
+
+            if ui
+                && let Some(reason) = &reason
+                && let Some(checksum_match) = &reason.checksum_match
+            {
                 println!(
                     "  {} {} sums match!",
                     style("·").bold(),
-                    style(reason.kind).green()
+                    style(checksum_match.kind.clone()).green()
                 );
             }
 
-            CopyStats::from_task(result, Some(check_stats), false, mismatch)
+            CopyStats::from_task(result, Some(check_stats), false, mismatch, reason)
         } else {
-            CopyStats::from_task(result, None, false, mismatch)
+            let reason = CopySuccessReason::message("copied without checksum verification");
+            if ui {
+                println!("  {} {}", style("·").bold(), reason.message);
+            }
+
+            CopyStats::from_task(result, None, false, mismatch, Some(reason))
         };
 
         let elapsed = now.elapsed();

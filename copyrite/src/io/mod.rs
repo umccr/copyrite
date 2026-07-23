@@ -14,6 +14,7 @@ use aws_sdk_s3::{Client, config};
 use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
 use pastey::paste;
 use serde::Deserialize;
+use std::path::Path;
 use std::result;
 use std::sync::Arc;
 
@@ -277,7 +278,7 @@ impl S3Client {
 }
 
 /// The type of provider for the object.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Provider {
     File { file: String },
     S3 { bucket: String, key: String },
@@ -357,6 +358,25 @@ impl Provider {
     /// Check if the provider is an S3 provider.
     pub fn is_s3(&self) -> bool {
         matches!(self, Provider::S3 { .. })
+    }
+
+    /// Check whether two providers refer to the same object.
+    pub fn is_same_location(&self, other: &Provider) -> bool {
+        match (self, other) {
+            (source @ Provider::S3 { .. }, destination @ Provider::S3 { .. }) => {
+                source == destination
+            }
+            (Provider::File { file: self_file }, Provider::File { file: other_file }) => {
+                let self_path = Path::new(self_file.as_str());
+                let other_path = Path::new(other_file.as_str());
+
+                match (self_path.canonicalize(), other_path.canonicalize()) {
+                    (Ok(canonical_self), Ok(canonical_other)) => canonical_self == canonical_other,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
     }
 }
 
@@ -520,7 +540,9 @@ mod tests {
     use anyhow::Result;
     use aws_credential_types::Credentials;
     use serde_json::json;
+    use std::env;
     use std::time::{Duration, SystemTime};
+    use tempfile::{NamedTempFile, tempdir};
 
     #[tokio::test]
     pub async fn test_parse_url() -> Result<()> {
@@ -666,5 +688,64 @@ mod tests {
             )
             .provider_name("test")
             .build()
+    }
+
+    #[test]
+    fn is_same_location() {
+        let source = Provider::try_from("s3://bucket/key").unwrap();
+        let destination = Provider::try_from("s3://bucket/key").unwrap();
+        assert!(source.is_same_location(&destination));
+
+        let source = Provider::try_from("s3://bucket/key1").unwrap();
+        let destination = Provider::try_from("s3://bucket/key2").unwrap();
+        assert!(!source.is_same_location(&destination));
+
+        let source = Provider::try_from("s3://bucket1/key").unwrap();
+        let destination = Provider::try_from("s3://bucket2/key").unwrap();
+        assert!(!source.is_same_location(&destination));
+
+        let source = Provider::try_from("s3://bucket/key").unwrap();
+        let destination = Provider::try_from("s3://bucket/key/").unwrap();
+        assert!(!source.is_same_location(&destination));
+
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path().to_string_lossy().to_string();
+
+        let source = Provider::try_from(path.as_str()).unwrap();
+        let destination = Provider::try_from(path.as_str()).unwrap();
+        assert!(source.is_same_location(&destination));
+
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path().to_string_lossy().to_string();
+        let prefixed = format!("file://{}", path);
+
+        let source = Provider::try_from(path.as_str()).unwrap();
+        let destination = Provider::try_from(prefixed.as_str()).unwrap();
+        assert!(source.is_same_location(&destination));
+
+        let file = NamedTempFile::new_in(env::current_dir().unwrap()).unwrap();
+        let abs_path = file.path().to_string_lossy().to_string();
+        let rel_path = format!("./{}", file.path().file_name().unwrap().to_string_lossy());
+
+        let source = Provider::try_from(abs_path.as_str()).unwrap();
+        let destination = Provider::try_from(rel_path.as_str()).unwrap();
+        assert!(source.is_same_location(&destination));
+
+        let dir = tempdir().unwrap();
+        let original = dir.path().join("original");
+        std::fs::write(&original, "data").unwrap();
+
+        let file1 = NamedTempFile::new().unwrap();
+        let file2 = NamedTempFile::new().unwrap();
+        let path1 = file1.path().to_string_lossy().to_string();
+        let path2 = file2.path().to_string_lossy().to_string();
+
+        let source = Provider::try_from(path1.as_str()).unwrap();
+        let destination = Provider::try_from(path2.as_str()).unwrap();
+        assert!(!source.is_same_location(&destination));
+
+        let source = Provider::try_from("s3://bucket/key").unwrap();
+        let destination = Provider::try_from("/tmp/file").unwrap();
+        assert!(!source.is_same_location(&destination));
     }
 }
