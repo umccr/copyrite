@@ -1,6 +1,7 @@
 [[package]]
 name = "xtask"
 release = false
+publish = false
 
 [[package]]
 name = "copyrite"
