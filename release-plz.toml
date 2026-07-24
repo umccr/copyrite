@@ -6,3 +6,4 @@ publish = false
 [[package]]
 name = "copyrite"
 git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
