@@ -1,0 +1,7 @@
+[[package]]
+name = "xtask"
+release = false
+
+[[package]]
+name = "copyrite"
+git_tag_name = "v{{ version }}"
