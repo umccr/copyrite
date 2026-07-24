@@ -27,7 +27,7 @@ RUN \
     wget \
       --quiet \
       --output-document - \
-      "${GITHUB_REPO_RELEASES_URL}/${PACKAGE_VERSION}/copyrite-${platform_url}.tar.gz" | \
+      "${GITHUB_REPO_RELEASES_URL}/${PACKAGE_VERSION}/copyrite-${PACKAGE_VERSION#v}-${platform_url}.tar.gz" | \
     tar \
       --directory /usr/bin \
       --extract \
