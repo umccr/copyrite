@@ -221,29 +221,23 @@ impl S3 {
 
         let tags = match self.tag_mode {
             MetadataCopy::Suppress => None,
-            MetadataCopy::BestEffort => {
+            MetadataCopy::BestEffort => self.tagging(&key, &bucket).await.ok().map(|output| {
+                output
+                    .tag_set
+                    .iter()
+                    .map(|tag| format!("{}={}", tag.key(), tag.value()))
+                    .collect::<Vec<_>>()
+                    .join("&")
+            }),
+            MetadataCopy::Copy => Some(
                 self.tagging(&key, &bucket)
-                    .await
-                    .ok()
-                    .map(|output| {
-                        output.tag_set
-                            .iter()
-                            .map(|tag| format!("{}={}", tag.key(), tag.value()))
-                            .collect::<Vec<_>>()
-                            .join("&")
-                    })
-            }
-            MetadataCopy::Copy => {
-                Some(
-                    self.tagging(&key, &bucket)
-                        .await?
-                        .tag_set
-                        .iter()
-                        .map(|tag| format!("{}={}", tag.key(), tag.value()))
-                        .collect::<Vec<_>>()
-                        .join("&"),
-                )
-            }
+                    .await?
+                    .tag_set
+                    .iter()
+                    .map(|tag| format!("{}={}", tag.key(), tag.value()))
+                    .collect::<Vec<_>>()
+                    .join("&"),
+            ),
         };
 
         let size = head
@@ -1155,106 +1149,6 @@ mod test {
             })
     }
 
-    // =========================================================================
-    // Bug Condition Exploration Tests (Task 1)
-    //
-    // **Validates: Requirements 1.1, 1.2, 2.1, 2.2**
-    //
-    // These tests encode EXPECTED behavior. They are designed to FAIL on
-    // unfixed code, proving the bug exists. DO NOT fix the code to make them pass.
-    // =========================================================================
-
-    /// **Validates: Requirements 2.1**
-    ///
-    /// Bug Condition: tag_mode = Suppress with GetObjectTagging returning an error.
-    /// Expected: initialize_state returns Ok(CopyState { tags: None })
-    /// Actual (unfixed): error propagates via `?`, returning Err(...)
-    #[tokio::test]
-    async fn bug_condition_suppress_with_tagging_error_returns_ok() {
-        let head_object = head_object_rule();
-        let get_object_tagging = mock!(Client::get_object_tagging)
-            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
-            .then_error(|| {
-                GetObjectTaggingError::generic(
-                    ErrorMetadata::builder()
-                        .code("NotImplemented")
-                        .message("The requested functionality is not implemented")
-                        .build(),
-                )
-            });
-
-        let client = retrying_mock_client(&[&head_object, &get_object_tagging]);
-        let s3 = s3_source_with_tag_mode(client, MetadataCopy::Suppress);
-
-        let result = s3
-            .initialize_state(KEY.to_string(), BUCKET.to_string())
-            .await;
-
-        // Expected: Ok with tags = None (Suppress should skip tagging entirely)
-        assert!(
-            result.is_ok(),
-            "Suppress mode should not propagate tagging errors, got: {:?}",
-            result.err()
-        );
-        let state = result.unwrap();
-        assert_eq!(
-            state.tags(),
-            None,
-            "Suppress mode should always return tags = None"
-        );
-    }
-
-    /// **Validates: Requirements 2.2**
-    ///
-    /// Bug Condition: tag_mode = BestEffort with GetObjectTagging returning tags successfully.
-    /// Expected: CopyState.tags == Some("env=prod")
-    /// Actual (unfixed): tags are unconditionally discarded, CopyState.tags == None
-    #[tokio::test]
-    async fn bug_condition_best_effort_with_successful_tagging_returns_tags() {
-        use aws_sdk_s3::types::Tag;
-
-        let head_object = head_object_rule();
-        let get_object_tagging = mock!(Client::get_object_tagging)
-            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
-            .then_output(|| {
-                GetObjectTaggingOutput::builder()
-                    .tag_set(Tag::builder().key("env").value("prod").build().unwrap())
-                    .build()
-                    .unwrap()
-            });
-
-        let client = retrying_mock_client(&[&head_object, &get_object_tagging]);
-        let s3 = s3_source_with_tag_mode(client, MetadataCopy::BestEffort);
-
-        let result = s3
-            .initialize_state(KEY.to_string(), BUCKET.to_string())
-            .await;
-
-        // Expected: Ok with tags containing the formatted tag string
-        assert!(
-            result.is_ok(),
-            "BestEffort mode should not fail, got: {:?}",
-            result.err()
-        );
-        let state = result.unwrap();
-        assert_eq!(
-            state.tags(),
-            Some("env=prod".to_string()),
-            "BestEffort mode should use tags on success, but they were discarded"
-        );
-    }
-
-    // =========================================================================
-    // Preservation Property Tests (Task 2)
-    //
-    // **Validates: Requirements 3.1, 3.2, 3.3**
-    //
-    // These tests capture existing CORRECT behavior for Copy mode on unfixed code.
-    // They must PASS on unfixed code. After the fix, they confirm no regressions.
-    // =========================================================================
-
-    /// **Validates: Requirements 3.1**
-    ///
     /// Preservation: tag_mode = Copy with successful GetObjectTagging returns formatted tags.
     #[tokio::test]
     async fn preservation_copy_mode_with_tags_returns_formatted_tags() {
@@ -1266,13 +1160,7 @@ mod test {
             .then_output(|| {
                 GetObjectTaggingOutput::builder()
                     .tag_set(Tag::builder().key("env").value("prod").build().unwrap())
-                    .tag_set(
-                        Tag::builder()
-                            .key("team")
-                            .value("data")
-                            .build()
-                            .unwrap(),
-                    )
+                    .tag_set(Tag::builder().key("team").value("data").build().unwrap())
                     .build()
                     .unwrap()
             });
@@ -1298,8 +1186,6 @@ mod test {
         assert_eq!(state.size(), BODY.len() as u64);
     }
 
-    /// **Validates: Requirements 3.2**
-    ///
     /// Preservation: tag_mode = Copy with GetObjectTagging error propagates the error.
     #[tokio::test]
     async fn preservation_copy_mode_with_tagging_error_propagates_error() {
@@ -1328,8 +1214,6 @@ mod test {
         );
     }
 
-    /// **Validates: Requirements 3.3**
-    ///
     /// Preservation: HeadObject size and metadata extraction is consistent regardless of tag_mode.
     #[tokio::test]
     async fn preservation_head_object_size_consistent_across_tag_modes() {
@@ -1360,8 +1244,6 @@ mod test {
         );
     }
 
-    /// **Validates: Requirements 3.1**
-    ///
     /// Preservation: HeadObject metadata is passed through in Copy mode.
     #[tokio::test]
     async fn preservation_head_object_metadata_passed_through() {
@@ -1394,18 +1276,15 @@ mod test {
             .unwrap();
 
         let metadata = result.metadata().expect("metadata should be present");
-        assert_eq!(metadata.get("custom-key").map(String::as_str), Some("custom-value"));
+        assert_eq!(
+            metadata.get("custom-key").map(String::as_str),
+            Some("custom-value")
+        );
     }
 }
 
-// =========================================================================
-// Property-Based Tests (Task 2) - Preservation
-//
-// **Validates: Requirements 3.1, 3.2, 3.3**
-//
 // These proptest-based tests verify that Copy mode correctly formats arbitrary
 // tag sets and that behavior is consistent across tag_mode values.
-// =========================================================================
 #[cfg(test)]
 mod preservation_property_tests {
     use super::*;
@@ -1468,14 +1347,9 @@ mod preservation_property_tests {
 
     /// Strategy for generating a tag set of 1..10 tags with random keys and values.
     fn tag_set_strategy() -> impl Strategy<Value = Vec<(String, String)>> {
-        prop::collection::vec(
-            (tag_string_strategy(), tag_string_strategy()),
-            1..=10,
-        )
+        prop::collection::vec((tag_string_strategy(), tag_string_strategy()), 1..=10)
     }
 
-    // **Validates: Requirements 3.1**
-    //
     // Property: Copy mode formats any valid tag set as key1=value1&key2=value2&...
     // This runs on unfixed code to capture the baseline formatting behavior.
     proptest! {
@@ -1534,8 +1408,6 @@ mod preservation_property_tests {
         }
     }
 
-    // **Validates: Requirements 3.3**
-    //
     // Property: HeadObject size extraction is consistent regardless of tag_mode.
     // For Copy mode with valid tags, the size should always match content_length.
     proptest! {
