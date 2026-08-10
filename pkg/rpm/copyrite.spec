@@ -23,7 +23,16 @@ install -D target/release/%{name} %{buildroot}%{_bindir}/%{name}
 %{_bindir}/%{name}
 
 %changelog
+* Fri Aug 07 2026 Marko Malenic <mmalenic1@gmail.com> - 0.8.1-1
+- Fmt and removed some tests (@andrewpatto)
+- Fixed bug with tag mode suppress (@andrewpatto)
+- Dockerfile location (@mmalenic)
+- Naming of git release (@mmalenic)
+- Also need to set publish = false in release-plz.toml (@mmalenic)
+- Release plz config related to workspace packages (@mmalenic)
+
 * Thu Jul 23 2026 Marko Malenic <mmalenic1@gmail.com> - 0.8.0-1
+- Regenerate Debian and RPM changelogs (@mmalenic)
 - Introduce copy success reason to better track why a copy was successful or skipped (@mmalenic)
 - Add xtask alias (@mmalenic)
 - Add check to ensure that copying when source == destination doesn't fail (@mmalenic)
