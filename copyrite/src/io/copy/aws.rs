@@ -9,6 +9,7 @@ use crate::io::S3Client;
 use crate::io::copy::{
     CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part, Reopen,
 };
+use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::get_object_tagging::{GetObjectTaggingError, GetObjectTaggingOutput};
 use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
 use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
@@ -23,7 +24,7 @@ use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
 use bytes::Bytes;
 use futures_util::stream::poll_fn;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use http_body::Frame;
 use http_body_util::StreamBody;
 use std::collections::HashMap;
@@ -34,7 +35,7 @@ use std::result;
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
-use tokio_util::io::ReaderStream;
+use tokio_util::io::{ReaderStream, StreamReader};
 
 /// The number of chunks buffered when re-trying an SDK body.
 const REOPEN_CHANNEL_CAPACITY: usize = 16;
@@ -247,7 +248,7 @@ impl S3 {
             .ok_or_else(|| Error::aws_error("missing size".to_string()))?;
         let metadata = head.metadata;
 
-        Ok(CopyState::new(size, tags, metadata))
+        Ok(CopyState::new(size, tags, metadata).with_etag(head.e_tag))
     }
 
     /// Get the head object output.
@@ -362,6 +363,7 @@ impl S3 {
 
         let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
         let do_copy = |tagging, tagging_set, metadata, metadata_set, additional_checksum| async {
+            let etag = state.etag();
             self.client
                 .copy_object(move |b| {
                     b.tagging_directive(tagging)
@@ -370,6 +372,7 @@ impl S3 {
                         .set_metadata(metadata_set)
                         .set_checksum_algorithm(additional_checksum)
                         .copy_source(Self::copy_source(&source.key, &source.bucket))
+                        .set_copy_source_if_match(etag)
                         .key(&destination.key)
                         .bucket(&destination.bucket)
                 })
@@ -467,6 +470,7 @@ impl S3 {
             let range = multi_part
                 .format_range()
                 .ok_or_else(|| Error::aws_error("invalid range".to_string()))?;
+            let etag = state.etag();
             let response = self
                 .client
                 .upload_part_copy(|b| {
@@ -475,6 +479,7 @@ impl S3 {
                         .key(&destination.key)
                         .bucket(&destination.bucket)
                         .copy_source(Self::copy_source(&source.key, &source.bucket))
+                        .set_copy_source_if_match(etag)
                         .copy_source_range(range)
                 })
                 .await?;
@@ -504,29 +509,101 @@ impl S3 {
         }
     }
 
-    /// Get the object from S3. The returned content carries a reopen function that re-issues the
-    /// same ranged get.
-    pub async fn get_object(&self, multi_part: Option<MultiPartOptions>) -> Result<CopyContent> {
+    /// Send the ranged `GetObject` request for the source.
+    async fn send_get_object(
+        &self,
+        multi_part: Option<MultiPartOptions>,
+        etag: Option<String>,
+    ) -> Result<GetObjectOutput> {
         let source = self.get_source()?;
+        let range = multi_part
+            .as_ref()
+            .and_then(|multi_part| multi_part.format_range());
 
+        Ok(self
+            .client
+            .get_object(|b| {
+                b.bucket(&source.bucket)
+                    .key(&source.key)
+                    .set_range(range)
+                    .set_if_match(etag)
+            })
+            .await?)
+    }
+
+    /// Stream the chunks of a reader that is only opened when the stream is first polled.
+    fn lazy_reader_stream<F, Fut, R>(
+        open: F,
+    ) -> impl Stream<Item = result::Result<Bytes, io::Error>>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<R>> + Send + 'static,
+        R: AsyncRead + Send + Unpin + 'static,
+    {
+        let (tx, mut rx) =
+            mpsc::channel::<result::Result<Bytes, io::Error>>(REOPEN_CHANNEL_CAPACITY);
+
+        let mut pending = Some((tx, open));
+        poll_fn(move |cx| {
+            if let Some((tx, open)) = pending.take() {
+                tokio::spawn(async move {
+                    match open().await {
+                        Ok(reader) => {
+                            let mut stream =
+                                ReaderStream::with_capacity(reader, READER_STREAM_CAPACITY);
+                            while let Some(chunk) = stream.next().await {
+                                if tx.send(chunk).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let _ = tx.send(Err(io::Error::other(err.to_string()))).await;
+                        }
+                    }
+                });
+            }
+
+            rx.poll_recv(cx)
+        })
+    }
+
+    /// Wrap the source object in a reader that only sends the `GetObject` request when it is
+    /// first polled.
+    fn lazy_object_reader(
+        &self,
+        multi_part: Option<MultiPartOptions>,
+        etag: Option<String>,
+    ) -> Box<dyn AsyncRead + Sync + Send + Unpin> {
+        let this = self.clone();
+        Box::new(StreamReader::new(Self::lazy_reader_stream(
+            move || async move {
+                Ok(this
+                    .send_get_object(multi_part, etag)
+                    .await?
+                    .body
+                    .into_async_read())
+            },
+        )))
+    }
+
+    /// Get the object from S3. The request is not sent until the content is first read.
+    pub async fn get_object(
+        &self,
+        multi_part: Option<MultiPartOptions>,
+        etag: Option<String>,
+    ) -> Result<CopyContent> {
         if let Some(multipart) = &multi_part
             && multipart.part_number.is_none()
         {
             return Ok(CopyContent::empty());
         }
 
-        let range = multi_part
-            .as_ref()
-            .and_then(|multi_part| multi_part.format_range());
-
-        let result = self
-            .client
-            .get_object(|b| b.bucket(&source.bucket).key(&source.key).set_range(range))
-            .await?;
+        let data = self.lazy_object_reader(multi_part.clone(), etag.clone());
 
         let self_clone = self.clone();
-        CopyContent::builder(Box::new(result.body.into_async_read()))
-            .with_reopen(move || self_clone.reopen_get(multi_part.clone()))
+        CopyContent::builder(data)
+            .with_reopen(move || self_clone.reopen_get(multi_part.clone(), etag.clone()))
             .build()
     }
 
@@ -534,9 +611,10 @@ impl S3 {
     fn reopen_get(
         &self,
         multi_part: Option<MultiPartOptions>,
+        etag: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Result<CopyContent>> + Send>> {
         let self_clone = self.clone();
-        Box::pin(async move { self_clone.get_object(multi_part).await })
+        Box::pin(async move { self_clone.get_object(multi_part, etag).await })
     }
 
     /// Wrap an async reader into an `SdkBody`.
@@ -549,26 +627,11 @@ impl S3 {
     /// Build a streaming `SdkBody` that re-tries its data from the source. This allows the SDK body
     /// to be re-tried automatically when needed.
     fn reopen_body(reopen: Arc<Reopen>) -> SdkBody {
-        let (tx, mut rx) =
-            mpsc::channel::<result::Result<Bytes, io::Error>>(REOPEN_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            match (*reopen)().await {
-                Ok(content) => {
-                    let mut stream =
-                        ReaderStream::with_capacity(content.data, READER_STREAM_CAPACITY);
-                    while let Some(chunk) = stream.next().await {
-                        if tx.send(chunk).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                Err(err) => {
-                    let _ = tx.send(Err(io::Error::other(err.to_string()))).await;
-                }
-            }
-        });
+        // The SDK creates clones of a retryable body per request but only ever polls one of them,
+        // so the reopen call must not be issued until first poll.
+        let stream = Self::lazy_reader_stream(move || async move { Ok((*reopen)().await?.data) })
+            .map_ok(Frame::data);
 
-        let stream = poll_fn(move |cx| rx.poll_recv(cx)).map_ok(Frame::data);
         SdkBody::from_body_1_x(StreamBody::new(stream))
     }
 
@@ -793,8 +856,12 @@ impl ObjectCopy for S3 {
         }
     }
 
-    async fn download(&self, multi_part: Option<MultiPartOptions>) -> Result<CopyContent> {
-        self.get_object(multi_part).await
+    async fn download(
+        &self,
+        multi_part: Option<MultiPartOptions>,
+        state: &CopyState,
+    ) -> Result<CopyContent> {
+        self.get_object(multi_part, state.etag()).await
     }
 
     async fn upload(
@@ -842,6 +909,7 @@ mod test {
     use aws_sdk_s3::Client;
     use aws_sdk_s3::config::SharedAsyncSleep;
     use aws_sdk_s3::config::retry::RetryConfig;
+    use aws_sdk_s3::operation::copy_object::CopyObjectOutput;
     use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadOutput;
     use aws_sdk_s3::operation::get_object::GetObjectOutput;
     use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
@@ -921,7 +989,7 @@ mod test {
         Fut: Future<Output = Result<CopyResult>>,
     {
         let source = s3_source(retrying_mock_client(&[get_object]));
-        let content = source.download(None).await?;
+        let content = source.download(None, &CopyState::default()).await?;
         upload(content).await
     }
 
@@ -1054,7 +1122,10 @@ mod test {
             end: BODY.len() as u64,
             ..Default::default()
         };
-        let content = source.download(Some(options.clone())).await.unwrap();
+        let content = source
+            .download(Some(options.clone()), &CopyState::default())
+            .await
+            .unwrap();
 
         let destination = s3_destination(
             retrying_mock_client(&[&create, &upload_part]),
@@ -1120,12 +1191,79 @@ mod test {
         let get_object = get_object_rule();
         let source = s3_source(retrying_mock_client(&[&get_object]));
 
-        let content = source.download(None).await.unwrap();
+        let content = source.download(None, &CopyState::default()).await.unwrap();
         let mut reopened = (content.reopen)().await.unwrap();
 
         let mut buf = Vec::new();
         reopened.data.read_to_end(buf.as_mut()).await.unwrap();
         assert_eq!(buf, BODY);
+    }
+
+    #[tokio::test]
+    async fn download_is_lazy() {
+        let get_object = get_object_rule();
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+
+        let mut content = source.download(None, &CopyState::default()).await.unwrap();
+        assert_eq!(get_object.num_calls(), 0);
+
+        let mut buf = Vec::new();
+        content.data.read_to_end(buf.as_mut()).await.unwrap();
+        assert_eq!(buf, BODY);
+        assert_eq!(get_object.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_object_sets_if_etag() {
+        let get_object = mock!(Client::get_object)
+            .match_requests(|req| {
+                req.bucket() == Some(BUCKET)
+                    && req.key() == Some(KEY)
+                    && req.if_match() == Some("etag")
+            })
+            .sequence()
+            .output(|| {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from_static(BODY))
+                    .build()
+            })
+            .repeatedly()
+            .build();
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+
+        let state = CopyState::default().with_etag(Some("etag".to_string()));
+        let mut content = source.download(None, &state).await.unwrap();
+
+        let mut buf = Vec::new();
+        content.data.read_to_end(buf.as_mut()).await.unwrap();
+        assert_eq!(buf, BODY);
+        assert_eq!(get_object.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn copy_object_sets_if_etag() {
+        let copy = mock!(Client::copy_object)
+            .match_requests(|req| req.copy_source_if_match() == Some("etag"))
+            .sequence()
+            .output(|| CopyObjectOutput::builder().build())
+            .repeatedly()
+            .build();
+
+        let s3 = S3Builder::default()
+            .with_client(S3Client::new(
+                Arc::new(retrying_mock_client(&[&copy])),
+                false,
+                false,
+            ))
+            .with_copy_tags(MetadataCopy::Copy)
+            .with_source(BUCKET, KEY)
+            .with_destination(BUCKET, KEY)
+            .build()
+            .unwrap();
+
+        let state = copy_state().with_etag(Some("etag".to_string()));
+        s3.copy_object(&state).await.unwrap();
+        assert_eq!(copy.num_calls(), 1);
     }
 
     /// Build an S3 source with a specific tag_mode from a mock client.

@@ -663,7 +663,7 @@ impl CopyTask {
             (CopyMode::DownloadUpload, None) => {
                 // `download` attaches a reopen factory, so the upload body is retryable: the SDK
                 // can retry transient failures without buffering the object.
-                let data = self.source_copy.download(None).await?;
+                let data = self.source_copy.download(None, &self.state).await?;
                 let upload = self
                     .destination_copy
                     .upload(data, None, &self.state)
@@ -679,7 +679,7 @@ impl CopyTask {
 
                 self.run_multipart(
                     part_size,
-                    |option, _| async move { source.download(Some(option)).await },
+                    |option, state| async move { source.download(Some(option), &state).await },
                     |data, options, state| async move {
                         destination.upload(data, Some(options), &state).await
                     },
@@ -774,6 +774,7 @@ pub(crate) mod test {
         async fn download(
             &self,
             _multi_part: Option<MultiPartOptions>,
+            _state: &CopyState,
         ) -> error::Result<crate::io::copy::CopyContent> {
             unimplemented!()
         }

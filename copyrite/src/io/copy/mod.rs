@@ -159,12 +159,13 @@ impl From<(Part, String)> for CopyResult {
 }
 
 /// The state of the copy operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CopyState {
     size: u64,
     tags: Option<String>,
     metadata: Option<HashMap<String, String>>,
     additional_ctx: Option<Ctx>,
+    etag: Option<String>,
 }
 
 impl CopyState {
@@ -188,6 +189,11 @@ impl CopyState {
         self.additional_ctx.clone()
     }
 
+    /// Get the source ETag on state initialized.
+    pub fn etag(&self) -> Option<String> {
+        self.etag.clone()
+    }
+
     /// Create a new state.
     pub fn new(size: u64, tags: Option<String>, metadata: Option<HashMap<String, String>>) -> Self {
         Self {
@@ -195,7 +201,14 @@ impl CopyState {
             tags,
             metadata,
             additional_ctx: None,
+            etag: None,
         }
+    }
+
+    /// Set the source ETag.
+    pub fn with_etag(mut self, etag: Option<String>) -> Self {
+        self.etag = etag;
+        self
     }
 
     /// Set the additional context.
@@ -215,7 +228,11 @@ pub trait ObjectCopy: DynClone {
     ) -> Result<CopyResult>;
 
     /// Download the object to memory.
-    async fn download(&self, multi_part: Option<MultiPartOptions>) -> Result<CopyContent>;
+    async fn download(
+        &self,
+        multi_part: Option<MultiPartOptions>,
+        state: &CopyState,
+    ) -> Result<CopyContent>;
 
     /// Upload the object to the destination.
     async fn upload(
