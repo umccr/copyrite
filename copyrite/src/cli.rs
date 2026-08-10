@@ -1104,7 +1104,8 @@ pub struct Compatibility {
     /// Enable all compatibility options.
     ///
     /// This is a convenience flag that enables `--force-path-style`,
-    /// `--no-get-object-attributes`, `--no-checksum-mode`, and `--no-request-checksum`.
+    /// `--no-get-object-attributes`, `--no-checksum-mode`, `--no-request-checksum`, and
+    /// `--no-precalculated-checksum`.
     ///
     /// For the copy command, each compatibility option can also be prefixed with
     /// `source-` or `destination-` to enable additional compatibility per-side (e.g.
@@ -1168,6 +1169,19 @@ pub struct Compatibility {
         hide_short_help = true
     )]
     pub no_request_checksum: bool,
+    /// Do not send precalculated checksum values on uploads.
+    ///
+    /// Additional checksums that the SDK cannot compute during an upload are normally sent
+    /// as precalculated values from the sums file. Some S3-compatible endpoints do not support
+    /// this. This option skips the precalculated values so that uploads succeed without them.
+    /// Checksums that the SDK computes during the upload are unaffected.
+    #[arg(
+        global = true,
+        long,
+        env = "COPYRITE_NO_PRECALCULATED_CHECKSUM",
+        hide_short_help = true
+    )]
+    pub no_precalculated_checksum: bool,
     /// Controls overriding the AWS SDK's stalled stream protection.
     ///
     /// SSP is useful to prevent dead TCP connections from hanging if the SDK detects that no bytes are
@@ -1220,6 +1234,13 @@ pub struct Compatibility {
     #[arg(
         global = true,
         long,
+        env = "COPYRITE_SOURCE_NO_PRECALCULATED_CHECKSUM",
+        hide = true
+    )]
+    pub source_no_precalculated_checksum: bool,
+    #[arg(
+        global = true,
+        long,
         env = "COPYRITE_SOURCE_STALLED_STREAM_PROTECTION",
         hide = true
     )]
@@ -1262,6 +1283,13 @@ pub struct Compatibility {
     #[arg(
         global = true,
         long,
+        env = "COPYRITE_DESTINATION_NO_PRECALCULATED_CHECKSUM",
+        hide = true
+    )]
+    pub destination_no_precalculated_checksum: bool,
+    #[arg(
+        global = true,
+        long,
         env = "COPYRITE_DESTINATION_STALLED_STREAM_PROTECTION",
         hide = true
     )]
@@ -1287,6 +1315,11 @@ impl Compatibility {
     /// Whether to disable automatic request checksum calculation.
     pub fn no_request_checksum(&self) -> bool {
         self.s3_compatible || self.no_request_checksum
+    }
+
+    /// Whether to skip precalculated checksum values on uploads.
+    pub fn no_precalculated_checksum(&self) -> bool {
+        self.s3_compatible || self.no_precalculated_checksum
     }
 
     /// Whether to force path-style addressing for the source.
@@ -1325,6 +1358,13 @@ impl Compatibility {
         self.source_s3_compatible || self.source_no_request_checksum || self.no_request_checksum()
     }
 
+    /// Whether to skip precalculated checksum values on uploads for the source.
+    pub fn source_no_precalculated_checksum(&self) -> bool {
+        self.source_s3_compatible
+            || self.source_no_precalculated_checksum
+            || self.no_precalculated_checksum()
+    }
+
     /// Whether to disable checksum mode for the destination.
     pub fn destination_no_checksum_mode(&self) -> bool {
         self.destination_s3_compatible
@@ -1337,6 +1377,13 @@ impl Compatibility {
         self.destination_s3_compatible
             || self.destination_no_request_checksum
             || self.no_request_checksum()
+    }
+
+    /// Whether to skip precalculated checksum values on uploads for the destination.
+    pub fn destination_no_precalculated_checksum(&self) -> bool {
+        self.destination_s3_compatible
+            || self.destination_no_precalculated_checksum
+            || self.no_precalculated_checksum()
     }
 
     /// The SSP configuration for the source.
@@ -1358,12 +1405,14 @@ impl Compatibility {
             || self.source_no_get_object_attributes
             || self.source_no_checksum_mode
             || self.source_no_request_checksum
+            || self.source_no_precalculated_checksum
             || self.source_stalled_stream_protection.is_some()
             || self.destination_s3_compatible
             || self.destination_force_path_style
             || self.destination_no_get_object_attributes
             || self.destination_no_checksum_mode
             || self.destination_no_request_checksum
+            || self.destination_no_precalculated_checksum
             || self.destination_stalled_stream_protection.is_some()
     }
 }

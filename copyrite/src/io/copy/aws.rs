@@ -392,9 +392,13 @@ impl S3 {
     }
 
     /// The additional checksum to attach to an upload.
-    fn upload_checksum(state: &CopyState) -> UploadChecksum {
+    fn upload_checksum(&self, state: &CopyState) -> UploadChecksum {
         if let Some(algorithm) = Self::additional_checksum_algorithm(state) {
             UploadChecksum::Computed(algorithm)
+        } else if self.client.no_precalculated_checksum() {
+            // Some endpoints reject uploads that declare checksum algorithms which are not
+            // computed by the SDK, so no additional checksum can be applied here.
+            UploadChecksum::None
         } else if let Some((ctx, sum)) = Self::precalculated_sum(state) {
             UploadChecksum::Precalculated(Box::new(ctx), sum)
         } else {
@@ -510,7 +514,7 @@ impl S3 {
                 &destination.bucket,
                 tagging,
                 state.metadata(),
-                Self::upload_checksum(state),
+                self.upload_checksum(state),
             )
             .await?
         };
@@ -552,7 +556,7 @@ impl S3 {
                 &destination.bucket,
                 upload_id.to_string(),
                 parts,
-                Self::upload_checksum(state),
+                self.upload_checksum(state),
             )
             .await?;
 
@@ -718,7 +722,7 @@ impl S3 {
             Self::upload_body(content),
             state.tags(),
             state.metadata(),
-            Self::upload_checksum(state),
+            self.upload_checksum(state),
             i64::try_from(state.size())?,
         )
         .await?;
@@ -771,7 +775,7 @@ impl S3 {
         state: &CopyState,
     ) -> Result<CopyResult> {
         let destination = self.get_destination()?;
-        let checksum = Self::upload_checksum(state);
+        let checksum = self.upload_checksum(state);
         let content_length = i64::try_from(state.size())?;
 
         let CopyContent { data, reopen } = content;
@@ -830,7 +834,7 @@ impl S3 {
                 &destination.bucket,
                 state.tags(),
                 state.metadata(),
-                Self::upload_checksum(state),
+                self.upload_checksum(state),
             )
             .await?
         };
@@ -867,7 +871,7 @@ impl S3 {
                 &destination.bucket,
                 upload_id.to_string(),
                 parts,
-                Self::upload_checksum(state),
+                self.upload_checksum(state),
             )
             .await?;
 
@@ -1057,6 +1061,18 @@ mod test {
         S3Builder::default()
             .with_client(S3Client::new(Arc::new(client), false, false))
             .with_copy_tags(tag_mode)
+            .with_destination(BUCKET, KEY)
+            .build()
+            .unwrap()
+    }
+
+    /// Build an S3 destination from a mock client with precalculated checksums disabled.
+    fn s3_destination_no_precalculated(client: Client) -> S3 {
+        S3Builder::default()
+            .with_client(
+                S3Client::new(Arc::new(client), false, false).with_no_precalculated_checksum(true),
+            )
+            .with_copy_tags(MetadataCopy::Copy)
             .with_destination(BUCKET, KEY)
             .build()
             .unwrap()
@@ -1630,6 +1646,95 @@ mod test {
             .await
             .unwrap();
 
+        assert_eq!(complete.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn put_object_no_precalculated_checksum_omits_sum() {
+        let put_object = mock!(Client::put_object)
+            .match_requests(|req| {
+                req.checksum_md5().is_none() && req.checksum_algorithm().is_none()
+            })
+            .sequence()
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+
+        let get_object = get_object_rule();
+        let state = copy_state_with_ctx("md5", Some(EXPECTED_MD5_SUM));
+        download(&get_object, |content| {
+            let destination = s3_destination_no_precalculated(retrying_mock_client(&[&put_object]));
+            async move { destination.put_object(content, &state).await }
+        })
+        .await
+        .unwrap();
+        assert_eq!(put_object.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_no_precalculated_checksum_omits_declaration() {
+        let create = mock!(Client::create_multipart_upload)
+            .match_requests(|req| {
+                req.checksum_algorithm().is_none() && req.checksum_type().is_none()
+            })
+            .sequence()
+            .output(|| {
+                CreateMultipartUploadOutput::builder()
+                    .upload_id("upload-id")
+                    .build()
+            })
+            .build();
+        let upload_part = mock!(Client::upload_part)
+            .match_requests(|req| req.checksum_algorithm().is_none())
+            .sequence()
+            .output(|| UploadPartOutput::builder().e_tag("etag").build())
+            .build();
+        let complete = mock!(Client::complete_multipart_upload)
+            .match_requests(|req| req.checksum_md5().is_none() && req.checksum_type().is_none())
+            .sequence()
+            .output(|| CompleteMultipartUploadOutput::builder().build())
+            .build();
+
+        let state = copy_state_with_ctx("md5", Some(EXPECTED_MD5_SUM));
+        let get_object = get_object_rule();
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+        let options = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: BODY.len() as u64,
+            ..Default::default()
+        };
+        let content = source
+            .download(Some(options.clone()), &CopyState::default())
+            .await
+            .unwrap();
+
+        let destination = s3_destination_no_precalculated(retrying_mock_client(&[
+            &create,
+            &upload_part,
+            &complete,
+        ]));
+        destination
+            .put_object_multipart(content, options, &state)
+            .await
+            .unwrap();
+
+        let completion = MultiPartOptions {
+            part_number: None,
+            upload_id: Some("upload-id".to_string()),
+            parts: Some(vec![Part {
+                part_number: 1,
+                e_tag: Some("etag".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        destination
+            .put_object_multipart(CopyContent::empty(), completion, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(create.num_calls(), 1);
+        assert_eq!(upload_part.num_calls(), 1);
         assert_eq!(complete.num_calls(), 1);
     }
 

@@ -27,6 +27,7 @@ pub struct S3Client {
     inner: Arc<Client>,
     no_get_object_attributes: bool,
     no_checksum_mode: bool,
+    no_precalculated_checksum: bool,
     stalled_stream_protection: StalledStreamProtection,
 }
 
@@ -84,8 +85,15 @@ impl S3Client {
             inner: client,
             no_get_object_attributes,
             no_checksum_mode,
+            no_precalculated_checksum: false,
             stalled_stream_protection,
         }
+    }
+
+    /// Set whether to skip precalculated checksum values on uploads.
+    pub fn with_no_precalculated_checksum(mut self, no_precalculated_checksum: bool) -> Self {
+        self.no_precalculated_checksum = no_precalculated_checksum;
+        self
     }
 
     /// Create a new source S3Client from CLI compatibility and credentials options.
@@ -110,7 +118,8 @@ impl S3Client {
             compatibility.source_no_get_object_attributes(),
             compatibility.source_no_checksum_mode(),
             compatibility.source_stalled_stream_protection(),
-        ))
+        )
+        .with_no_precalculated_checksum(compatibility.source_no_precalculated_checksum()))
     }
 
     /// Create a new destination S3Client from CLI compatibility and credentials options.
@@ -135,7 +144,8 @@ impl S3Client {
             compatibility.destination_no_get_object_attributes(),
             compatibility.destination_no_checksum_mode(),
             compatibility.destination_stalled_stream_protection(),
-        ))
+        )
+        .with_no_precalculated_checksum(compatibility.destination_no_precalculated_checksum()))
     }
 
     /// Whether to avoid `GetObjectAttributes` calls.
@@ -146,6 +156,11 @@ impl S3Client {
     /// Whether to disable checksum mode.
     pub fn no_checksum_mode(&self) -> bool {
         self.no_checksum_mode
+    }
+
+    /// Whether to skip precalculated checksum values on uploads.
+    pub fn no_precalculated_checksum(&self) -> bool {
+        self.no_precalculated_checksum
     }
 
     /// The SSP mode for this client.
