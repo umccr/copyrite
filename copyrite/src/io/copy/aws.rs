@@ -218,20 +218,26 @@ impl S3 {
     /// Initialize the state for a bucket and key.
     pub async fn initialize_state(&self, key: String, bucket: String) -> Result<CopyState> {
         let head = self.head_object(&key, &bucket).await?;
-        let tags = self.tagging(&key, &bucket).await;
 
-        // Getting tags could fail, that's okay if using best-effort mode.
-        let tags = if self.tag_mode.is_best_effort() {
-            None
-        } else {
-            Some(
-                tags?
+        let tags = match self.tag_mode {
+            MetadataCopy::Suppress => None,
+            MetadataCopy::BestEffort => self.tagging(&key, &bucket).await.ok().map(|output| {
+                output
+                    .tag_set
+                    .iter()
+                    .map(|tag| format!("{}={}", tag.key(), tag.value()))
+                    .collect::<Vec<_>>()
+                    .join("&")
+            }),
+            MetadataCopy::Copy => Some(
+                self.tagging(&key, &bucket)
+                    .await?
                     .tag_set
                     .iter()
                     .map(|tag| format!("{}={}", tag.key(), tag.value()))
                     .collect::<Vec<_>>()
                     .join("&"),
-            )
+            ),
         };
 
         let size = head
@@ -1120,5 +1126,332 @@ mod test {
         let mut buf = Vec::new();
         reopened.data.read_to_end(buf.as_mut()).await.unwrap();
         assert_eq!(buf, BODY);
+    }
+
+    /// Build an S3 source with a specific tag_mode from a mock client.
+    fn s3_source_with_tag_mode(client: Client, tag_mode: MetadataCopy) -> S3 {
+        S3Builder::default()
+            .with_client(S3Client::new(Arc::new(client), false, false))
+            .with_copy_tags(tag_mode)
+            .with_source(BUCKET, KEY)
+            .build()
+            .unwrap()
+    }
+
+    /// A `head_object` rule that returns a valid output with content_length set.
+    fn head_object_rule() -> Rule {
+        mock!(Client::head_object)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_output(|| {
+                HeadObjectOutput::builder()
+                    .content_length(BODY.len() as i64)
+                    .build()
+            })
+    }
+
+    /// Preservation: tag_mode = Copy with successful GetObjectTagging returns formatted tags.
+    #[tokio::test]
+    async fn preservation_copy_mode_with_tags_returns_formatted_tags() {
+        use aws_sdk_s3::types::Tag;
+
+        let head_object = head_object_rule();
+        let get_object_tagging = mock!(Client::get_object_tagging)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_output(|| {
+                GetObjectTaggingOutput::builder()
+                    .tag_set(Tag::builder().key("env").value("prod").build().unwrap())
+                    .tag_set(Tag::builder().key("team").value("data").build().unwrap())
+                    .build()
+                    .unwrap()
+            });
+
+        let client = retrying_mock_client(&[&head_object, &get_object_tagging]);
+        let s3 = s3_source_with_tag_mode(client, MetadataCopy::Copy);
+
+        let result = s3
+            .initialize_state(KEY.to_string(), BUCKET.to_string())
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Copy mode with valid tags should succeed, got: {:?}",
+            result.err()
+        );
+        let state = result.unwrap();
+        assert_eq!(
+            state.tags(),
+            Some("env=prod&team=data".to_string()),
+            "Copy mode should format tags as key=value pairs joined by &"
+        );
+        assert_eq!(state.size(), BODY.len() as u64);
+    }
+
+    /// Preservation: tag_mode = Copy with GetObjectTagging error propagates the error.
+    #[tokio::test]
+    async fn preservation_copy_mode_with_tagging_error_propagates_error() {
+        let head_object = head_object_rule();
+        let get_object_tagging = mock!(Client::get_object_tagging)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_error(|| {
+                GetObjectTaggingError::generic(
+                    ErrorMetadata::builder()
+                        .code("AccessDenied")
+                        .message("Access Denied")
+                        .build(),
+                )
+            });
+
+        let client = retrying_mock_client(&[&head_object, &get_object_tagging]);
+        let s3 = s3_source_with_tag_mode(client, MetadataCopy::Copy);
+
+        let result = s3
+            .initialize_state(KEY.to_string(), BUCKET.to_string())
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Copy mode should propagate tagging errors, but got Ok"
+        );
+    }
+
+    /// Preservation: HeadObject size and metadata extraction is consistent regardless of tag_mode.
+    #[tokio::test]
+    async fn preservation_head_object_size_consistent_across_tag_modes() {
+        use aws_sdk_s3::types::Tag;
+
+        // Copy mode - size should be extracted correctly
+        let head_object = head_object_rule();
+        let get_object_tagging = mock!(Client::get_object_tagging)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_output(|| {
+                GetObjectTaggingOutput::builder()
+                    .tag_set(Tag::builder().key("k").value("v").build().unwrap())
+                    .build()
+                    .unwrap()
+            });
+
+        let client = retrying_mock_client(&[&head_object, &get_object_tagging]);
+        let s3 = s3_source_with_tag_mode(client, MetadataCopy::Copy);
+
+        let result = s3
+            .initialize_state(KEY.to_string(), BUCKET.to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            result.size(),
+            BODY.len() as u64,
+            "Copy mode: size should match content_length"
+        );
+    }
+
+    /// Preservation: HeadObject metadata is passed through in Copy mode.
+    #[tokio::test]
+    async fn preservation_head_object_metadata_passed_through() {
+        use aws_sdk_s3::types::Tag;
+
+        let head_object = mock!(Client::head_object)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_output(|| {
+                HeadObjectOutput::builder()
+                    .content_length(BODY.len() as i64)
+                    .metadata("custom-key", "custom-value")
+                    .build()
+            });
+
+        let get_object_tagging = mock!(Client::get_object_tagging)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_output(|| {
+                GetObjectTaggingOutput::builder()
+                    .tag_set(Tag::builder().key("k").value("v").build().unwrap())
+                    .build()
+                    .unwrap()
+            });
+
+        let client = retrying_mock_client(&[&head_object, &get_object_tagging]);
+        let s3 = s3_source_with_tag_mode(client, MetadataCopy::Copy);
+
+        let result = s3
+            .initialize_state(KEY.to_string(), BUCKET.to_string())
+            .await
+            .unwrap();
+
+        let metadata = result.metadata().expect("metadata should be present");
+        assert_eq!(
+            metadata.get("custom-key").map(String::as_str),
+            Some("custom-value")
+        );
+    }
+}
+
+// These proptest-based tests verify that Copy mode correctly formats arbitrary
+// tag sets and that behavior is consistent across tag_mode values.
+#[cfg(test)]
+mod preservation_property_tests {
+    use super::*;
+    use crate::cli::MetadataCopy;
+    use crate::io::S3Client;
+    use aws_sdk_s3::Client;
+    use aws_sdk_s3::config::SharedAsyncSleep;
+    use aws_sdk_s3::config::retry::RetryConfig;
+    use aws_sdk_s3::operation::get_object_tagging::GetObjectTaggingOutput;
+    use aws_sdk_s3::operation::head_object::HeadObjectOutput;
+    use aws_sdk_s3::types::Tag;
+    use aws_smithy_async::rt::sleep::TokioSleep;
+    use aws_smithy_mocks::{MockResponseInterceptor, Rule, RuleMode, mock};
+    use proptest::prelude::*;
+    use std::sync::Arc;
+
+    const BUCKET: &str = "bucket";
+    const KEY: &str = "key";
+
+    /// Build a mock client with given rules.
+    fn mock_client(rules: &[&Rule]) -> Client {
+        let mut interceptor = MockResponseInterceptor::new().rule_mode(RuleMode::MatchAny);
+        for rule in rules {
+            interceptor = interceptor.with_rule(rule);
+        }
+        Client::from_conf(
+            aws_sdk_s3::config::Config::builder()
+                .with_test_defaults_v2()
+                .http_client(aws_smithy_mocks::create_mock_http_client())
+                .sleep_impl(SharedAsyncSleep::new(TokioSleep::new()))
+                .retry_config(RetryConfig::standard().with_max_attempts(1))
+                .interceptor(interceptor)
+                .build(),
+        )
+    }
+
+    /// Build an S3 source with a specific tag_mode.
+    fn s3_with_tag_mode(client: Client, tag_mode: MetadataCopy) -> S3 {
+        S3Builder::default()
+            .with_client(S3Client::new(Arc::new(client), false, false))
+            .with_copy_tags(tag_mode)
+            .with_source(BUCKET, KEY)
+            .build()
+            .unwrap()
+    }
+
+    /// Format tags the same way initialize_state does for comparison.
+    fn format_tags(tags: &[(String, String)]) -> String {
+        tags.iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
+    /// Strategy for generating valid tag key/value strings (non-empty, no special chars that
+    /// would interfere with formatting).
+    fn tag_string_strategy() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_-]{1,20}"
+    }
+
+    /// Strategy for generating a tag set of 1..10 tags with random keys and values.
+    fn tag_set_strategy() -> impl Strategy<Value = Vec<(String, String)>> {
+        prop::collection::vec((tag_string_strategy(), tag_string_strategy()), 1..=10)
+    }
+
+    // Property: Copy mode formats any valid tag set as key1=value1&key2=value2&...
+    // This runs on unfixed code to capture the baseline formatting behavior.
+    proptest! {
+        #[test]
+        fn copy_mode_formats_tags_as_query_string(tags in tag_set_strategy()) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                let expected = format_tags(&tags);
+
+                let head_object = mock!(Client::head_object)
+                    .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+                    .then_output(|| {
+                        HeadObjectOutput::builder()
+                            .content_length(100i64)
+                            .build()
+                    });
+
+                let tags_clone = tags.clone();
+                let get_object_tagging = mock!(Client::get_object_tagging)
+                    .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+                    .then_output(move || {
+                        let mut builder = GetObjectTaggingOutput::builder();
+                        for (k, v) in &tags_clone {
+                            builder = builder.tag_set(
+                                Tag::builder()
+                                    .key(k.as_str())
+                                    .value(v.as_str())
+                                    .build()
+                                    .unwrap(),
+                            );
+                        }
+                        builder.build().unwrap()
+                    });
+
+                let client = mock_client(&[&head_object, &get_object_tagging]);
+                let s3 = s3_with_tag_mode(client, MetadataCopy::Copy);
+
+                let result = s3
+                    .initialize_state(KEY.to_string(), BUCKET.to_string())
+                    .await;
+
+                prop_assert!(result.is_ok(), "Copy mode should succeed with valid tags");
+                let state = result.unwrap();
+                prop_assert_eq!(
+                    state.tags(),
+                    Some(expected),
+                    "Copy mode should format tags as key=value pairs joined by &"
+                );
+                prop_assert_eq!(state.size(), 100u64);
+                Ok(())
+            })?;
+        }
+    }
+
+    // Property: HeadObject size extraction is consistent regardless of tag_mode.
+    // For Copy mode with valid tags, the size should always match content_length.
+    proptest! {
+        #[test]
+        fn head_object_size_consistent_with_copy_mode(size in 1u64..=10_000_000u64) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                let size_i64 = size as i64;
+
+                let head_object = mock!(Client::head_object)
+                    .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+                    .then_output(move || {
+                        HeadObjectOutput::builder()
+                            .content_length(size_i64)
+                            .build()
+                    });
+
+                let get_object_tagging = mock!(Client::get_object_tagging)
+                    .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+                    .then_output(|| {
+                        GetObjectTaggingOutput::builder()
+                            .tag_set(
+                                Tag::builder().key("k").value("v").build().unwrap(),
+                            )
+                            .build()
+                            .unwrap()
+                    });
+
+                let client = mock_client(&[&head_object, &get_object_tagging]);
+                let s3 = s3_with_tag_mode(client, MetadataCopy::Copy);
+
+                let result = s3
+                    .initialize_state(KEY.to_string(), BUCKET.to_string())
+                    .await;
+
+                prop_assert!(result.is_ok(), "Should succeed with valid head object");
+                let state = result.unwrap();
+                prop_assert_eq!(state.size(), size, "Size should match content_length");
+                Ok(())
+            })?;
+        }
     }
 }

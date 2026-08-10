@@ -59,6 +59,7 @@ anyhow = "1"
 tempfile = "3"
 envy = "0.4"
 dotenvy = "0.15"
+proptest = "1"
 
 aws-smithy-mocks = "0.2"
 aws-smithy-async = { version = "1", features = ["rt-tokio"] }
