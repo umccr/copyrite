@@ -165,6 +165,7 @@ pub struct CopyState {
     tags: Option<String>,
     metadata: Option<HashMap<String, String>>,
     additional_ctx: Option<Ctx>,
+    additional_sum: Option<String>,
     etag: Option<String>,
 }
 
@@ -189,6 +190,11 @@ impl CopyState {
         self.additional_ctx.clone()
     }
 
+    /// Get the known value of the additional checksum.
+    pub fn additional_sum(&self) -> Option<String> {
+        self.additional_sum.clone()
+    }
+
     /// Get the source ETag on state initialized.
     pub fn etag(&self) -> Option<String> {
         self.etag.clone()
@@ -201,6 +207,7 @@ impl CopyState {
             tags,
             metadata,
             additional_ctx: None,
+            additional_sum: None,
             etag: None,
         }
     }
@@ -214,6 +221,11 @@ impl CopyState {
     /// Set the additional context.
     pub fn set_additional_ctx(&mut self, additional_ctx: Ctx) {
         self.additional_ctx = Some(additional_ctx);
+    }
+
+    /// Set the known value of the additional checksum from the source sums file.
+    pub fn set_additional_sum(&mut self, additional_sum: Option<String>) {
+        self.additional_sum = additional_sum;
     }
 }
 

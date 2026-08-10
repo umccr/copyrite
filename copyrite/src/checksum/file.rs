@@ -253,6 +253,11 @@ impl Checksum {
     pub fn new(checksum: String) -> Self {
         Self(checksum)
     }
+
+    /// Get the inner checksum value.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
 }
 
 #[cfg(test)]

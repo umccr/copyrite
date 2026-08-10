@@ -357,9 +357,23 @@ impl StandardCtx {
         !matches!(self, StandardCtx::QuickXor)
     }
 
-    /// Is this an AWS additional checksum that can be specified.
+    /// Is this an AWS additional checksum that can be specified. S3 supports all algorithms
+    /// except QuickXor, including MD5 via the `x-amz-checksum-md5` header.
     pub fn is_aws_additional_ctx(&self) -> bool {
-        !matches!(self, StandardCtx::QuickXor | StandardCtx::MD5(_))
+        !matches!(self, StandardCtx::QuickXor)
+    }
+
+    /// Can the SDK automatically compute this checksum when uploading. S3 accepts MD5, SHA512
+    /// and the XXHash family only as precalculated values.
+    pub fn is_sdk_computable_ctx(&self) -> bool {
+        matches!(
+            self,
+            StandardCtx::CRC64NVME(_, _)
+                | StandardCtx::CRC32C(_, _)
+                | StandardCtx::CRC32(_, _)
+                | StandardCtx::SHA1(_)
+                | StandardCtx::SHA256(_)
+        )
     }
 }
 
