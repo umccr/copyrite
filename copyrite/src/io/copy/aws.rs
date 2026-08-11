@@ -317,10 +317,8 @@ impl S3 {
                 .create_multipart_upload(|b| {
                     let b = match checksum {
                         UploadChecksum::Computed(algorithm) => b.checksum_algorithm(algorithm),
-                        UploadChecksum::Precalculated(ctx, _) => b
-                            .checksum_algorithm(ChecksumAlgorithm::from(Ctx::Regular(*ctx)))
-                            .checksum_type(ChecksumType::FullObject),
-                        UploadChecksum::None => b,
+                        // Precalculated values are only sent at `CompleteMultipartUpload`.
+                        UploadChecksum::Precalculated(_, _) | UploadChecksum::None => b,
                     };
                     b.set_tagging(tagging)
                         .set_metadata(metadata)
@@ -1504,8 +1502,7 @@ mod test {
         let expected = BASE64_STANDARD.encode(hex::decode(EXPECTED_MD5_SUM).unwrap());
         let create = mock!(Client::create_multipart_upload)
             .match_requests(|req| {
-                req.checksum_algorithm() == Some(&ChecksumAlgorithm::Md5)
-                    && req.checksum_type() == Some(&ChecksumType::FullObject)
+                req.checksum_algorithm().is_none() && req.checksum_type().is_none()
             })
             .sequence()
             .output(|| {
