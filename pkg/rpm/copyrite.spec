@@ -23,7 +23,11 @@ install -D target/release/%{name} %{buildroot}%{_bindir}/%{name}
 %{_bindir}/%{name}
 
 %changelog
+* Tue Aug 11 2026 Marko Malenic <mmalenic1@gmail.com> - 0.9.1-1
+- Do not send pre-calculated checksum on create multipart (@mmalenic)
+
 * Tue Aug 11 2026 Marko Malenic <mmalenic1@gmail.com> - 0.9.0-1
+- Regenerate Debian and RPM changelogs (@mmalenic)
 - Expand cases where server-side copies can be used automatically (@mmalenic)
 - Add no-precalculated-checksum compatibility option (@mmalenic)
 - Send precalculated values for checksums the SDK cannot compute (@mmalenic)
