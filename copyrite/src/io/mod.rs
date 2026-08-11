@@ -484,6 +484,7 @@ impl SecretsManagerCredentials {
 }
 
 /// Credential overrides from CLI args or environment variables.
+#[derive(PartialEq, Eq)]
 pub struct CredentialOverrides {
     access_key_id: Option<String>,
     secret_access_key: Option<String>,

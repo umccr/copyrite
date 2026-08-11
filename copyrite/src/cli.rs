@@ -536,8 +536,9 @@ impl MetadataCopy {
 /// Mode to execute copy task in.
 #[derive(Debug, Clone, ValueEnum, Copy, Default, Deserialize, Serialize)]
 pub enum CopyMode {
-    /// Always use server-side copy operations if they are available. This may still download and
-    /// upload if it is not possible to server-side copy.
+    /// Use server-side copy operations if they are available. This falls back to download-upload
+    /// when the destination cannot directly read the source object, e.g. when copying between
+    /// different endpoints or with credentials that cannot access the source.
     #[default]
     ServerSide,
     /// Download the object first and then upload it to the destination.
@@ -596,7 +597,7 @@ impl StalledStreamProtection {
 }
 
 /// Details of how to locate credentials or specify no credentials needed
-#[derive(Debug, Clone, ValueEnum, Copy, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, ValueEnum, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum CredentialProvider {
     /// Use the default mechanism of the SDK that obtains credentials from the system
     #[default]
@@ -717,6 +718,31 @@ impl Copy {
         Ok(result)
     }
 
+    /// Determine whether a server-side copy is possible by fetching the source object's ETag with
+    /// both clients.
+    async fn server_side_allowed(
+        source: &Provider,
+        source_client: &S3Client,
+        destination_client: &S3Client,
+    ) -> bool {
+        let Provider::S3 { bucket, key } = source else {
+            return false;
+        };
+
+        let source_etag = source_client
+            .head_object(|builder| builder.bucket(bucket.as_str()).key(key.as_str()))
+            .await
+            .ok()
+            .and_then(|head| head.e_tag);
+        let destination_etag = destination_client
+            .head_object(|builder| builder.bucket(bucket.as_str()).key(key.as_str()))
+            .await
+            .ok()
+            .and_then(|head| head.e_tag);
+
+        source_etag.is_some() && source_etag == destination_etag
+    }
+
     /// Perform the copy sub command from the args.
     pub async fn copy(
         self,
@@ -728,6 +754,24 @@ impl Copy {
         ui: bool,
     ) -> stats::Result<CopyStats> {
         let now = Instant::now();
+
+        let source_provider = Provider::try_from(self.source.as_str())?;
+        let destination_provider = Provider::try_from(self.destination.as_str())?;
+
+        // Server-side copies require the destination client to read the source object directly.
+        // The same configuration guarantees this, otherwise probe the source object with both
+        // clients to determine whether the destination sees the same object as the source.
+        let copy_mode = if self.copy_mode.is_download_upload()
+            || credentials.is_same_configuration()
+            || !source_provider.is_s3()
+            || !destination_provider.is_s3()
+            || Self::server_side_allowed(&source_provider, &source_client, &destination_client)
+                .await
+        {
+            self.copy_mode
+        } else {
+            CopyMode::DownloadUpload
+        };
 
         // Verify the source exists before continuing.
         let source_exists = ObjectSumsBuilder::default()
@@ -745,7 +789,7 @@ impl Copy {
                 source: self.source,
                 destination: self.destination,
                 bytes_transferred: 0,
-                copy_mode: self.copy_mode,
+                copy_mode,
                 success_reason: None,
                 skipped: false,
                 sums_mismatch: false,
@@ -757,9 +801,7 @@ impl Copy {
         }
 
         // If source and destination refer to the same object, treat as a no-op.
-        if Provider::try_from(self.source.as_str())?
-            .is_same_location(&Provider::try_from(self.destination.as_str())?)
-        {
+        if source_provider.is_same_location(&destination_provider) {
             if ui {
                 println!(
                     "{} source and destination are the same ({}), nothing to copy",
@@ -773,7 +815,7 @@ impl Copy {
                 source: self.source,
                 destination: self.destination,
                 bytes_transferred: 0,
-                copy_mode: self.copy_mode,
+                copy_mode,
                 success_reason: Some(CopySuccessReason::message(
                     "source and destination are the same object",
                 )),
@@ -820,7 +862,7 @@ impl Copy {
                         CopyStats::from_check_stats(
                             self.source.to_string(),
                             self.destination.to_string(),
-                            self.copy_mode,
+                            copy_mode,
                             *err,
                             false,
                             false,
@@ -839,7 +881,7 @@ impl Copy {
                         source: self.source,
                         destination: self.destination,
                         bytes_transferred: 0,
-                        copy_mode: self.copy_mode,
+                        copy_mode,
                         success_reason: reason.clone(),
                         skipped: true,
                         sums_mismatch: false,
@@ -879,12 +921,13 @@ impl Copy {
             }
         }
 
-        // The copy mode must be download-upload if not using default credential providers.
-        let copy_mode = if credentials.is_default() {
-            self.copy_mode
-        } else {
-            CopyMode::DownloadUpload
-        };
+        if ui && self.copy_mode.is_server_side() && copy_mode.is_download_upload() {
+            println!(
+                "{} destination cannot read the source directly, copying using {}",
+                style("note:").cyan().bold(),
+                style(CopyMode::DownloadUpload).green(),
+            );
+        }
 
         let result = CopyTaskBuilder::default()
             .with_source(self.source.to_string())
@@ -923,7 +966,7 @@ impl Copy {
                     CopyStats::from_check_stats(
                         self.source.to_string(),
                         self.destination.to_string(),
-                        self.copy_mode,
+                        copy_mode,
                         *err,
                         false,
                         false,
@@ -1660,16 +1703,16 @@ impl Credentials {
         S3Client::new_from_cli_destination(self, compatibility).await
     }
 
-    /// Check if the default credentials are being used without any overrides.
-    pub fn is_default(&self) -> bool {
-        self.effective_source_credential_provider().is_default()
-            && self
-                .effective_destination_credential_provider()
-                .is_default()
-            && self.effective_source_endpoint_url().is_none()
-            && self.effective_destination_endpoint_url().is_none()
-            && !self.source_overrides().any()
-            && !self.destination_overrides().any()
+    /// Whether the source and destination resolve to the same effective configuration.
+    /// When true, a server-side copy issued on the destination client reads the same
+    /// object the source client has.
+    pub fn is_same_configuration(&self) -> bool {
+        self.effective_source_credential_provider()
+            == self.effective_destination_credential_provider()
+            && self.effective_source_profile() == self.effective_destination_profile()
+            && self.effective_source_secret() == self.effective_destination_secret()
+            && self.effective_source_endpoint_url() == self.effective_destination_endpoint_url()
+            && self.source_overrides() == self.destination_overrides()
     }
 
     /// Check if any source or destination options are set.
@@ -1718,5 +1761,177 @@ impl Credentials {
                 .clone()
                 .or(self.session_token.clone()),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_s3::Client;
+    use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
+    use aws_smithy_mocks::{MockResponseInterceptor, Rule, RuleMode, mock};
+    use aws_smithy_types::error::ErrorMetadata;
+    use std::sync::Arc;
+
+    fn mock_s3_client(rule: Rule) -> S3Client {
+        let interceptor = MockResponseInterceptor::new()
+            .rule_mode(RuleMode::MatchAny)
+            .with_rule(&rule);
+        S3Client::new(
+            Arc::new(Client::from_conf(
+                aws_sdk_s3::config::Config::builder()
+                    .with_test_defaults_v2()
+                    .http_client(aws_smithy_mocks::create_mock_http_client())
+                    .interceptor(interceptor)
+                    .build(),
+            )),
+            false,
+            false,
+        )
+    }
+
+    fn head_etag_client(etag: &str) -> S3Client {
+        let etag = etag.to_string();
+        mock_s3_client(
+            mock!(Client::head_object)
+                .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+                .then_output(move || HeadObjectOutput::builder().e_tag(etag.as_str()).build()),
+        )
+    }
+
+    fn head_error_client() -> S3Client {
+        mock_s3_client(mock!(Client::head_object).then_error(|| {
+            HeadObjectError::generic(ErrorMetadata::builder().code("AccessDenied").build())
+        }))
+    }
+
+    fn source_provider() -> Provider {
+        Provider::parse_s3_url("s3://bucket/key").unwrap()
+    }
+
+    fn credentials(args: &[&str]) -> Credentials {
+        let command = [
+            "copyrite",
+            "copy",
+            "s3://source/key",
+            "s3://destination/key",
+        ]
+        .into_iter()
+        .chain(args.iter().copied());
+        Command::parse_from_iter(command).unwrap().credentials
+    }
+
+    #[tokio::test]
+    async fn server_side_allowed_matching_etags() {
+        assert!(
+            Copy::server_side_allowed(
+                &source_provider(),
+                &head_etag_client("etag"),
+                &head_etag_client("etag"),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn server_side_not_allowed_different_etags() {
+        assert!(
+            !Copy::server_side_allowed(
+                &source_provider(),
+                &head_etag_client("etag"),
+                &head_etag_client("different-etag"),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn server_side_not_allowed_destination_error() {
+        assert!(
+            !Copy::server_side_allowed(
+                &source_provider(),
+                &head_etag_client("etag"),
+                &head_error_client(),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn server_side_not_allowed_source_error() {
+        assert!(
+            !Copy::server_side_allowed(
+                &source_provider(),
+                &head_error_client(),
+                &head_etag_client("etag"),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn server_side_not_allowed_file_source() {
+        assert!(
+            !Copy::server_side_allowed(
+                &Provider::parse_file_url("file"),
+                &head_etag_client("etag"),
+                &head_etag_client("etag"),
+            )
+            .await
+        );
+    }
+
+    #[test]
+    fn same_configuration_defaults() {
+        assert!(credentials(&[]).is_same_configuration());
+    }
+
+    #[test]
+    fn same_configuration_shared_options() {
+        assert!(credentials(&["--endpoint-url", "http://localhost:8000"]).is_same_configuration());
+        assert!(
+            credentials(&["--credential-provider", "aws-profile", "--profile", "name"])
+                .is_same_configuration()
+        );
+        assert!(
+            credentials(&["--access-key-id", "id", "--secret-access-key", "key"])
+                .is_same_configuration()
+        );
+    }
+
+    #[test]
+    fn same_configuration_equal_prefixed_options() {
+        assert!(
+            credentials(&[
+                "--source-endpoint-url",
+                "http://localhost:8000",
+                "--destination-endpoint-url",
+                "http://localhost:8000",
+            ])
+            .is_same_configuration()
+        );
+    }
+
+    #[test]
+    fn different_configuration_prefixed_options() {
+        assert!(
+            !credentials(&["--source-endpoint-url", "http://localhost:8000"])
+                .is_same_configuration()
+        );
+        assert!(
+            !credentials(&["--destination-credential-provider", "no-credentials"])
+                .is_same_configuration()
+        );
+        assert!(!credentials(&["--source-profile", "name"]).is_same_configuration());
+        assert!(!credentials(&["--source-access-key-id", "id"]).is_same_configuration());
+        assert!(
+            !credentials(&[
+                "--endpoint-url",
+                "http://localhost:8000",
+                "--destination-endpoint-url",
+                "http://localhost:9000",
+            ])
+            .is_same_configuration()
+        );
     }
 }
