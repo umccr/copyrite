@@ -1,5 +1,12 @@
+copyrite (0.9.1-1) unstable; urgency=low
+
+  * Do not send pre-calculated checksum on create multipart (@mmalenic)
+
+ -- Marko Malenic <mmalenic1@gmail.com>  Tue, 11 Aug 2026 04:55:44 +0000
+
 copyrite (0.9.0-1) unstable; urgency=low
 
+  * Regenerate Debian and RPM changelogs (@mmalenic)
   * Expand cases where server-side copies can be used automatically (@mmalenic)
   * Add no-precalculated-checksum compatibility option (@mmalenic)
   * Send precalculated values for checksums the SDK cannot compute (@mmalenic)
@@ -11,7 +18,7 @@ copyrite (0.9.0-1) unstable; urgency=low
   * Also need to set publish = false in release-plz.toml (@mmalenic)
   * Release plz config related to workspace packages (@mmalenic)
 
- -- Marko Malenic <mmalenic1@gmail.com>  Tue, 11 Aug 2026 00:08:24 +0000
+ -- Marko Malenic <mmalenic1@gmail.com>  Tue, 11 Aug 2026 00:37:25 +0000
 
 copyrite (0.8.0-1) unstable; urgency=low
 
