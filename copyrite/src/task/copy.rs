@@ -3,7 +3,7 @@
 
 use crate::checksum::Ctx;
 use crate::checksum::aws_etag::PREFERRED_PART_SIZES;
-use crate::checksum::file::SumsFile;
+use crate::checksum::file::{Checksum, SumsFile};
 use crate::cli::{CopyMode, MetadataCopy};
 use crate::error::Error::CopyError;
 use crate::error::{ApiError, Error, Result};
@@ -44,6 +44,7 @@ pub struct CopyTaskBuilder {
 pub struct CopySettings {
     part_size: Option<u64>,
     ctx: Ctx,
+    sum: Option<String>,
     object_size: u64,
 }
 
@@ -61,13 +62,20 @@ impl CopySettings {
         Self {
             part_size,
             ctx,
+            sum: None,
             object_size,
         }
     }
 
+    /// Set the known value of the additional checksum from the source sums file.
+    pub fn with_sum(mut self, sum: Option<String>) -> Self {
+        self.sum = sum;
+        self
+    }
+
     /// Get the inner values.
-    pub fn into_inner(self) -> (Option<u64>, Ctx, u64) {
-        (self.part_size, self.ctx, self.object_size)
+    pub fn into_inner(self) -> (Option<u64>, Ctx, Option<String>, u64) {
+        (self.part_size, self.ctx, self.sum, self.object_size)
     }
 }
 
@@ -203,7 +211,8 @@ impl CopyTaskBuilder {
                 )
             });
         if let Some((part_size, ctx)) = ctx {
-            return Ok(CopySettings::new(Some(part_size), ctx, info.size));
+            let sum = sums.checksums.get(&ctx).cloned().map(Checksum::into_inner);
+            return Ok(CopySettings::new(Some(part_size), ctx, info.size).with_sum(sum));
         }
 
         // Otherwise, check if a preferred single part checksum exists.
@@ -213,25 +222,27 @@ impl CopyTaskBuilder {
             .find(|ctx| ctx.is_preferred_single_part(&destination))
             .take_if(|_| Self::is_single_part(info.size, info.max_part_size));
         if let Some(ctx) = ctx {
-            return Ok(CopySettings::new(None, ctx.clone(), info.size));
+            let sum = sums.checksums.get(ctx).cloned().map(Checksum::into_inner);
+            return Ok(CopySettings::new(None, ctx.clone(), info.size).with_sum(sum));
         }
 
         // If none of the above apply, fall back based on the object size, keeping the best
         // available checksum as the additional context to set on the copy.
-        let additional_ctx = sums.checksums.keys().next().cloned().unwrap_or_default();
+        let (additional_ctx, sum) = sums
+            .checksums
+            .iter()
+            .next()
+            .map(|(ctx, sum)| (ctx.clone(), Some(sum.clone().into_inner())))
+            .unwrap_or_default();
         if Self::is_single_part(info.size, info.max_part_size) {
-            Ok(CopySettings::new(None, additional_ctx, info.size))
+            Ok(CopySettings::new(None, additional_ctx, info.size).with_sum(sum))
         } else if let Some(part_size) = Self::preferred_multipart_part_size(
             info.size,
             info.max_parts,
             info.max_part_size,
             info.min_part_size,
         ) {
-            Ok(CopySettings::new(
-                Some(part_size),
-                additional_ctx,
-                info.size,
-            ))
+            Ok(CopySettings::new(Some(part_size), additional_ctx, info.size).with_sum(sum))
         } else {
             Err(CopyError(format!(
                 "failed to find a valid part size for object size `{}`",
@@ -310,8 +321,11 @@ impl CopyTaskBuilder {
         };
 
         // Use the additional sum from the settings if available or the default.
-        let additional_ctx = settings
-            .map(|settings| settings.into_inner().1)
+        let (additional_ctx, additional_sum) = settings
+            .map(|settings| {
+                let (_, ctx, sum, _) = settings.into_inner();
+                (ctx, sum)
+            })
             .unwrap_or_default();
 
         let threshold = self
@@ -325,7 +339,8 @@ impl CopyTaskBuilder {
             return if Self::is_multipart(size, part_size, max_parts, max_part_size, min_part_size) {
                 Ok((
                     self,
-                    CopySettings::new(Some(part_size), additional_ctx, size),
+                    CopySettings::new(Some(part_size), additional_ctx, size)
+                        .with_sum(additional_sum),
                 ))
             } else {
                 Err(CopyError(format!(
@@ -348,7 +363,8 @@ impl CopyTaskBuilder {
             {
                 Ok((
                     self,
-                    CopySettings::new(Some(part_size), additional_ctx, size),
+                    CopySettings::new(Some(part_size), additional_ctx, size)
+                        .with_sum(additional_sum),
                 ))
             } else {
                 Err(err_fn())
@@ -357,7 +373,10 @@ impl CopyTaskBuilder {
 
         // Otherwise use single part if possible.
         if Self::is_single_part(size, max_part_size) {
-            return Ok((self, CopySettings::new(None, additional_ctx, size)));
+            return Ok((
+                self,
+                CopySettings::new(None, additional_ctx, size).with_sum(additional_sum),
+            ));
         }
 
         // This condition may occur if the size is greater than the possible single part upload
@@ -455,6 +474,7 @@ impl CopyTaskBuilder {
 
         let copy_task = CopyTask {
             additional_sums: settings.ctx,
+            additional_sum: settings.sum,
             part_size: settings.part_size,
             source,
             source_copy,
@@ -505,6 +525,7 @@ pub type CopyTaskResult = result::Result<CopyTask, CopyTaskError>;
 /// Execute the copy task.
 pub struct CopyTask {
     additional_sums: Ctx,
+    additional_sum: Option<String>,
     part_size: Option<u64>,
     source: Provider,
     destination: Provider,
@@ -642,6 +663,7 @@ impl CopyTask {
 
     async fn do_copy(&mut self) -> Result<()> {
         self.state.set_additional_ctx(self.additional_sums.clone());
+        self.state.set_additional_sum(self.additional_sum.clone());
 
         match (self.copy_mode, self.part_size) {
             (CopyMode::ServerSide, None) => {
@@ -663,7 +685,7 @@ impl CopyTask {
             (CopyMode::DownloadUpload, None) => {
                 // `download` attaches a reopen factory, so the upload body is retryable: the SDK
                 // can retry transient failures without buffering the object.
-                let data = self.source_copy.download(None).await?;
+                let data = self.source_copy.download(None, &self.state).await?;
                 let upload = self
                     .destination_copy
                     .upload(data, None, &self.state)
@@ -679,7 +701,7 @@ impl CopyTask {
 
                 self.run_multipart(
                     part_size,
-                    |option, _| async move { source.download(Some(option)).await },
+                    |option, state| async move { source.download(Some(option), &state).await },
                     |data, options, state| async move {
                         destination.upload(data, Some(options), &state).await
                     },
@@ -774,6 +796,7 @@ pub(crate) mod test {
         async fn download(
             &self,
             _multi_part: Option<MultiPartOptions>,
+            _state: &CopyState,
         ) -> error::Result<crate::io::copy::CopyContent> {
             unimplemented!()
         }
@@ -891,6 +914,7 @@ pub(crate) mod test {
 
         let mut task = CopyTask {
             additional_sums: Ctx::default(),
+            additional_sum: None,
             part_size: Some(part_size),
             source: Provider::try_from("s3://bucket/source").unwrap(),
             destination: Provider::try_from("s3://bucket/destination").unwrap(),

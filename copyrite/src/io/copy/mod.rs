@@ -159,12 +159,14 @@ impl From<(Part, String)> for CopyResult {
 }
 
 /// The state of the copy operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CopyState {
     size: u64,
     tags: Option<String>,
     metadata: Option<HashMap<String, String>>,
     additional_ctx: Option<Ctx>,
+    additional_sum: Option<String>,
+    etag: Option<String>,
 }
 
 impl CopyState {
@@ -188,6 +190,16 @@ impl CopyState {
         self.additional_ctx.clone()
     }
 
+    /// Get the known value of the additional checksum.
+    pub fn additional_sum(&self) -> Option<String> {
+        self.additional_sum.clone()
+    }
+
+    /// Get the source ETag on state initialized.
+    pub fn etag(&self) -> Option<String> {
+        self.etag.clone()
+    }
+
     /// Create a new state.
     pub fn new(size: u64, tags: Option<String>, metadata: Option<HashMap<String, String>>) -> Self {
         Self {
@@ -195,12 +207,25 @@ impl CopyState {
             tags,
             metadata,
             additional_ctx: None,
+            additional_sum: None,
+            etag: None,
         }
+    }
+
+    /// Set the source ETag.
+    pub fn with_etag(mut self, etag: Option<String>) -> Self {
+        self.etag = etag;
+        self
     }
 
     /// Set the additional context.
     pub fn set_additional_ctx(&mut self, additional_ctx: Ctx) {
         self.additional_ctx = Some(additional_ctx);
+    }
+
+    /// Set the known value of the additional checksum from the source sums file.
+    pub fn set_additional_sum(&mut self, additional_sum: Option<String>) {
+        self.additional_sum = additional_sum;
     }
 }
 
@@ -215,7 +240,11 @@ pub trait ObjectCopy: DynClone {
     ) -> Result<CopyResult>;
 
     /// Download the object to memory.
-    async fn download(&self, multi_part: Option<MultiPartOptions>) -> Result<CopyContent>;
+    async fn download(
+        &self,
+        multi_part: Option<MultiPartOptions>,
+        state: &CopyState,
+    ) -> Result<CopyContent>;
 
     /// Upload the object to the destination.
     async fn upload(

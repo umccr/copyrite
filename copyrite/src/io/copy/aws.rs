@@ -1,7 +1,9 @@
 //! AWS checksums and functionality.
 //!
 
+use crate::checksum::Ctx;
 use crate::checksum::file::SumsFile;
+use crate::checksum::standard::StandardCtx;
 use crate::cli::MetadataCopy;
 use crate::error::Error::{CopyError, ParseError};
 use crate::error::{ApiError, Error, Result};
@@ -9,21 +11,24 @@ use crate::io::S3Client;
 use crate::io::copy::{
     CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part, Reopen,
 };
+use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::get_object_tagging::{GetObjectTaggingError, GetObjectTaggingOutput};
 use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
 use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
 use aws_sdk_s3::operation::upload_part::UploadPartOutput;
 use aws_sdk_s3::types::{
-    ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart, CopyPartResult, MetadataDirective,
-    TaggingDirective,
+    ChecksumAlgorithm, ChecksumType, CompletedMultipartUpload, CompletedPart, CopyPartResult,
+    MetadataDirective, TaggingDirective,
 };
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::byte_stream::ByteStream;
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use bytes::Bytes;
 use futures_util::stream::poll_fn;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use http_body::Frame;
 use http_body_util::StreamBody;
 use std::collections::HashMap;
@@ -34,7 +39,7 @@ use std::result;
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
-use tokio_util::io::ReaderStream;
+use tokio_util::io::{ReaderStream, StreamReader};
 
 /// The number of chunks buffered when re-trying an SDK body.
 const REOPEN_CHANNEL_CAPACITY: usize = 16;
@@ -197,6 +202,17 @@ impl TryFrom<Part> for CompletedPart {
     }
 }
 
+/// The additional checksum to attach to an upload.
+#[derive(Debug, Clone)]
+enum UploadChecksum {
+    /// An algorithm the SDK computes while streaming the upload.
+    Computed(ChecksumAlgorithm),
+    /// A precalculated base64 digest for an algorithm.
+    Precalculated(Box<StandardCtx>, String),
+    /// No additional checksum applies to this upload.
+    None,
+}
+
 /// Represents an S3 bucket and key.
 #[derive(Debug, Clone)]
 pub struct BucketKey {
@@ -247,7 +263,7 @@ impl S3 {
             .ok_or_else(|| Error::aws_error("missing size".to_string()))?;
         let metadata = head.metadata;
 
-        Ok(CopyState::new(size, tags, metadata))
+        Ok(CopyState::new(size, tags, metadata).with_etag(head.e_tag))
     }
 
     /// Get the head object output.
@@ -288,41 +304,39 @@ impl S3 {
     }
 
     /// Create a new multipart upload.
-    pub async fn get_multipart_upload(
+    async fn get_multipart_upload(
         &self,
         key: &str,
         bucket: &str,
         tagging: Option<String>,
         metadata: Option<HashMap<String, String>>,
-        additional_checksum: Option<ChecksumAlgorithm>,
+        checksum: UploadChecksum,
     ) -> Result<(String, Vec<ApiError>)> {
-        let do_upload = |tagging, metadata, additional_checksum| async {
+        let do_upload = |tagging, metadata, checksum: UploadChecksum| async {
             self.client
                 .create_multipart_upload(|b| {
+                    let b = match checksum {
+                        UploadChecksum::Computed(algorithm) => b.checksum_algorithm(algorithm),
+                        UploadChecksum::Precalculated(ctx, _) => b
+                            .checksum_algorithm(ChecksumAlgorithm::from(Ctx::Regular(*ctx)))
+                            .checksum_type(ChecksumType::FullObject),
+                        UploadChecksum::None => b,
+                    };
                     b.set_tagging(tagging)
                         .set_metadata(metadata)
-                        .set_checksum_algorithm(additional_checksum)
                         .bucket(bucket)
                         .key(key)
                 })
                 .await
         };
 
-        let result = do_upload(
-            tagging.clone(),
-            metadata.clone(),
-            additional_checksum.clone(),
-        )
-        .await;
+        let result = do_upload(tagging.clone(), metadata.clone(), checksum.clone()).await;
 
         // Retry if this is a best effort copy and the error was access denied.
         let (upload, err) = if let Err(ref err) = result {
             let err = ApiError::from(err);
             if self.tag_mode.is_best_effort() && err.is_access_denied() {
-                (
-                    do_upload(None, metadata, additional_checksum).await?,
-                    vec![err],
-                )
+                (do_upload(None, metadata, checksum).await?, vec![err])
             } else {
                 (result?, vec![])
             }
@@ -350,6 +364,48 @@ impl S3 {
             .ok_or_else(|| CopyError("missing destination".to_string()))
     }
 
+    /// The additional checksum algorithm for the SDK or S3 to compute during an upload or copy.
+    fn additional_checksum_algorithm(state: &CopyState) -> Option<ChecksumAlgorithm> {
+        state
+            .additional_ctx()
+            .map(Ctx::into_standard)
+            .filter(StandardCtx::is_sdk_computable_ctx)
+            .map(|ctx| ChecksumAlgorithm::from(Ctx::Regular(ctx)))
+    }
+
+    /// A precalculated additional checksum for algorithms that S3 accepts but the SDK cannot
+    /// compute during an upload.
+    fn precalculated_sum(state: &CopyState) -> Option<(StandardCtx, String)> {
+        let ctx = match state.additional_ctx()? {
+            Ctx::Regular(ctx) => ctx,
+            Ctx::AWSEtag(_) => return None,
+        };
+        if ctx.is_sdk_computable_ctx() || !ctx.is_aws_additional_ctx() {
+            return None;
+        }
+
+        // S3 validates the value against the algorithm, so an incorrect sum fails the request
+        // rather than storing a bad checksum.
+        let digest = hex::decode(state.additional_sum()?).ok()?;
+
+        Some((ctx, BASE64_STANDARD.encode(digest)))
+    }
+
+    /// The additional checksum to attach to an upload.
+    fn upload_checksum(&self, state: &CopyState) -> UploadChecksum {
+        if let Some(algorithm) = Self::additional_checksum_algorithm(state) {
+            UploadChecksum::Computed(algorithm)
+        } else if self.client.no_precalculated_checksum() {
+            // Some endpoints reject uploads that declare checksum algorithms which are not
+            // computed by the SDK, so no additional checksum can be applied here.
+            UploadChecksum::None
+        } else if let Some((ctx, sum)) = Self::precalculated_sum(state) {
+            UploadChecksum::Precalculated(Box::new(ctx), sum)
+        } else {
+            UploadChecksum::None
+        }
+    }
+
     /// Copy the object using the `CopyObject` operation.
     pub async fn copy_object(&self, state: &CopyState) -> Result<CopyResult> {
         let size = state.size();
@@ -360,8 +416,10 @@ impl S3 {
         let source = self.get_source()?;
         let destination = self.get_destination()?;
 
-        let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
+        // When no algorithm is set S3 copies the checksum algorithm from the source object.
+        let additional_checksum = Self::additional_checksum_algorithm(state);
         let do_copy = |tagging, tagging_set, metadata, metadata_set, additional_checksum| async {
+            let etag = state.etag();
             self.client
                 .copy_object(move |b| {
                     b.tagging_directive(tagging)
@@ -370,6 +428,7 @@ impl S3 {
                         .set_metadata(metadata_set)
                         .set_checksum_algorithm(additional_checksum)
                         .copy_source(Self::copy_source(&source.key, &source.bucket))
+                        .set_copy_source_if_match(etag)
                         .key(&destination.key)
                         .bucket(&destination.bucket)
                 })
@@ -446,8 +505,6 @@ impl S3 {
         let source = self.get_source()?;
         let destination = self.get_destination()?;
 
-        let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
-
         // Create the upload id if it doesn't exist or use the existing one.
         let (upload_id, api_errors) = if let Some(upload_id) = &multi_part.upload_id {
             (upload_id.to_string(), vec![])
@@ -457,7 +514,7 @@ impl S3 {
                 &destination.bucket,
                 tagging,
                 state.metadata(),
-                additional_checksum,
+                self.upload_checksum(state),
             )
             .await?
         };
@@ -467,6 +524,7 @@ impl S3 {
             let range = multi_part
                 .format_range()
                 .ok_or_else(|| Error::aws_error("invalid range".to_string()))?;
+            let etag = state.etag();
             let response = self
                 .client
                 .upload_part_copy(|b| {
@@ -475,6 +533,7 @@ impl S3 {
                         .key(&destination.key)
                         .bucket(&destination.bucket)
                         .copy_source(Self::copy_source(&source.key, &source.bucket))
+                        .set_copy_source_if_match(etag)
                         .copy_source_range(range)
                 })
                 .await?;
@@ -497,6 +556,7 @@ impl S3 {
                 &destination.bucket,
                 upload_id.to_string(),
                 parts,
+                self.upload_checksum(state),
             )
             .await?;
 
@@ -504,29 +564,101 @@ impl S3 {
         }
     }
 
-    /// Get the object from S3. The returned content carries a reopen function that re-issues the
-    /// same ranged get.
-    pub async fn get_object(&self, multi_part: Option<MultiPartOptions>) -> Result<CopyContent> {
+    /// Send the ranged `GetObject` request for the source.
+    async fn send_get_object(
+        &self,
+        multi_part: Option<MultiPartOptions>,
+        etag: Option<String>,
+    ) -> Result<GetObjectOutput> {
         let source = self.get_source()?;
+        let range = multi_part
+            .as_ref()
+            .and_then(|multi_part| multi_part.format_range());
 
+        Ok(self
+            .client
+            .get_object(|b| {
+                b.bucket(&source.bucket)
+                    .key(&source.key)
+                    .set_range(range)
+                    .set_if_match(etag)
+            })
+            .await?)
+    }
+
+    /// Stream the chunks of a reader that is only opened when the stream is first polled.
+    fn lazy_reader_stream<F, Fut, R>(
+        open: F,
+    ) -> impl Stream<Item = result::Result<Bytes, io::Error>>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<R>> + Send + 'static,
+        R: AsyncRead + Send + Unpin + 'static,
+    {
+        let (tx, mut rx) =
+            mpsc::channel::<result::Result<Bytes, io::Error>>(REOPEN_CHANNEL_CAPACITY);
+
+        let mut pending = Some((tx, open));
+        poll_fn(move |cx| {
+            if let Some((tx, open)) = pending.take() {
+                tokio::spawn(async move {
+                    match open().await {
+                        Ok(reader) => {
+                            let mut stream =
+                                ReaderStream::with_capacity(reader, READER_STREAM_CAPACITY);
+                            while let Some(chunk) = stream.next().await {
+                                if tx.send(chunk).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let _ = tx.send(Err(io::Error::other(err.to_string()))).await;
+                        }
+                    }
+                });
+            }
+
+            rx.poll_recv(cx)
+        })
+    }
+
+    /// Wrap the source object in a reader that only sends the `GetObject` request when it is
+    /// first polled.
+    fn lazy_object_reader(
+        &self,
+        multi_part: Option<MultiPartOptions>,
+        etag: Option<String>,
+    ) -> Box<dyn AsyncRead + Sync + Send + Unpin> {
+        let this = self.clone();
+        Box::new(StreamReader::new(Self::lazy_reader_stream(
+            move || async move {
+                Ok(this
+                    .send_get_object(multi_part, etag)
+                    .await?
+                    .body
+                    .into_async_read())
+            },
+        )))
+    }
+
+    /// Get the object from S3. The request is not sent until the content is first read.
+    pub async fn get_object(
+        &self,
+        multi_part: Option<MultiPartOptions>,
+        etag: Option<String>,
+    ) -> Result<CopyContent> {
         if let Some(multipart) = &multi_part
             && multipart.part_number.is_none()
         {
             return Ok(CopyContent::empty());
         }
 
-        let range = multi_part
-            .as_ref()
-            .and_then(|multi_part| multi_part.format_range());
-
-        let result = self
-            .client
-            .get_object(|b| b.bucket(&source.bucket).key(&source.key).set_range(range))
-            .await?;
+        let data = self.lazy_object_reader(multi_part.clone(), etag.clone());
 
         let self_clone = self.clone();
-        CopyContent::builder(Box::new(result.body.into_async_read()))
-            .with_reopen(move || self_clone.reopen_get(multi_part.clone()))
+        CopyContent::builder(data)
+            .with_reopen(move || self_clone.reopen_get(multi_part.clone(), etag.clone()))
             .build()
     }
 
@@ -534,9 +666,10 @@ impl S3 {
     fn reopen_get(
         &self,
         multi_part: Option<MultiPartOptions>,
+        etag: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Result<CopyContent>> + Send>> {
         let self_clone = self.clone();
-        Box::pin(async move { self_clone.get_object(multi_part).await })
+        Box::pin(async move { self_clone.get_object(multi_part, etag).await })
     }
 
     /// Wrap an async reader into an `SdkBody`.
@@ -549,26 +682,11 @@ impl S3 {
     /// Build a streaming `SdkBody` that re-tries its data from the source. This allows the SDK body
     /// to be re-tried automatically when needed.
     fn reopen_body(reopen: Arc<Reopen>) -> SdkBody {
-        let (tx, mut rx) =
-            mpsc::channel::<result::Result<Bytes, io::Error>>(REOPEN_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            match (*reopen)().await {
-                Ok(content) => {
-                    let mut stream =
-                        ReaderStream::with_capacity(content.data, READER_STREAM_CAPACITY);
-                    while let Some(chunk) = stream.next().await {
-                        if tx.send(chunk).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                Err(err) => {
-                    let _ = tx.send(Err(io::Error::other(err.to_string()))).await;
-                }
-            }
-        });
+        // The SDK creates clones of a retryable body per request but only ever polls one of them,
+        // so the reopen call must not be issued until first poll.
+        let stream = Self::lazy_reader_stream(move || async move { Ok((*reopen)().await?.data) })
+            .map_ok(Frame::data);
 
-        let stream = poll_fn(move |cx| rx.poll_recv(cx)).map_ok(Frame::data);
         SdkBody::from_body_1_x(StreamBody::new(stream))
     }
 
@@ -604,7 +722,7 @@ impl S3 {
             Self::upload_body(content),
             state.tags(),
             state.metadata(),
-            state.additional_ctx().map(ChecksumAlgorithm::from),
+            self.upload_checksum(state),
             i64::try_from(state.size())?,
         )
         .await?;
@@ -619,16 +737,28 @@ impl S3 {
         body: ByteStream,
         tags: Option<String>,
         metadata: Option<HashMap<String, String>>,
-        additional_checksum: Option<ChecksumAlgorithm>,
+        checksum: UploadChecksum,
         content_length: i64,
     ) -> result::Result<PutObjectOutput, SdkError<PutObjectError, HttpResponse>> {
         let bucket = destination.bucket.clone();
         let key = destination.key.clone();
         self.client
             .put_object(move |b| {
+                // S3 validates the uploaded data against a precalculated checksum.
+                let b = match checksum {
+                    UploadChecksum::Computed(algorithm) => b.checksum_algorithm(algorithm),
+                    UploadChecksum::Precalculated(ctx, sum) => match *ctx {
+                        StandardCtx::MD5(_) => b.checksum_md5(sum),
+                        StandardCtx::SHA512(_) => b.checksum_sha512(sum),
+                        StandardCtx::XXHash64(_) => b.checksum_xxhash64(sum),
+                        StandardCtx::XXHash3(_) => b.checksum_xxhash3(sum),
+                        StandardCtx::XXHash128(_) => b.checksum_xxhash128(sum),
+                        _ => b,
+                    },
+                    UploadChecksum::None => b,
+                };
                 b.set_tagging(tags)
                     .set_metadata(metadata)
-                    .set_checksum_algorithm(additional_checksum)
                     .content_length(content_length)
                     .bucket(bucket)
                     .key(key)
@@ -645,7 +775,7 @@ impl S3 {
         state: &CopyState,
     ) -> Result<CopyResult> {
         let destination = self.get_destination()?;
-        let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
+        let checksum = self.upload_checksum(state);
         let content_length = i64::try_from(state.size())?;
 
         let CopyContent { data, reopen } = content;
@@ -657,7 +787,7 @@ impl S3 {
                 Self::retryable_body(Some(data), Arc::clone(&reopen)),
                 state.tags(),
                 state.metadata(),
-                additional_checksum.clone(),
+                checksum.clone(),
                 content_length,
             )
             .await;
@@ -678,7 +808,7 @@ impl S3 {
             Self::retryable_body(None, reopen),
             None,
             state.metadata(),
-            additional_checksum,
+            checksum,
             content_length,
         )
         .await?;
@@ -695,7 +825,6 @@ impl S3 {
     ) -> Result<CopyResult> {
         let destination = self.get_destination()?;
 
-        let additional_checksum = state.additional_ctx().map(ChecksumAlgorithm::from);
         // Create the upload id if it doesn't exist or use the existing one.
         let (upload_id, err) = if let Some(upload_id) = multi_part.upload_id.as_ref() {
             (upload_id.to_string(), vec![])
@@ -705,7 +834,7 @@ impl S3 {
                 &destination.bucket,
                 state.tags(),
                 state.metadata(),
-                additional_checksum.clone(),
+                self.upload_checksum(state),
             )
             .await?
         };
@@ -713,6 +842,8 @@ impl S3 {
         if let Some(part_number) = multi_part.part_number {
             let part_number_i32 = i32::try_from(part_number)?;
             let content_length = i64::try_from(multi_part.bytes_transferred())?;
+            // Only SDK-computable algorithms have trailers.
+            let additional_checksum = Self::additional_checksum_algorithm(state);
             let part = self
                 .client
                 .upload_part(|b| {
@@ -740,6 +871,7 @@ impl S3 {
                 &destination.bucket,
                 upload_id.to_string(),
                 parts,
+                self.upload_checksum(state),
             )
             .await?;
 
@@ -754,6 +886,7 @@ impl S3 {
         bucket: &str,
         upload_id: String,
         mut parts: Vec<Part>,
+        checksum: UploadChecksum,
     ) -> Result<()> {
         // Parts must be ordered.
         parts.sort_by_key(|a| a.part_number);
@@ -764,6 +897,21 @@ impl S3 {
             .collect::<Result<Vec<_>>>()?;
         self.client
             .complete_multipart_upload(|b| {
+                // A precalculated value covers the whole object, which S3 verifies before completing.
+                let b = match checksum {
+                    UploadChecksum::Precalculated(ctx, sum) => {
+                        let b = match *ctx {
+                            StandardCtx::MD5(_) => b.checksum_md5(sum),
+                            StandardCtx::SHA512(_) => b.checksum_sha512(sum),
+                            StandardCtx::XXHash64(_) => b.checksum_xxhash64(sum),
+                            StandardCtx::XXHash3(_) => b.checksum_xxhash3(sum),
+                            StandardCtx::XXHash128(_) => b.checksum_xxhash128(sum),
+                            _ => b,
+                        };
+                        b.checksum_type(ChecksumType::FullObject)
+                    }
+                    _ => b,
+                };
                 b.bucket(bucket)
                     .key(key)
                     .multipart_upload(
@@ -793,8 +941,12 @@ impl ObjectCopy for S3 {
         }
     }
 
-    async fn download(&self, multi_part: Option<MultiPartOptions>) -> Result<CopyContent> {
-        self.get_object(multi_part).await
+    async fn download(
+        &self,
+        multi_part: Option<MultiPartOptions>,
+        state: &CopyState,
+    ) -> Result<CopyContent> {
+        self.get_object(multi_part, state.etag()).await
     }
 
     async fn upload(
@@ -838,14 +990,18 @@ impl ObjectCopy for S3 {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::checksum::standard::test::EXPECTED_MD5_SUM;
     use crate::io::copy::CopyContent;
     use aws_sdk_s3::Client;
     use aws_sdk_s3::config::SharedAsyncSleep;
     use aws_sdk_s3::config::retry::RetryConfig;
+    use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadOutput;
+    use aws_sdk_s3::operation::copy_object::CopyObjectOutput;
     use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadOutput;
     use aws_sdk_s3::operation::get_object::GetObjectOutput;
     use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
     use aws_sdk_s3::operation::upload_part::UploadPartOutput;
+    use aws_sdk_s3::operation::upload_part_copy::UploadPartCopyOutput;
     use aws_smithy_async::rt::sleep::TokioSleep;
     use aws_smithy_mocks::{MockResponseInterceptor, Rule, RuleMode, mock};
     use aws_smithy_types::byte_stream::ByteStream;
@@ -856,6 +1012,7 @@ mod test {
     const BUCKET: &str = "bucket";
     const KEY: &str = "key";
     const BODY: &[u8] = b"test";
+    const XXHASH64_SUM: &str = "ef46db3751d8e999"; // pragma: allowlist secret
 
     /// Build a mock client that enables real retries with backoff so the SDK retry layer actually
     /// re-drives the request body through the reopen factory.
@@ -909,9 +1066,29 @@ mod test {
             .unwrap()
     }
 
+    /// Build an S3 destination from a mock client with precalculated checksums disabled.
+    fn s3_destination_no_precalculated(client: Client) -> S3 {
+        S3Builder::default()
+            .with_client(
+                S3Client::new(Arc::new(client), false, false).with_no_precalculated_checksum(true),
+            )
+            .with_copy_tags(MetadataCopy::Copy)
+            .with_destination(BUCKET, KEY)
+            .build()
+            .unwrap()
+    }
+
     /// Test copy state.
     fn copy_state() -> CopyState {
         CopyState::new(BODY.len() as u64, Some("tag=value".to_string()), None)
+    }
+
+    /// Test copy state with an additional checksum context and known sum.
+    fn copy_state_with_ctx(ctx: &str, sum: Option<&str>) -> CopyState {
+        let mut state = copy_state();
+        state.set_additional_ctx(ctx.parse().unwrap());
+        state.set_additional_sum(sum.map(|sum| sum.to_string()));
+        state
     }
 
     /// Download the mock source.
@@ -921,7 +1098,7 @@ mod test {
         Fut: Future<Output = Result<CopyResult>>,
     {
         let source = s3_source(retrying_mock_client(&[get_object]));
-        let content = source.download(None).await?;
+        let content = source.download(None, &CopyState::default()).await?;
         upload(content).await
     }
 
@@ -954,6 +1131,38 @@ mod test {
             .http_status(503, None)
             .repeatedly()
             .build()
+    }
+
+    /// Upload the mock source with the state's additional checksum applied.
+    async fn test_put_with_state(put_object: &Rule, state: CopyState) -> Result<CopyResult> {
+        let get_object = get_object_rule();
+        download(&get_object, |content| {
+            let destination =
+                s3_destination(retrying_mock_client(&[put_object]), MetadataCopy::Copy);
+            async move { destination.put_object(content, &state).await }
+        })
+        .await
+    }
+
+    /// Build an S3 source with a specific tag_mode from a mock client.
+    fn s3_source_with_tag_mode(client: Client, tag_mode: MetadataCopy) -> S3 {
+        S3Builder::default()
+            .with_client(S3Client::new(Arc::new(client), false, false))
+            .with_copy_tags(tag_mode)
+            .with_source(BUCKET, KEY)
+            .build()
+            .unwrap()
+    }
+
+    /// A `head_object` rule that returns a valid output with content_length set.
+    fn head_object_rule() -> Rule {
+        mock!(Client::head_object)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_output(|| {
+                HeadObjectOutput::builder()
+                    .content_length(BODY.len() as i64)
+                    .build()
+            })
     }
 
     #[tokio::test]
@@ -1054,7 +1263,10 @@ mod test {
             end: BODY.len() as u64,
             ..Default::default()
         };
-        let content = source.download(Some(options.clone())).await.unwrap();
+        let content = source
+            .download(Some(options.clone()), &CopyState::default())
+            .await
+            .unwrap();
 
         let destination = s3_destination(
             retrying_mock_client(&[&create, &upload_part]),
@@ -1120,7 +1332,7 @@ mod test {
         let get_object = get_object_rule();
         let source = s3_source(retrying_mock_client(&[&get_object]));
 
-        let content = source.download(None).await.unwrap();
+        let content = source.download(None, &CopyState::default()).await.unwrap();
         let mut reopened = (content.reopen)().await.unwrap();
 
         let mut buf = Vec::new();
@@ -1128,25 +1340,402 @@ mod test {
         assert_eq!(buf, BODY);
     }
 
-    /// Build an S3 source with a specific tag_mode from a mock client.
-    fn s3_source_with_tag_mode(client: Client, tag_mode: MetadataCopy) -> S3 {
-        S3Builder::default()
-            .with_client(S3Client::new(Arc::new(client), false, false))
-            .with_copy_tags(tag_mode)
-            .with_source(BUCKET, KEY)
-            .build()
-            .unwrap()
+    #[tokio::test]
+    async fn download_is_lazy() {
+        let get_object = get_object_rule();
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+
+        let mut content = source.download(None, &CopyState::default()).await.unwrap();
+        assert_eq!(get_object.num_calls(), 0);
+
+        let mut buf = Vec::new();
+        content.data.read_to_end(buf.as_mut()).await.unwrap();
+        assert_eq!(buf, BODY);
+        assert_eq!(get_object.num_calls(), 1);
     }
 
-    /// A `head_object` rule that returns a valid output with content_length set.
-    fn head_object_rule() -> Rule {
-        mock!(Client::head_object)
-            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
-            .then_output(|| {
-                HeadObjectOutput::builder()
-                    .content_length(BODY.len() as i64)
+    #[tokio::test]
+    async fn get_object_sets_if_etag() {
+        let get_object = mock!(Client::get_object)
+            .match_requests(|req| {
+                req.bucket() == Some(BUCKET)
+                    && req.key() == Some(KEY)
+                    && req.if_match() == Some("etag")
+            })
+            .sequence()
+            .output(|| {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from_static(BODY))
                     .build()
             })
+            .repeatedly()
+            .build();
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+
+        let state = CopyState::default().with_etag(Some("etag".to_string()));
+        let mut content = source.download(None, &state).await.unwrap();
+
+        let mut buf = Vec::new();
+        content.data.read_to_end(buf.as_mut()).await.unwrap();
+        assert_eq!(buf, BODY);
+        assert_eq!(get_object.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn copy_object_sets_if_etag() {
+        let copy = mock!(Client::copy_object)
+            .match_requests(|req| req.copy_source_if_match() == Some("etag"))
+            .sequence()
+            .output(|| CopyObjectOutput::builder().build())
+            .repeatedly()
+            .build();
+
+        let s3 = S3Builder::default()
+            .with_client(S3Client::new(
+                Arc::new(retrying_mock_client(&[&copy])),
+                false,
+                false,
+            ))
+            .with_copy_tags(MetadataCopy::Copy)
+            .with_source(BUCKET, KEY)
+            .with_destination(BUCKET, KEY)
+            .build()
+            .unwrap();
+
+        let state = copy_state().with_etag(Some("etag".to_string()));
+        s3.copy_object(&state).await.unwrap();
+        assert_eq!(copy.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn put_object_md5_uses_precalculated_sum() {
+        let expected = BASE64_STANDARD.encode(hex::decode(EXPECTED_MD5_SUM).unwrap());
+        let put_object = mock!(Client::put_object)
+            .match_requests(move |req| {
+                req.checksum_md5() == Some(expected.as_str()) && req.checksum_algorithm().is_none()
+            })
+            .sequence()
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+
+        let state = copy_state_with_ctx("md5", Some(EXPECTED_MD5_SUM));
+        test_put_with_state(&put_object, state).await.unwrap();
+        assert_eq!(put_object.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn put_object_xxhash64_uses_precalculated_sum() {
+        let expected = BASE64_STANDARD.encode(hex::decode(XXHASH64_SUM).unwrap());
+        let put_object = mock!(Client::put_object)
+            .match_requests(move |req| {
+                req.checksum_xxhash64() == Some(expected.as_str())
+                    && req.checksum_algorithm().is_none()
+            })
+            .sequence()
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+
+        let state = copy_state_with_ctx("xxhash64", Some(XXHASH64_SUM));
+        test_put_with_state(&put_object, state).await.unwrap();
+        assert_eq!(put_object.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn put_object_computable_ctx_sets_algorithm() {
+        let put_object = mock!(Client::put_object)
+            .match_requests(|req| {
+                req.checksum_algorithm() == Some(&ChecksumAlgorithm::Crc32)
+                    && req.checksum_md5().is_none()
+            })
+            .sequence()
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+
+        // A computable checksum uses the SDK trailer even when the sum value is known.
+        let state = copy_state_with_ctx("crc32", Some("00000000"));
+        test_put_with_state(&put_object, state).await.unwrap();
+        assert_eq!(put_object.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn put_object_skips_non_hex_precalculated_sum() {
+        let put_object = mock!(Client::put_object)
+            .match_requests(|req| {
+                req.checksum_md5().is_none() && req.checksum_algorithm().is_none()
+            })
+            .sequence()
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+
+        // The digest cannot be decoded, so no checksum can be applied.
+        let state = copy_state_with_ctx("md5", Some("zzzz"));
+        test_put_with_state(&put_object, state).await.unwrap();
+        assert_eq!(put_object.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn copy_object_md5_omits_checksum_algorithm() {
+        let copy = mock!(Client::copy_object)
+            .match_requests(|req| req.checksum_algorithm().is_none())
+            .sequence()
+            .output(|| CopyObjectOutput::builder().build())
+            .repeatedly()
+            .build();
+
+        let s3 = S3Builder::default()
+            .with_client(S3Client::new(
+                Arc::new(retrying_mock_client(&[&copy])),
+                false,
+                false,
+            ))
+            .with_copy_tags(MetadataCopy::Copy)
+            .with_source(BUCKET, KEY)
+            .with_destination(BUCKET, KEY)
+            .build()
+            .unwrap();
+
+        let state = copy_state_with_ctx("md5", Some(EXPECTED_MD5_SUM));
+        s3.copy_object(&state).await.unwrap();
+        assert_eq!(copy.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_md5_algorithm_completes() {
+        let expected = BASE64_STANDARD.encode(hex::decode(EXPECTED_MD5_SUM).unwrap());
+        let create = mock!(Client::create_multipart_upload)
+            .match_requests(|req| {
+                req.checksum_algorithm() == Some(&ChecksumAlgorithm::Md5)
+                    && req.checksum_type() == Some(&ChecksumType::FullObject)
+            })
+            .sequence()
+            .output(|| {
+                CreateMultipartUploadOutput::builder()
+                    .upload_id("upload-id")
+                    .build()
+            })
+            .build();
+        let upload_part = mock!(Client::upload_part)
+            .match_requests(|req| req.checksum_algorithm().is_none())
+            .sequence()
+            .output(|| UploadPartOutput::builder().e_tag("etag").build())
+            .build();
+        let complete = mock!(Client::complete_multipart_upload)
+            .match_requests(move |req| {
+                req.checksum_md5() == Some(expected.as_str())
+                    && req.checksum_type() == Some(&ChecksumType::FullObject)
+            })
+            .sequence()
+            .output(|| CompleteMultipartUploadOutput::builder().build())
+            .build();
+
+        let state = copy_state_with_ctx("md5", Some(EXPECTED_MD5_SUM));
+        let get_object = get_object_rule();
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+        let options = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: BODY.len() as u64,
+            ..Default::default()
+        };
+        let content = source
+            .download(Some(options.clone()), &CopyState::default())
+            .await
+            .unwrap();
+
+        let destination = s3_destination(
+            retrying_mock_client(&[&create, &upload_part, &complete]),
+            MetadataCopy::Copy,
+        );
+        destination
+            .put_object_multipart(content, options, &state)
+            .await
+            .unwrap();
+
+        let completion = MultiPartOptions {
+            part_number: None,
+            upload_id: Some("upload-id".to_string()),
+            parts: Some(vec![Part {
+                part_number: 1,
+                e_tag: Some("etag".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        destination
+            .put_object_multipart(CopyContent::empty(), completion, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(create.num_calls(), 1);
+        assert_eq!(upload_part.num_calls(), 1);
+        assert_eq!(complete.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_copy_md5_without_sum_omits_algorithm() {
+        let create = mock!(Client::create_multipart_upload)
+            .match_requests(|req| {
+                req.checksum_algorithm().is_none() && req.checksum_type().is_none()
+            })
+            .sequence()
+            .output(|| {
+                CreateMultipartUploadOutput::builder()
+                    .upload_id("upload-id")
+                    .build()
+            })
+            .build();
+        let upload_part_copy = mock!(Client::upload_part_copy)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .sequence()
+            .output(|| {
+                UploadPartCopyOutput::builder()
+                    .copy_part_result(CopyPartResult::builder().e_tag("etag").build())
+                    .build()
+            })
+            .build();
+
+        let s3 = S3Builder::default()
+            .with_client(S3Client::new(
+                Arc::new(retrying_mock_client(&[&create, &upload_part_copy])),
+                false,
+                false,
+            ))
+            .with_copy_tags(MetadataCopy::Copy)
+            .with_source(BUCKET, KEY)
+            .with_destination(BUCKET, KEY)
+            .build()
+            .unwrap();
+
+        // Without a known sum no additional checksum can be applied, so the create request
+        // must not declare an algorithm for a checksum the SDK cannot compute.
+        let state = copy_state_with_ctx("md5", None);
+        let options = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: BODY.len() as u64,
+            ..Default::default()
+        };
+        s3.copy_object_multipart(options, &state).await.unwrap();
+
+        assert_eq!(create.num_calls(), 1);
+        assert_eq!(upload_part_copy.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_ctx_completes_without_precalculated_sum() {
+        let complete = mock!(Client::complete_multipart_upload)
+            .match_requests(|req| req.checksum_sha256().is_none() && req.checksum_type().is_none())
+            .sequence()
+            .output(|| CompleteMultipartUploadOutput::builder().build())
+            .build();
+
+        let destination = s3_destination(retrying_mock_client(&[&complete]), MetadataCopy::Copy);
+        let state = copy_state_with_ctx("sha256", None);
+        let completion = MultiPartOptions {
+            part_number: None,
+            upload_id: Some("upload-id".to_string()),
+            parts: Some(vec![Part {
+                part_number: 1,
+                e_tag: Some("etag".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        destination
+            .put_object_multipart(CopyContent::empty(), completion, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(complete.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn put_object_no_precalculated_checksum_omits_sum() {
+        let put_object = mock!(Client::put_object)
+            .match_requests(|req| {
+                req.checksum_md5().is_none() && req.checksum_algorithm().is_none()
+            })
+            .sequence()
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+
+        let get_object = get_object_rule();
+        let state = copy_state_with_ctx("md5", Some(EXPECTED_MD5_SUM));
+        download(&get_object, |content| {
+            let destination = s3_destination_no_precalculated(retrying_mock_client(&[&put_object]));
+            async move { destination.put_object(content, &state).await }
+        })
+        .await
+        .unwrap();
+        assert_eq!(put_object.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_no_precalculated_checksum_omits_declaration() {
+        let create = mock!(Client::create_multipart_upload)
+            .match_requests(|req| {
+                req.checksum_algorithm().is_none() && req.checksum_type().is_none()
+            })
+            .sequence()
+            .output(|| {
+                CreateMultipartUploadOutput::builder()
+                    .upload_id("upload-id")
+                    .build()
+            })
+            .build();
+        let upload_part = mock!(Client::upload_part)
+            .match_requests(|req| req.checksum_algorithm().is_none())
+            .sequence()
+            .output(|| UploadPartOutput::builder().e_tag("etag").build())
+            .build();
+        let complete = mock!(Client::complete_multipart_upload)
+            .match_requests(|req| req.checksum_md5().is_none() && req.checksum_type().is_none())
+            .sequence()
+            .output(|| CompleteMultipartUploadOutput::builder().build())
+            .build();
+
+        let state = copy_state_with_ctx("md5", Some(EXPECTED_MD5_SUM));
+        let get_object = get_object_rule();
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+        let options = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: BODY.len() as u64,
+            ..Default::default()
+        };
+        let content = source
+            .download(Some(options.clone()), &CopyState::default())
+            .await
+            .unwrap();
+
+        let destination = s3_destination_no_precalculated(retrying_mock_client(&[
+            &create,
+            &upload_part,
+            &complete,
+        ]));
+        destination
+            .put_object_multipart(content, options, &state)
+            .await
+            .unwrap();
+
+        let completion = MultiPartOptions {
+            part_number: None,
+            upload_id: Some("upload-id".to_string()),
+            parts: Some(vec![Part {
+                part_number: 1,
+                e_tag: Some("etag".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        destination
+            .put_object_multipart(CopyContent::empty(), completion, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(create.num_calls(), 1);
+        assert_eq!(upload_part.num_calls(), 1);
+        assert_eq!(complete.num_calls(), 1);
     }
 
     /// Preservation: tag_mode = Copy with successful GetObjectTagging returns formatted tags.

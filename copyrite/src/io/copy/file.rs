@@ -197,7 +197,11 @@ impl ObjectCopy for File {
         CopyResult::new(None, None, bytes, vec![])
     }
 
-    async fn download(&self, multipart: Option<MultiPartOptions>) -> Result<CopyContent> {
+    async fn download(
+        &self,
+        multipart: Option<MultiPartOptions>,
+        _state: &CopyState,
+    ) -> Result<CopyContent> {
         self.read(multipart).await
     }
 
@@ -262,10 +266,10 @@ mod test {
         let source = write_source(tmp.path()).await;
         let file = File::new(Some(source), None);
 
-        let content = file.download(None).await.unwrap();
+        let content = file.download(None, &CopyState::default()).await.unwrap();
         assert_eq!(read_all(content).await, BODY);
 
-        let content = file.download(None).await.unwrap();
+        let content = file.download(None, &CopyState::default()).await.unwrap();
         let reopened = (content.reopen)().await.unwrap();
         assert_eq!(read_all(reopened).await, BODY);
     }
@@ -284,11 +288,17 @@ mod test {
         };
         let expected = &BODY[4..19];
 
-        let content = file.download(Some(options.clone())).await.unwrap();
+        let content = file
+            .download(Some(options.clone()), &CopyState::default())
+            .await
+            .unwrap();
         assert_eq!(read_all(content).await, expected);
 
         // Reopen must re-read the identical range.
-        let content = file.download(Some(options)).await.unwrap();
+        let content = file
+            .download(Some(options), &CopyState::default())
+            .await
+            .unwrap();
         let reopened = (content.reopen)().await.unwrap();
         assert_eq!(read_all(reopened).await, expected);
     }
@@ -327,13 +337,19 @@ mod test {
             ..Default::default()
         };
 
-        let content = source.download(Some(part1.clone())).await.unwrap();
+        let content = source
+            .download(Some(part1.clone()), &CopyState::default())
+            .await
+            .unwrap();
         destination
             .upload(content, Some(part1), &state)
             .await
             .unwrap();
 
-        let content = source.download(Some(part2.clone())).await.unwrap();
+        let content = source
+            .download(Some(part2.clone()), &CopyState::default())
+            .await
+            .unwrap();
         destination
             .upload(content, Some(part2), &state)
             .await
@@ -359,7 +375,10 @@ mod test {
         let destination_file = File::new(None, Some(destination.to_string_lossy().to_string()));
         let state = CopyState::new(BODY.len() as u64, None, None);
 
-        let content = source_file.download(None).await.unwrap();
+        let content = source_file
+            .download(None, &CopyState::default())
+            .await
+            .unwrap();
         destination_file
             .upload(content, None, &state)
             .await

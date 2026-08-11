@@ -126,16 +126,19 @@ impl Ctx {
     pub fn is_preferred_single_part(&self, provider: &Provider) -> bool {
         matches!(self, Self::Regular(regular) if regular.is_preferred_cloud_ctx(provider))
     }
+
+    /// Get the underlying standard checksum context.
+    pub fn into_standard(self) -> StandardCtx {
+        match self {
+            Ctx::AWSEtag(ctx) => ctx.ctx(),
+            Ctx::Regular(ctx) => ctx,
+        }
+    }
 }
 
 impl From<Ctx> for ChecksumAlgorithm {
     fn from(ctx: Ctx) -> Self {
-        let ctx = match ctx {
-            Ctx::AWSEtag(ctx) => ctx.ctx(),
-            Ctx::Regular(ctx) => ctx,
-        };
-
-        match ctx {
+        match ctx.into_standard() {
             StandardCtx::CRC64NVME(_, _) => ChecksumAlgorithm::Crc64Nvme,
             StandardCtx::CRC32C(_, _) => ChecksumAlgorithm::Crc32C,
             StandardCtx::CRC32(_, _) => ChecksumAlgorithm::Crc32,
