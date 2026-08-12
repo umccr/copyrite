@@ -787,6 +787,63 @@ pub(crate) mod test {
         Ok(())
     }
 
+    /// Backends that discard additional checksums (e.g. Ceph Squid) return only an `ETag`, so
+    /// the sums file for the destination has an MD5 and nothing else. This must stay comparable
+    /// to a source that does return additional checksums, otherwise a post-copy `check` would
+    /// report a mismatch purely because the destination dropped the values.
+    #[tokio::test]
+    pub async fn checksum_discarding_destination_compares_on_etag() -> anyhow::Result<()> {
+        let mut source = S3Builder::default()
+            .with_client(S3Client::new(
+                Arc::new(mock_single_part_with_sha256()),
+                false,
+                false,
+            ))
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
+            .build()?;
+        let mut destination = S3Builder::default()
+            .with_client(S3Client::new(
+                Arc::new(mock_single_part_etag_only()),
+                false,
+                false,
+            ))
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
+            .build()?;
+
+        let source = source.sums_from_metadata().await?;
+        let destination = destination.sums_from_metadata().await?;
+
+        // The destination has no SHA256, so the only shared checksum is the MD5 from the `ETag`.
+        assert!(
+            !destination
+                .checksums
+                .contains_key(&Ctx::Regular(StandardCtx::sha256()))
+        );
+        let (ctx, _) = source
+            .is_same(&destination)
+            .expect("checksum-discarding destination must still compare on the `ETag`");
+        assert_eq!(ctx, &Ctx::Regular(StandardCtx::md5()));
+
+        Ok(())
+    }
+
+    /// A backend that discards checksums *and* returns an unusable `ETag` leaves nothing to
+    /// compare, which is an error rather than a silently empty sums file.
+    #[tokio::test]
+    pub async fn no_checksums_and_no_usable_etag_errors() -> anyhow::Result<()> {
+        let mut s3 = s3_with_head(|b| {
+            b.e_tag(format!("\"{}\"", EXPECTED_MD5_SUM))
+                .server_side_encryption(ServerSideEncryption::AwsKms)
+                .content_length(TEST_FILE_SIZE as i64)
+        })?;
+
+        assert!(s3.sums_from_metadata().await.is_err());
+
+        Ok(())
+    }
+
     #[tokio::test]
     pub async fn test_md5_prefers_native_over_etag() -> Result<()> {
         let mut s3 = s3_with_head(|b| {
