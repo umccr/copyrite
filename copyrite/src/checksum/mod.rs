@@ -6,10 +6,10 @@ pub mod file;
 pub mod standard;
 
 use crate::checksum::aws_etag::AWSETagCtx;
-use crate::checksum::standard::StandardCtx;
+use crate::checksum::standard::{MultipartChecksumType, StandardCtx};
 use crate::error::{Error, Result};
 use crate::io::Provider;
-use aws_sdk_s3::types::ChecksumAlgorithm;
+use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumType};
 use futures_util::{Stream, StreamExt, pin_mut};
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -151,6 +151,18 @@ impl From<Ctx> for ChecksumAlgorithm {
             StandardCtx::XXHash128(_) => ChecksumAlgorithm::Xxhash128,
             // By default, set some algorithm if the context doesn't line up.
             _ => ChecksumAlgorithm::Crc64Nvme,
+        }
+    }
+}
+
+/// The checksum type to declare when creating a multipart upload.
+///
+/// Note that only the [`MultipartChecksumType::Composite`] case is currently reachable.
+impl From<MultipartChecksumType> for ChecksumType {
+    fn from(checksum_type: MultipartChecksumType) -> Self {
+        match checksum_type {
+            MultipartChecksumType::FullObject => ChecksumType::FullObject,
+            _ => ChecksumType::Composite,
         }
     }
 }

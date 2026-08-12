@@ -353,9 +353,13 @@ impl S3 {
                         UploadChecksum::Computed(algorithm) => b.checksum_algorithm(algorithm),
                         // Algorithms without SDK support must be declared here, otherwise S3
                         // rejects the value at `CompleteMultipartUpload` with `InvalidRequest`.
-                        UploadChecksum::Precalculated(ctx, _) => b
-                            .checksum_algorithm(ChecksumAlgorithm::from(Ctx::Regular(*ctx)))
-                            .checksum_type(ChecksumType::FullObject),
+                        // See https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html
+                        UploadChecksum::Precalculated(ctx, _) => {
+                            let checksum_type =
+                                ctx.multipart_checksum_type().map(ChecksumType::from);
+                            b.checksum_algorithm(ChecksumAlgorithm::from(Ctx::Regular(*ctx)))
+                                .set_checksum_type(checksum_type)
+                        }
                         UploadChecksum::None => b,
                     };
 
@@ -606,8 +610,6 @@ impl S3 {
                 &destination.bucket,
                 upload_id.to_string(),
                 parts,
-                self.upload_checksum(state),
-                state.size(),
             )
             .await?;
 
@@ -981,8 +983,6 @@ impl S3 {
                 &destination.bucket,
                 upload_id.to_string(),
                 parts,
-                self.upload_checksum(state),
-                state.size(),
             )
             .await?;
 
@@ -997,35 +997,16 @@ impl S3 {
         bucket: &str,
         upload_id: String,
         mut parts: Vec<Part>,
-        checksum: UploadChecksum,
-        object_size: u64,
     ) -> Result<()> {
         // Parts must be ordered.
         parts.sort_by_key(|a| a.part_number);
 
-        let object_size = i64::try_from(object_size)?;
         let parts = parts
             .into_iter()
             .map(|part| part.try_into())
             .collect::<Result<Vec<_>>>()?;
         self.client
             .complete_multipart_upload(|b| {
-                // A precalculated value covers the whole object, which S3 verifies before completing.
-                let b = match checksum {
-                    UploadChecksum::Precalculated(ctx, sum) => {
-                        let b = match *ctx {
-                            StandardCtx::MD5(_) => b.checksum_md5(sum),
-                            StandardCtx::SHA512(_) => b.checksum_sha512(sum),
-                            StandardCtx::XXHash64(_) => b.checksum_xxhash64(sum),
-                            StandardCtx::XXHash3(_) => b.checksum_xxhash3(sum),
-                            StandardCtx::XXHash128(_) => b.checksum_xxhash128(sum),
-                            _ => b,
-                        };
-                        b.checksum_type(ChecksumType::FullObject)
-                            .mpu_object_size(object_size)
-                    }
-                    _ => b,
-                };
                 b.bucket(bucket)
                     .key(key)
                     .multipart_upload(
@@ -1629,13 +1610,12 @@ mod test {
 
     #[tokio::test]
     async fn multipart_md5_algorithm_completes() {
-        let expected = BASE64_STANDARD.encode(hex::decode(EXPECTED_MD5_SUM).unwrap());
         let expected_part =
             BASE64_STANDARD.encode(hex::decode("098f6bcd4621d373cade4e832627b4f6").unwrap());
         let create = mock!(Client::create_multipart_upload)
             .match_requests(|req| {
                 req.checksum_algorithm() == Some(&ChecksumAlgorithm::Md5)
-                    && req.checksum_type() == Some(&ChecksumType::FullObject)
+                    && req.checksum_type() == Some(&ChecksumType::Composite)
             })
             .sequence()
             .output(|| {
@@ -1652,13 +1632,12 @@ mod test {
             .sequence()
             .output(|| UploadPartOutput::builder().e_tag("etag").build())
             .build();
-        let complete_sum = expected.clone();
         let complete_part_sum = expected_part.clone();
         let complete = mock!(Client::complete_multipart_upload)
             .match_requests(move |req| {
-                req.checksum_md5() == Some(complete_sum.as_str())
-                    && req.checksum_type() == Some(&ChecksumType::FullObject)
-                    && req.mpu_object_size() == Some(BODY.len() as i64)
+                req.checksum_md5().is_none()
+                    && req.checksum_type().is_none()
+                    && req.mpu_object_size().is_none()
                     && req.multipart_upload().is_some_and(|upload| {
                         upload
                             .parts()
