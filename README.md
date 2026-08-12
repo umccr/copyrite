@@ -119,6 +119,15 @@ Other version-specific hazards worth knowing about:
 * An `AbortIncompleteMultipartUpload` lifecycle rule is recommended on the destination bucket, so
   that parts left behind by an interrupted copy are cleaned up.
 
+## Memory use
+
+Copies stream, so memory use does not scale with the object size, with one exception. Multipart
+uploads of `md5`, `sha512`, `xxh64`, `xxh3` and `xxh128` cannot have their checksum computed by
+the AWS SDK while streaming, so each part is buffered in memory to compute its checksum before
+being sent. Peak usage for those copies is roughly `--concurrency` multiplied by the part size.
+Lower either option if a copy runs out of memory, or pick a checksum the SDK can stream
+(`crc32`, `crc32c`, `crc64nvme`, `sha1`, `sha256`), which uses constant memory.
+
 ## Design
 
 This tool aims to be as efficient and performant as possible when calculating checksums. This means that it only

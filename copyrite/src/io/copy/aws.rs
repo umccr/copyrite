@@ -792,6 +792,17 @@ impl S3 {
 
     /// Buffer a part into memory and compute its checksum value. Declared algorithms without
     /// SDK support have no trailers, so the value must be sent as a header before the body.
+    ///
+    /// This holds a whole part in memory, so peak usage is bounded by
+    /// `concurrency * part_size` while a multipart upload is in flight. With the maximum part
+    /// size and the default concurrency that is far more than most machines have, so lower
+    /// `--concurrency` or `--part-size` if a copy runs out of memory.
+    ///
+    /// Only the precalculated path reaches this, i.e. multipart uploads of the algorithms the
+    /// SDK cannot compute (MD5, SHA512 and the XXHash variants), see
+    /// [`StandardCtx::is_sdk_computable_ctx`]. Everything else streams with a trailer and uses
+    /// constant memory. Avoiding the buffer entirely would need a second pass over the part via
+    /// the reopen factory to hash before sending, trading a re-read for the memory.
     async fn buffered_part_body(
         mut content: CopyContent,
         ctx: &StandardCtx,
