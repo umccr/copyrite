@@ -71,63 +71,6 @@ variables. See the "Credentials" section in the long help:
 copyrite --help
 ```
 
-## S3-compatible endpoints
-
-copyrite targets the official S3 API. S3-compatible implementations vary in how much of the
-checksum API they support, so a set of compatibility options is available to turn off the parts
-an endpoint does not implement. `--s3-compatible` enables all of them at once, and each can also
-be set individually, or per-side on `copy` with a `--source-`/`--destination-` prefix. See the
-long help (`copyrite --help`) for the full list.
-
-| Option                        | Turns off                                                          |
-|-------------------------------|--------------------------------------------------------------------|
-| `--force-path-style`          | Virtual-hosted-style addressing.                                   |
-| `--no-get-object-attributes`  | `GetObjectAttributes`, falling back to per-part `HeadObject`.       |
-| `--no-checksum-mode`          | `ChecksumMode::Enabled` on `HeadObject`, so only `ETag`s are used.  |
-| `--no-request-checksum`       | SDK-computed upload checksums, including trailers.                  |
-| `--no-precalculated-checksum` | Precalculated `x-amz-checksum-*` values on uploads.                 |
-
-### Ceph RADOS Gateway
-
-Checksum support in RGW changed substantially across releases, so the flags needed depend on the
-version. All of these still require `--force-path-style`.
-
-| Release                  | Checksum behaviour                                                     | Recommended flags            |
-|--------------------------|------------------------------------------------------------------------|------------------------------|
-| Tentacle 20.2.0+         | Full support, including `GetObjectAttributes` and checksum types.      | `--force-path-style`         |
-| Squid 19.2.x, Reef 18.2.5+ | Uploads with checksums succeed, but the values are discarded.        | `--s3-compatible`            |
-| Reef ≤ 18.2.4, Quincy    | Checksum trailers are rejected with `XAmzContentSHA256Mismatch`.        | `--s3-compatible`            |
-
-Tentacle supports `crc32`, `crc32c`, `xxh3`, `sha1`, `sha256`, `sha512`, `blake3` and
-`crc64nvme`, but **not** `md5`, `xxh64` or `xxh128`. Requesting an unsupported algorithm from a
-sums file results in an upload without that checksum rather than a hard failure.
-
-On Squid and Reef 18.2.5+, checksum values sent on upload are neither verified, stored, nor
-returned, so `x-amz-checksum-*` gives no end-to-end integrity guarantee. copyrite still verifies
-these copies, but does so by comparing `ETag`s, which for a multipart upload requires the part
-sizes to match on both sides.
-
-Other version-specific hazards worth knowing about:
-
-* Object tags on multipart objects cannot be read back before Squid 19.2.4, so `--tag-mode copy`
-  is unreliable on earlier releases. Use `--tag-mode best-effort` or `--tag-mode suppress` there.
-* Copying an object onto itself can lose data before Squid 19.2.3 and Reef 18.2.8. copyrite
-  refuses same-location copies, so `s3://x/y → s3://x/y` is not affected.
-* `CopyObject` on server-side encrypted objects needs Tentacle 20.2.3.
-* `ETag`s are returned unquoted before Reef 18.2.8.
-* `x-amz-mp-object-size` is ignored by all RGW releases.
-* An `AbortIncompleteMultipartUpload` lifecycle rule is recommended on the destination bucket, so
-  that parts left behind by an interrupted copy are cleaned up.
-
-## Memory use
-
-Copies stream, so memory use does not scale with the object size, with one exception. Multipart
-uploads of `md5`, `sha512`, `xxh64`, `xxh3` and `xxh128` cannot have their checksum computed by
-the AWS SDK while streaming, so each part is buffered in memory to compute its checksum before
-being sent. Peak usage for those copies is roughly `--concurrency` multiplied by the part size.
-Lower either option if a copy runs out of memory, or pick a checksum the SDK can stream
-(`crc32`, `crc32c`, `crc64nvme`, `sha1`, `sha256`), which uses constant memory.
-
 ## Design
 
 This tool aims to be as efficient and performant as possible when calculating checksums. This means that it only

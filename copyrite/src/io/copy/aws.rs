@@ -183,6 +183,19 @@ impl From<(UploadPartOutput, u64, String)> for CopyResult {
     }
 }
 
+impl Part {
+    /// Remove checksum values, keeping only the `ETag` and part number.
+    /// This is only used on `CompleteMultipartUpload` when no checksum was declared to
+    /// avoid an API error.
+    fn without_checksums(self) -> Self {
+        Self {
+            e_tag: self.e_tag,
+            part_number: self.part_number,
+            ..Default::default()
+        }
+    }
+}
+
 impl TryFrom<Part> for CompletedPart {
     type Error = Error;
 
@@ -221,19 +234,21 @@ impl From<&HeadObjectOutput> for SystemMetadata {
 enum UploadChecksum {
     /// An algorithm the SDK computes while streaming the upload.
     Computed(ChecksumAlgorithm),
-    /// A precalculated base64 digest for an algorithm. The context is kept alongside the
-    /// algorithm because the per-part digests are computed locally.
+    /// A precalculated base64 digest for an algorithm.
     Precalculated(Box<StandardCtx>, PrecalculatedAlgorithm, String),
     /// No additional checksum applies to this upload.
     None,
 }
 
+impl UploadChecksum {
+    /// Whether this declares a checksum algorithm on `CreateMultipartUpload`.
+    fn declares_algorithm(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 /// An algorithm that S3 accepts only as a precalculated value, because the SDK cannot compute it
-/// during an upload. Converting into this enumerates the set in one place so that the request
-/// builders can match exhaustively instead of silently dropping an unexpected algorithm.
-///
-/// This is the complement of [`StandardCtx::is_sdk_computable_ctx`] within the algorithms S3
-/// supports, see [`StandardCtx::is_aws_additional_ctx`].
+/// during an upload.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum PrecalculatedAlgorithm {
     MD5,
@@ -253,8 +268,6 @@ impl TryFrom<&StandardCtx> for PrecalculatedAlgorithm {
             StandardCtx::XXHash64(_) => Self::XXHash64,
             StandardCtx::XXHash3(_) => Self::XXHash3,
             StandardCtx::XXHash128(_) => Self::XXHash128,
-            // Either the SDK computes it, so it is never sent as a value, or S3 does not support
-            // it at all. Both are a bug in the caller rather than something to send blindly.
             StandardCtx::CRC32(_, _)
             | StandardCtx::CRC32C(_, _)
             | StandardCtx::CRC64NVME(_, _)
@@ -395,12 +408,16 @@ impl S3 {
         checksum: UploadChecksum,
     ) -> Result<(String, Vec<ApiError>)> {
         // The algorithm and type to declare on the create. Algorithms without SDK support must be
-        // declared here, otherwise S3 rejects the value at `CompleteMultipartUpload` with
-        // `InvalidRequest`. This is resolved up front because it can fail for a checksum S3 does
-        // not support, and the request builder closure cannot propagate an error.
+        // declared here, otherwise S3 rejects the value.
         // See https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html
         let declaration = match &checksum {
-            UploadChecksum::Computed(algorithm) => Some((algorithm.clone(), None)),
+            UploadChecksum::Computed(algorithm) => {
+                let checksum_type = match algorithm {
+                    ChecksumAlgorithm::Crc64Nvme => Some(ChecksumType::FullObject),
+                    _ => None,
+                };
+                Some((algorithm.clone(), checksum_type))
+            }
             UploadChecksum::Precalculated(ctx, _, _) => Some((
                 ChecksumAlgorithm::try_from(Ctx::Regular(*ctx.clone()))?,
                 ctx.multipart_checksum_type().map(ChecksumType::from),
@@ -501,20 +518,30 @@ impl S3 {
         Some((ctx, BASE64_STANDARD.encode(digest)))
     }
 
+    /// The checksum to declare when there isn't one supplied. This is used client side by the SDK
+    /// to compute request checksums.
+    fn sdk_default_checksum(&self) -> UploadChecksum {
+        if self.client.no_request_checksum() {
+            UploadChecksum::None
+        } else {
+            UploadChecksum::Computed(ChecksumAlgorithm::Crc64Nvme)
+        }
+    }
+
     /// The additional checksum to attach to an upload.
     fn upload_checksum(&self, state: &CopyState) -> UploadChecksum {
         if let Some(algorithm) = self.additional_checksum_algorithm(state) {
             UploadChecksum::Computed(algorithm)
         } else if self.client.no_precalculated_checksum() {
             // Some endpoints reject uploads that declare checksum algorithms which are not
-            // computed by the SDK, so no additional checksum can be applied here.
-            UploadChecksum::None
+            // computed by the SDK, so only the SDK's own default can be applied here.
+            self.sdk_default_checksum()
         } else if let Some((ctx, sum)) = Self::precalculated_sum(state)
             && let Ok(algorithm) = PrecalculatedAlgorithm::try_from(&ctx)
         {
             UploadChecksum::Precalculated(Box::new(ctx), algorithm, sum)
         } else {
-            UploadChecksum::None
+            self.sdk_default_checksum()
         }
     }
 
@@ -529,9 +556,6 @@ impl S3 {
         let destination = self.get_destination()?;
 
         // When no algorithm is set S3 copies the checksum algorithm from the source object.
-        // This asks the server to recompute rather than sending a value, so the orphaned header
-        // rule does not apply, but `no_request_checksum` suppresses it anyway to keep a single
-        // meaning for the option: copyrite never asks for checksums.
         let additional_checksum = self.additional_checksum_algorithm(state);
         let do_copy = |tagging, tagging_set, metadata, metadata_set, additional_checksum| async {
             let etag = state.etag();
@@ -679,6 +703,7 @@ impl S3 {
                 &destination.bucket,
                 upload_id.to_string(),
                 parts,
+                self.upload_checksum(state).declares_algorithm(),
             )
             .await?;
 
@@ -687,17 +712,6 @@ impl S3 {
     }
 
     /// Send the ranged `GetObject` request for the source.
-    /// Whether the SDK should validate the response checksum for a read of this range.
-    ///
-    /// The SDK compares a full-object `x-amz-checksum-*` response header against whatever body
-    /// it receives, with no special casing for a 206. It skips composite values by their `-N`
-    /// suffix, but not full-object ones, so validating a partial body either fails or passes
-    /// vacuously depending on what the endpoint returns. Only whole-object reads are meaningful.
-    /// Copyrite verifies ranged reads end-to-end itself regardless.
-    fn validate_response_checksum(range: Option<&str>) -> bool {
-        range.is_none()
-    }
-
     async fn send_get_object(
         &self,
         multi_part: Option<MultiPartOptions>,
@@ -708,11 +722,9 @@ impl S3 {
             .as_ref()
             .and_then(|multi_part| multi_part.format_range());
 
-        let validate_response = Self::validate_response_checksum(range.as_deref());
-
         Ok(self
             .client
-            .get_object_validating(validate_response, |b| {
+            .get_object(|b| {
                 b.bucket(&source.bucket)
                     .key(&source.key)
                     .set_range(range)
@@ -846,17 +858,6 @@ impl S3 {
 
     /// Buffer a part into memory and compute its checksum value. Declared algorithms without
     /// SDK support have no trailers, so the value must be sent as a header before the body.
-    ///
-    /// This holds a whole part in memory, so peak usage is bounded by
-    /// `concurrency * part_size` while a multipart upload is in flight. With the maximum part
-    /// size and the default concurrency that is far more than most machines have, so lower
-    /// `--concurrency` or `--part-size` if a copy runs out of memory.
-    ///
-    /// Only the precalculated path reaches this, i.e. multipart uploads of the algorithms the
-    /// SDK cannot compute (MD5, SHA512 and the XXHash variants), see
-    /// [`StandardCtx::is_sdk_computable_ctx`]. Everything else streams with a trailer and uses
-    /// constant memory. Avoiding the buffer entirely would need a second pass over the part via
-    /// the reopen factory to hash before sending, trading a re-read for the memory.
     async fn buffered_part_body(
         mut content: CopyContent,
         ctx: &StandardCtx,
@@ -1009,12 +1010,15 @@ impl S3 {
         if let Some(part_number) = multi_part.part_number {
             let part_number_i32 = i32::try_from(part_number)?;
             let content_length = i64::try_from(multi_part.bytes_transferred())?;
-            // Only SDK-computable algorithms have trailers.
-            let additional_checksum = self.additional_checksum_algorithm(state);
 
             // A precalculated algorithm is declared on the upload, so every part must have
-            // the checksum value.
-            let (body, part_sum) = match self.upload_checksum(state) {
+            // the checksum value. Every other algorithm is SDK-computable and so has the trailer.
+            let checksum = self.upload_checksum(state);
+            let additional_checksum = match &checksum {
+                UploadChecksum::Computed(algorithm) => Some(algorithm.clone()),
+                UploadChecksum::Precalculated(_, _, _) | UploadChecksum::None => None,
+            };
+            let (body, part_sum) = match checksum {
                 UploadChecksum::Precalculated(ctx, algorithm, _) => {
                     let (body, sum) =
                         Self::buffered_part_body(content, &ctx, multi_part.bytes_transferred())
@@ -1071,6 +1075,7 @@ impl S3 {
                 &destination.bucket,
                 upload_id.to_string(),
                 parts,
+                self.upload_checksum(state).declares_algorithm(),
             )
             .await?;
 
@@ -1085,12 +1090,20 @@ impl S3 {
         bucket: &str,
         upload_id: String,
         mut parts: Vec<Part>,
+        declared_checksum: bool,
     ) -> Result<()> {
         // Parts must be ordered.
         parts.sort_by_key(|a| a.part_number);
 
         let parts = parts
             .into_iter()
+            .map(|part| {
+                if declared_checksum {
+                    part
+                } else {
+                    part.without_checksums()
+                }
+            })
             .map(|part| part.try_into())
             .collect::<Result<Vec<_>>>()?;
         self.client
@@ -1213,8 +1226,6 @@ mod test {
     const BODY: &[u8] = b"test";
     const XXHASH64_SUM: &str = "ef46db3751d8e999"; // pragma: allowlist secret
 
-    /// Build a mock client that enables real retries with backoff so the SDK retry layer actually
-    /// re-drives the request body through the reopen factory.
     fn retrying_mock_client(rules: &[&Rule]) -> Client {
         let mut interceptor = MockResponseInterceptor::new().rule_mode(RuleMode::MatchAny);
         for rule in rules {
@@ -1672,13 +1683,13 @@ mod test {
     async fn put_object_skips_non_hex_precalculated_sum() {
         let put_object = mock!(Client::put_object)
             .match_requests(|req| {
-                req.checksum_md5().is_none() && req.checksum_algorithm().is_none()
+                req.checksum_md5().is_none()
+                    && req.checksum_algorithm() == Some(&ChecksumAlgorithm::Crc64Nvme)
             })
             .sequence()
             .output(|| PutObjectOutput::builder().build())
             .build();
 
-        // The digest cannot be decoded, so no checksum can be applied.
         let state = copy_state_with_ctx("md5", Some("zzzz"));
         test_put_with_state(&put_object, state).await.unwrap();
         assert_eq!(put_object.num_calls(), 1);
@@ -1794,10 +1805,11 @@ mod test {
     }
 
     #[tokio::test]
-    async fn multipart_copy_md5_without_sum_omits_algorithm() {
+    async fn multipart_copy_md5_without_sum_falls_back_to_the_sdk_default() {
         let create = mock!(Client::create_multipart_upload)
             .match_requests(|req| {
-                req.checksum_algorithm().is_none() && req.checksum_type().is_none()
+                req.checksum_algorithm() == Some(&ChecksumAlgorithm::Crc64Nvme)
+                    && req.checksum_type() == Some(&ChecksumType::FullObject)
             })
             .sequence()
             .output(|| {
@@ -1828,8 +1840,6 @@ mod test {
             .build()
             .unwrap();
 
-        // Without a known sum no additional checksum can be applied, so the create request
-        // must not declare an algorithm for a checksum the SDK cannot compute.
         let state = copy_state_with_ctx("md5", None);
         let options = MultiPartOptions {
             part_number: Some(1),
@@ -1871,19 +1881,128 @@ mod test {
         assert_eq!(complete.num_calls(), 1);
     }
 
-    #[test]
-    fn only_whole_object_reads_validate_response_checksums() {
-        // The mock harness does not run the response checksum interceptor, so assert the
-        // decision itself rather than trying to observe the config override through a request.
-        assert!(S3::validate_response_checksum(None));
-        assert!(!S3::validate_response_checksum(Some("bytes=0-3")));
-        assert!(!S3::validate_response_checksum(Some("bytes=0-8388607")));
+    #[tokio::test]
+    async fn multipart_aws_etag_ctx_falls_back_to_the_sdk_default() {
+        let create = mock!(Client::create_multipart_upload)
+            .match_requests(|req| {
+                req.checksum_algorithm() == Some(&ChecksumAlgorithm::Crc64Nvme)
+                    && req.checksum_type() == Some(&ChecksumType::FullObject)
+            })
+            .sequence()
+            .output(|| {
+                CreateMultipartUploadOutput::builder()
+                    .upload_id("upload-id")
+                    .build()
+            })
+            .build();
+        let upload_part = mock!(Client::upload_part)
+            .match_requests(|req| {
+                req.checksum_algorithm() == Some(&ChecksumAlgorithm::Crc64Nvme)
+                    && req.checksum_md5().is_none()
+            })
+            .sequence()
+            .output(|| UploadPartOutput::builder().e_tag("etag").build())
+            .build();
+
+        let destination = s3_destination(
+            retrying_mock_client(&[&create, &upload_part]),
+            MetadataCopy::Copy,
+        );
+        let state = copy_state_with_ctx("md5-aws-5mib", Some(EXPECTED_MD5_SUM));
+        let options = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: BODY.len() as u64,
+            ..Default::default()
+        };
+        destination
+            .put_object_multipart(CopyContent::empty(), options, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(create.num_calls(), 1);
+        assert_eq!(upload_part.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_undeclared_checksum_dropped_on_completion() {
+        let create = mock!(Client::create_multipart_upload)
+            .match_requests(|req| req.checksum_algorithm().is_none())
+            .sequence()
+            .output(|| {
+                CreateMultipartUploadOutput::builder()
+                    .upload_id("upload-id")
+                    .build()
+            })
+            .build();
+        let upload_part = mock!(Client::upload_part)
+            .match_requests(|req| req.checksum_algorithm().is_none())
+            .sequence()
+            .output(|| {
+                UploadPartOutput::builder()
+                    .e_tag("etag")
+                    .checksum_crc32("endpoint-computed")
+                    .build()
+            })
+            .build();
+        let complete = mock!(Client::complete_multipart_upload)
+            .match_requests(|req| {
+                req.multipart_upload().is_some_and(|upload| {
+                    upload.parts().iter().all(|part| {
+                        part.e_tag() == Some("etag")
+                            && part.checksum_crc32().is_none()
+                            && part.checksum_crc32_c().is_none()
+                            && part.checksum_sha1().is_none()
+                            && part.checksum_sha256().is_none()
+                            && part.checksum_sha512().is_none()
+                            && part.checksum_crc64_nvme().is_none()
+                            && part.checksum_xxhash64().is_none()
+                            && part.checksum_xxhash3().is_none()
+                            && part.checksum_xxhash128().is_none()
+                            && part.checksum_md5().is_none()
+                    })
+                })
+            })
+            .sequence()
+            .output(|| CompleteMultipartUploadOutput::builder().build())
+            .build();
+
+        let destination = s3_destination_no_request_checksum(retrying_mock_client(&[
+            &create,
+            &upload_part,
+            &complete,
+        ]));
+        let state = copy_state_with_ctx("md5-aws-5mib", Some(EXPECTED_MD5_SUM));
+        let options = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: BODY.len() as u64,
+            ..Default::default()
+        };
+        let result = destination
+            .put_object_multipart(CopyContent::empty(), options, &state)
+            .await
+            .unwrap();
+
+        let part = result.part.unwrap();
+        assert_eq!(part.crc32, Some("endpoint-computed".to_string()));
+
+        let completion = MultiPartOptions {
+            part_number: None,
+            upload_id: Some("upload-id".to_string()),
+            parts: Some(vec![part]),
+            ..Default::default()
+        };
+        destination
+            .put_object_multipart(CopyContent::empty(), completion, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(complete.num_calls(), 1);
     }
 
     #[tokio::test]
     async fn ranged_download_reads_partial_body() {
-        // A ranged read returns a partial body alongside a full-object checksum header, which is
-        // the shape that SDK validation cannot handle.
         let get_object = mock!(Client::get_object)
             .match_requests(|req| req.range() == Some("bytes=0-3"))
             .sequence()
@@ -1922,7 +2041,6 @@ mod test {
             .build();
 
         let get_object = get_object_rule();
-        // The default context when no sums file exists, so this is the common upload path.
         let state = copy_state_with_ctx("crc64nvme", None);
         download(&get_object, |content| {
             let destination =
@@ -2026,7 +2144,8 @@ mod test {
     async fn put_object_no_precalculated_checksum_omits_sum() {
         let put_object = mock!(Client::put_object)
             .match_requests(|req| {
-                req.checksum_md5().is_none() && req.checksum_algorithm().is_none()
+                req.checksum_md5().is_none()
+                    && req.checksum_algorithm() == Some(&ChecksumAlgorithm::Crc64Nvme)
             })
             .sequence()
             .output(|| PutObjectOutput::builder().build())
@@ -2044,10 +2163,11 @@ mod test {
     }
 
     #[tokio::test]
-    async fn multipart_no_precalculated_checksum_omits_declaration() {
+    async fn multipart_no_precalculated_checksum_falls_back_to_the_sdk_default() {
         let create = mock!(Client::create_multipart_upload)
             .match_requests(|req| {
-                req.checksum_algorithm().is_none() && req.checksum_type().is_none()
+                req.checksum_algorithm() == Some(&ChecksumAlgorithm::Crc64Nvme)
+                    && req.checksum_type() == Some(&ChecksumType::FullObject)
             })
             .sequence()
             .output(|| {
@@ -2057,7 +2177,10 @@ mod test {
             })
             .build();
         let upload_part = mock!(Client::upload_part)
-            .match_requests(|req| req.checksum_algorithm().is_none())
+            .match_requests(|req| {
+                req.checksum_algorithm() == Some(&ChecksumAlgorithm::Crc64Nvme)
+                    && req.checksum_md5().is_none()
+            })
             .sequence()
             .output(|| UploadPartOutput::builder().e_tag("etag").build())
             .build();
@@ -2111,7 +2234,6 @@ mod test {
         assert_eq!(complete.num_calls(), 1);
     }
 
-    /// Preservation: tag_mode = Copy with successful GetObjectTagging returns formatted tags.
     #[tokio::test]
     async fn preservation_copy_mode_with_tags_returns_formatted_tags() {
         let head_object = head_object_rule();
@@ -2132,21 +2254,12 @@ mod test {
             .initialize_state(KEY.to_string(), BUCKET.to_string())
             .await;
 
-        assert!(
-            result.is_ok(),
-            "Copy mode with valid tags should succeed, got: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok());
         let state = result.unwrap();
-        assert_eq!(
-            state.tags(),
-            Some("env=prod&team=data".to_string()),
-            "Copy mode should format tags as key=value pairs joined by &"
-        );
+        assert_eq!(state.tags(), Some("env=prod&team=data".to_string()));
         assert_eq!(state.size(), BODY.len() as u64);
     }
 
-    /// Preservation: tag_mode = Copy with GetObjectTagging error propagates the error.
     #[tokio::test]
     async fn preservation_copy_mode_with_tagging_error_propagates_error() {
         let head_object = head_object_rule();
@@ -2168,14 +2281,9 @@ mod test {
             .initialize_state(KEY.to_string(), BUCKET.to_string())
             .await;
 
-        assert!(
-            result.is_err(),
-            "Copy mode should propagate tagging errors, but got Ok"
-        );
+        assert!(result.is_err());
     }
 
-    /// Best effort copies proceed without tags on a tagging error, but the error must still be
-    /// recorded so that it appears in the copy stats rather than being swallowed.
     #[tokio::test]
     async fn best_effort_tagging_error_is_recorded() {
         let head_object = head_object_rule();
@@ -2203,8 +2311,6 @@ mod test {
         assert!(state.api_errors()[0].is_access_denied());
     }
 
-    /// Tagging support varies across S3-compatible endpoints, so a best effort copy proceeds on
-    /// any tagging error, not only access denied. The error is still recorded.
     #[tokio::test]
     async fn best_effort_tagging_records_non_access_denied_errors() {
         let head_object = head_object_rule();
@@ -2232,10 +2338,8 @@ mod test {
         assert!(!state.api_errors()[0].is_access_denied());
     }
 
-    /// Preservation: HeadObject size and metadata extraction is consistent regardless of tag_mode.
     #[tokio::test]
     async fn preservation_head_object_size_consistent_across_tag_modes() {
-        // Copy mode - size should be extracted correctly
         let head_object = head_object_rule();
         let get_object_tagging = mock!(Client::get_object_tagging)
             .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
@@ -2253,14 +2357,9 @@ mod test {
             .initialize_state(KEY.to_string(), BUCKET.to_string())
             .await
             .unwrap();
-        assert_eq!(
-            result.size(),
-            BODY.len() as u64,
-            "Copy mode: size should match content_length"
-        );
+        assert_eq!(result.size(), BODY.len() as u64);
     }
 
-    /// Preservation: HeadObject metadata is passed through in Copy mode.
     #[tokio::test]
     async fn preservation_head_object_metadata_passed_through() {
         let head_object = mock!(Client::head_object)
@@ -2296,9 +2395,6 @@ mod test {
         );
     }
 
-    /// The maximum object size is the maximum number of parts multiplied by the maximum part
-    /// size, so it must stay consistent with those limits.
-    /// See https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
     #[test]
     fn max_object_size_matches_the_part_limits() {
         let s3 = s3_destination(retrying_mock_client(&[]), MetadataCopy::Copy);
@@ -2307,8 +2403,6 @@ mod test {
         assert_eq!(s3.max_object_size(), s3.max_parts() * s3.max_part_size());
     }
 
-    /// Only the algorithms the SDK cannot compute are sent as precalculated values. Anything else
-    /// fails to convert rather than being silently dropped from the request.
     #[test]
     fn precalculated_algorithms_are_the_non_computable_ones() {
         let precalculated = [
@@ -2323,7 +2417,6 @@ mod test {
             assert_eq!(PrecalculatedAlgorithm::try_from(&ctx).unwrap(), expected);
         }
 
-        // The SDK computes these, so they are never sent as a value.
         for ctx in [
             StandardCtx::crc32(),
             StandardCtx::crc32c(),
@@ -2335,7 +2428,6 @@ mod test {
             assert!(PrecalculatedAlgorithm::try_from(&ctx).is_err());
         }
 
-        // S3 does not support this one at all.
         assert!(PrecalculatedAlgorithm::try_from(&StandardCtx::QuickXor).is_err());
     }
 

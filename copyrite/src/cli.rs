@@ -75,6 +75,17 @@ impl Command {
         Ok(args)
     }
 
+    /// Parse the command from an iterator, returning an error instead of exiting the process.
+    pub fn try_parse_from_iter<I, T>(iter: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let args = Self::try_parse_from(iter).map_err(|err| ParseError(err.to_string()))?;
+        Self::validate(&args)?;
+        Ok(args)
+    }
+
     /// Validate commands.
     pub fn validate(args: &Self) -> Result<()> {
         if let Subcommands::Generate(generate) = &args.commands {
@@ -109,6 +120,33 @@ impl Command {
         }
 
         Ok(())
+    }
+
+    /// Execute a `copy` command and return its stats.
+    pub async fn copy_stats(self) -> stats::Result<CopyStats> {
+        let source_client = self.credentials.source_client(&self.compatibility).await?;
+        let destination_client = self
+            .credentials
+            .destination_client(&self.compatibility)
+            .await?;
+
+        let write_sums_file = self.output.write_sums_file;
+        let ui = self.output.ui;
+
+        let Subcommands::Copy(copy_args) = self.commands else {
+            return Err(ParseError("not a copy command".to_string()).into());
+        };
+
+        copy_args
+            .copy(
+                source_client,
+                destination_client,
+                self.credentials,
+                self.optimization,
+                write_sums_file,
+                ui,
+            )
+            .await
     }
 
     /// Execute the command from the args.
@@ -535,7 +573,7 @@ impl MetadataCopy {
 }
 
 /// Mode to execute copy task in.
-#[derive(Debug, Clone, ValueEnum, Copy, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, ValueEnum, Copy, Default, Deserialize, Serialize, Eq, PartialEq)]
 pub enum CopyMode {
     /// Use server-side copy operations if they are available. This falls back to download-upload
     /// when the destination cannot directly read the source object, e.g. when copying between

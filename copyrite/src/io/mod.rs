@@ -7,9 +7,7 @@ use crate::error::{Error, Result};
 use aws_config::Region;
 use aws_credential_types::provider::ProvideCredentials;
 use aws_sdk_s3::client::customize::CustomizableOperation;
-use aws_sdk_s3::config::{
-    RequestChecksumCalculation, ResponseChecksumValidation, StalledStreamProtectionConfig,
-};
+use aws_sdk_s3::config::{RequestChecksumCalculation, StalledStreamProtectionConfig};
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation;
 use aws_sdk_s3::{Client, config};
@@ -201,49 +199,7 @@ impl S3Client {
         }
     }
 
-    /// A `get_object` that can opt out of SDK-side response checksum validation for this
-    /// request only, leaving it enabled for every other call.
-    ///
-    /// The SDK has no notion of ranges when validating: it compares a full-object
-    /// `x-amz-checksum-*` response header against whatever body arrives, so a partial body
-    /// fails or silently passes depending on what the endpoint returns. Composite checksums are
-    /// already skipped by the SDK, but full-object ones are not.
-    pub async fn get_object_validating<F>(
-        &self,
-        validate_response: bool,
-        configure: F,
-    ) -> result::Result<
-        operation::get_object::GetObjectOutput,
-        SdkError<operation::get_object::GetObjectError>,
-    >
-    where
-        F: FnOnce(
-            operation::get_object::builders::GetObjectFluentBuilder,
-        ) -> operation::get_object::builders::GetObjectFluentBuilder,
-    {
-        let builder = configure(self.inner.get_object());
-        let customize = self.ssp_override(
-            builder.customize(),
-            self.stalled_stream_protection.disable_all(),
-        );
-
-        let customize = if validate_response {
-            customize
-        } else {
-            customize.config_override(
-                config::Config::builder()
-                    .response_checksum_validation(ResponseChecksumValidation::WhenRequired),
-            )
-        };
-
-        customize.send().await
-    }
-
     /// Apply the checksum-related SDK config that is common to all clients.
-    ///
-    /// Response validation is deliberately left at the SDK default of `WhenSupported` so that
-    /// unranged reads keep validating in the SDK as well as in copyrite. Ranged reads opt out
-    /// per-request instead, see `S3::send_get_object`.
     fn apply_checksum_config(
         builder: config::Builder,
         no_request_checksum: bool,
@@ -635,8 +591,6 @@ mod tests {
 
     #[test]
     fn checksum_config_leaves_response_validation_at_the_default() {
-        // Response validation is left to the SDK default so unranged reads keep validating.
-        // Ranged reads opt out per-request instead, which `get_object_validating` covers.
         for no_request_checksum in [false, true] {
             let config =
                 S3Client::apply_checksum_config(config::Builder::default(), no_request_checksum)

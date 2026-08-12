@@ -139,9 +139,6 @@ impl Ctx {
 impl TryFrom<Ctx> for ChecksumAlgorithm {
     type Error = Error;
 
-    /// Not every checksum has an S3 algorithm, so this fails rather than substituting one. The
-    /// match is exhaustive so that a new checksum does not compile until it is decided whether
-    /// S3 supports it.
     fn try_from(ctx: Ctx) -> Result<Self> {
         Ok(match ctx.into_standard() {
             StandardCtx::CRC64NVME(_, _) => ChecksumAlgorithm::Crc64Nvme,
@@ -154,10 +151,9 @@ impl TryFrom<Ctx> for ChecksumAlgorithm {
             StandardCtx::XXHash64(_) => ChecksumAlgorithm::Xxhash64,
             StandardCtx::XXHash3(_) => ChecksumAlgorithm::Xxhash3,
             StandardCtx::XXHash128(_) => ChecksumAlgorithm::Xxhash128,
-            // Not formatted with `Display`, which is unimplemented for this variant.
             StandardCtx::QuickXor => {
                 return Err(Error::aws_error(
-                    "`quickxor` is not an S3 checksum algorithm".to_string(),
+                    "`quickxor` is not implemented".to_string(),
                 ));
             }
         })
@@ -165,15 +161,12 @@ impl TryFrom<Ctx> for ChecksumAlgorithm {
 }
 
 /// The checksum type to declare when creating a multipart upload.
-///
-/// Note that only the [`MultipartChecksumType::Composite`] case is currently reachable, because
-/// the precalculated path is the only caller and every algorithm on it is composite-only.
 impl From<MultipartChecksumType> for ChecksumType {
     fn from(checksum_type: MultipartChecksumType) -> Self {
         match checksum_type {
             MultipartChecksumType::FullObject => ChecksumType::FullObject,
             MultipartChecksumType::Composite => ChecksumType::Composite,
-            // Composite is chosen for algorithms that support both, see the type's documentation.
+            // Composite is chosen for algorithms that support both.
             MultipartChecksumType::Either => ChecksumType::Composite,
         }
     }
@@ -211,8 +204,6 @@ pub(crate) mod test {
     use tokio::fs::File;
     use tokio::join;
 
-    /// Every checksum S3 supports maps to its own algorithm, and one that S3 does not support
-    /// fails instead of being mislabelled as something else.
     #[test]
     fn checksum_algorithm_conversion_is_exhaustive() -> Result<()> {
         let cases = [
@@ -230,14 +221,10 @@ pub(crate) mod test {
 
         for (name, expected) in cases {
             let ctx = Ctx::from_str(name)?;
-            assert_eq!(ChecksumAlgorithm::try_from(ctx)?, expected, "{}", name);
+            assert_eq!(ChecksumAlgorithm::try_from(ctx)?, expected);
         }
 
-        // QuickXor has no S3 algorithm, and no parse name either, so it is built directly.
-        assert!(
-            ChecksumAlgorithm::try_from(Ctx::Regular(StandardCtx::QuickXor)).is_err(),
-            "quickxor must not be mislabelled as another algorithm"
-        );
+        assert!(ChecksumAlgorithm::try_from(Ctx::Regular(StandardCtx::QuickXor)).is_err(),);
 
         Ok(())
     }
