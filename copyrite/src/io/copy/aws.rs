@@ -411,7 +411,12 @@ impl S3 {
     }
 
     /// The additional checksum algorithm for the SDK or S3 to compute during an upload or copy.
-    fn additional_checksum_algorithm(state: &CopyState) -> Option<ChecksumAlgorithm> {
+    fn additional_checksum_algorithm(&self, state: &CopyState) -> Option<ChecksumAlgorithm> {
+        // No additional checksums if no_request_checksum is specified.
+        if self.client.no_request_checksum() {
+            return None;
+        }
+
         state
             .additional_ctx()
             .map(Ctx::into_standard)
@@ -439,7 +444,7 @@ impl S3 {
 
     /// The additional checksum to attach to an upload.
     fn upload_checksum(&self, state: &CopyState) -> UploadChecksum {
-        if let Some(algorithm) = Self::additional_checksum_algorithm(state) {
+        if let Some(algorithm) = self.additional_checksum_algorithm(state) {
             UploadChecksum::Computed(algorithm)
         } else if self.client.no_precalculated_checksum() {
             // Some endpoints reject uploads that declare checksum algorithms which are not
@@ -463,7 +468,10 @@ impl S3 {
         let destination = self.get_destination()?;
 
         // When no algorithm is set S3 copies the checksum algorithm from the source object.
-        let additional_checksum = Self::additional_checksum_algorithm(state);
+        // This asks the server to recompute rather than sending a value, so the orphaned header
+        // rule does not apply, but `no_request_checksum` suppresses it anyway to keep a single
+        // meaning for the option: copyrite never asks for checksums.
+        let additional_checksum = self.additional_checksum_algorithm(state);
         let do_copy = |tagging, tagging_set, metadata, metadata_set, additional_checksum| async {
             let etag = state.etag();
             self.client
@@ -918,7 +926,7 @@ impl S3 {
             let part_number_i32 = i32::try_from(part_number)?;
             let content_length = i64::try_from(multi_part.bytes_transferred())?;
             // Only SDK-computable algorithms have trailers.
-            let additional_checksum = Self::additional_checksum_algorithm(state);
+            let additional_checksum = self.additional_checksum_algorithm(state);
 
             // A precalculated algorithm is declared on the upload, so every part must have
             // the checksum value.
@@ -1180,6 +1188,18 @@ mod test {
         S3Builder::default()
             .with_client(
                 S3Client::new(Arc::new(client), false, false).with_no_precalculated_checksum(true),
+            )
+            .with_copy_tags(MetadataCopy::Copy)
+            .with_destination(BUCKET, KEY)
+            .build()
+            .unwrap()
+    }
+
+    /// Build an S3 destination from a mock client with request checksums disabled.
+    fn s3_destination_no_request_checksum(client: Client) -> S3 {
+        S3Builder::default()
+            .with_client(
+                S3Client::new(Arc::new(client), false, false).with_no_request_checksum(true),
             )
             .with_copy_tags(MetadataCopy::Copy)
             .with_destination(BUCKET, KEY)
@@ -1767,6 +1787,115 @@ mod test {
             .unwrap();
 
         assert_eq!(complete.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn put_object_no_request_checksum() {
+        let put_object = mock!(Client::put_object)
+            .match_requests(|req| req.checksum_algorithm().is_none())
+            .sequence()
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+
+        let get_object = get_object_rule();
+        // The default context when no sums file exists, so this is the common upload path.
+        let state = copy_state_with_ctx("crc64nvme", None);
+        download(&get_object, |content| {
+            let destination =
+                s3_destination_no_request_checksum(retrying_mock_client(&[&put_object]));
+            async move { destination.put_object(content, &state).await }
+        })
+        .await
+        .unwrap();
+        assert_eq!(put_object.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_no_request_checksum() {
+        let create = mock!(Client::create_multipart_upload)
+            .match_requests(|req| req.checksum_algorithm().is_none())
+            .sequence()
+            .output(|| {
+                CreateMultipartUploadOutput::builder()
+                    .upload_id("upload-id")
+                    .build()
+            })
+            .build();
+        let upload_part = mock!(Client::upload_part)
+            .match_requests(|req| req.checksum_algorithm().is_none())
+            .sequence()
+            .output(|| UploadPartOutput::builder().e_tag("etag").build())
+            .build();
+
+        let state = copy_state_with_ctx("crc64nvme", None);
+        let get_object = get_object_rule();
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+        let options = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: BODY.len() as u64,
+            ..Default::default()
+        };
+        let content = source
+            .download(Some(options.clone()), &CopyState::default())
+            .await
+            .unwrap();
+
+        let destination =
+            s3_destination_no_request_checksum(retrying_mock_client(&[&create, &upload_part]));
+        destination
+            .put_object_multipart(content, options, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(create.num_calls(), 1);
+        assert_eq!(upload_part.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn copy_object_no_request_checksum() {
+        let copy = mock!(Client::copy_object)
+            .match_requests(|req| req.checksum_algorithm().is_none())
+            .sequence()
+            .output(|| CopyObjectOutput::builder().build())
+            .build();
+
+        let s3 = S3Builder::default()
+            .with_client(
+                S3Client::new(Arc::new(retrying_mock_client(&[&copy])), false, false)
+                    .with_no_request_checksum(true),
+            )
+            .with_copy_tags(MetadataCopy::Copy)
+            .with_source(BUCKET, KEY)
+            .with_destination(BUCKET, KEY)
+            .build()
+            .unwrap();
+
+        let state = copy_state_with_ctx("crc64nvme", None);
+        s3.copy_object(&state).await.unwrap();
+        assert_eq!(copy.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_request_checksum_still_sends_precalculated() {
+        let put_object = mock!(Client::put_object)
+            .match_requests(|req| {
+                req.checksum_algorithm().is_none() && req.checksum_md5().is_some()
+            })
+            .sequence()
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+
+        let get_object = get_object_rule();
+        let state = copy_state_with_ctx("md5", Some(EXPECTED_MD5_SUM));
+        download(&get_object, |content| {
+            let destination =
+                s3_destination_no_request_checksum(retrying_mock_client(&[&put_object]));
+            async move { destination.put_object(content, &state).await }
+        })
+        .await
+        .unwrap();
+        assert_eq!(put_object.num_calls(), 1);
     }
 
     #[tokio::test]
