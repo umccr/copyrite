@@ -5,7 +5,7 @@
 use anyhow::Result;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
-use aws_sdk_s3::types::ChecksumMode;
+use aws_sdk_s3::types::{ChecksumMode, ChecksumType};
 use copyrite::cli::{Command, CredentialProvider};
 use copyrite::io::{CredentialOverrides, Provider, S3Client};
 use copyrite::test::TestFileBuilder;
@@ -130,7 +130,7 @@ async fn local_s3_multipart(file: &Path, config: &TestConfig, client: &Client) -
     execute_multipart(file.as_ref(), uri.as_ref(), config).await;
 
     let head = get_head_object(client, uri.as_ref(), config).await?;
-    assert_head_multipart(head);
+    assert_head_multipart(head, config);
 
     Ok(())
 }
@@ -156,7 +156,7 @@ async fn s3_s3_multipart(config: &TestConfig, client: &Client) -> Result<()> {
     execute_multipart(uri.as_ref(), destination.as_ref(), config).await;
 
     let head = get_head_object(client, destination.as_ref(), config).await?;
-    assert_head_multipart(head);
+    assert_head_multipart(head, config);
 
     Ok(())
 }
@@ -271,15 +271,35 @@ async fn execute_single_part(from: &str, to: &str, config: &TestConfig) {
     execute_command(&commands).await;
 }
 
-fn assert_head_multipart(head: HeadObjectOutput) {
+fn assert_head_multipart(head: HeadObjectOutput, config: &TestConfig) {
     assert_eq!(
         head.e_tag,
         Some("\"ec1e29805585d04a93eb8cf464b68c43-2\"".to_string())
     );
 
-    if let Some(checksum) = head.checksum_crc64_nvme {
-        assert_eq!(checksum, "yM/EwMxFxsE=".to_string());
+    // S3-compatible endpoints may discard the checksum, so there is nothing to assert on them.
+    if config.is_s3_compatible() {
+        return;
     }
+
+    // `crc64nvme` is the default context, so this is the most common multipart path. AWS only
+    // supports it as a full object checksum, and does not document what the checksum type
+    // defaults to when `CreateMultipartUpload` does not declare one. Asserting the stored value
+    // equals the whole-object digest, which is the same value the single part copy stores, pins
+    // down that a multipart upload without a declared type is still stored as a full object
+    // checksum rather than a checksum of part checksums.
+    assert_eq!(
+        head.checksum_crc64_nvme,
+        Some("yM/EwMxFxsE=".to_string()),
+        "a multipart `crc64nvme` upload must store the full object checksum"
+    );
+    assert_eq!(
+        head.checksum_type,
+        Some(ChecksumType::FullObject),
+        "`crc64nvme` has no composite form, so the stored type must be full object"
+    );
+
+    // Only present when the sums file asks for it, unlike `crc64nvme` above.
     if let Some(checksum) = head.checksum_crc32_c {
         assert_eq!(checksum, "4VjD4A==".to_string());
     }
