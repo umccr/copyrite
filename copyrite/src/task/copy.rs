@@ -168,6 +168,13 @@ impl CopyTaskBuilder {
         object_size <= single_part_limit
     }
 
+    /// An explicitly set part size that will not be honored, because a part size only applies to
+    /// multipart copies and the object does not exceed the multipart threshold. Returns the part
+    /// size that is being ignored so that it can be reported.
+    fn ignored_part_size(part_size: Option<u64>, object_size: u64, threshold: u64) -> Option<u64> {
+        part_size.filter(|_| object_size <= threshold)
+    }
+
     /// Find the best preferred multipart part size for an object, if a valid one exists.
     fn preferred_multipart_part_size(
         object_size: u64,
@@ -259,7 +266,9 @@ impl CopyTaskBuilder {
     ///
     /// The order of preference is:
     /// 1. If `part_size` is set for the builder, use multipart copies when the size of the object
-    ///    reaches the `multipart_threshold`.
+    ///    reaches the `multipart_threshold`. A part size only applies to multipart copies, so an
+    ///    object that does not exceed the threshold ignores it and warns, see
+    ///    [`Self::ignored_part_size`].
     /// 2. Use an existing `.sums` file to determine single part or multipart copies. If the source
     ///    object contains a multipart checksum, match that and use a multipart copy, otherwise if
     ///    it contains a single part copy, match the single part copy. The `multipart_threshold`
@@ -349,6 +358,22 @@ impl CopyTaskBuilder {
                     part_size, threshold, size
                 )))
             };
+        }
+
+        // An explicit part size only applies to multipart copies, so an object at or under the
+        // threshold ignores it and falls through to a single part copy below. Say so rather
+        // than silently dropping the option.
+        if let Some(part_size) = Self::ignored_part_size(self.part_size, size, threshold)
+            && self.ui
+        {
+            println!(
+                "{} ignoring the part size `{}` because the object size `{}` does not exceed the \
+                 multipart threshold `{}`, copying in a single part",
+                style("warning:").yellow().bold(),
+                part_size,
+                size,
+                threshold
+            );
         }
 
         let err_fn = || {
@@ -951,6 +976,30 @@ pub(crate) mod test {
             .await;
 
         assert!(result.is_err());
+    }
+
+    /// An explicit part size only applies to multipart copies. Objects at or under the threshold
+    /// fall through to a single part copy, which warns rather than silently dropping the option.
+    #[test]
+    fn part_size_is_ignored_under_the_threshold() {
+        let part_size = Some(8 * 1024 * 1024);
+
+        // At or under the threshold the part size cannot be honored.
+        assert_eq!(
+            CopyTaskBuilder::ignored_part_size(part_size, 100, 100),
+            part_size
+        );
+        assert_eq!(
+            CopyTaskBuilder::ignored_part_size(part_size, 99, 100),
+            part_size
+        );
+        // Above the threshold it is used, so nothing is ignored.
+        assert_eq!(
+            CopyTaskBuilder::ignored_part_size(part_size, 101, 100),
+            None
+        );
+        // Nothing to ignore without an explicit part size.
+        assert_eq!(CopyTaskBuilder::ignored_part_size(None, 100, 100), None);
     }
 
     #[test]
