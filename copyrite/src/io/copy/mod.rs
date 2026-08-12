@@ -180,6 +180,7 @@ pub struct CopyState {
     additional_ctx: Option<Ctx>,
     additional_sum: Option<String>,
     etag: Option<String>,
+    api_errors: Vec<ApiError>,
 }
 
 impl CopyState {
@@ -228,6 +229,7 @@ impl CopyState {
             additional_ctx: None,
             additional_sum: None,
             etag: None,
+            api_errors: Vec::new(),
         }
     }
 
@@ -241,6 +243,18 @@ impl CopyState {
     pub fn with_system_metadata(mut self, system_metadata: SystemMetadata) -> Self {
         self.system_metadata = system_metadata;
         self
+    }
+
+    /// Set the errors encountered while initializing the state on a best-effort path. These are
+    /// recoverable, so they are recorded for stats rather than propagated.
+    pub fn with_api_errors(mut self, api_errors: Vec<ApiError>) -> Self {
+        self.api_errors = api_errors;
+        self
+    }
+
+    /// Get the errors encountered while initializing the state.
+    pub fn api_errors(&self) -> &[ApiError] {
+        &self.api_errors
     }
 
     /// Set the additional context.

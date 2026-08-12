@@ -249,13 +249,19 @@ impl S3 {
     pub async fn initialize_state(&self, key: String, bucket: String) -> Result<CopyState> {
         let head = self.head_object(&key, &bucket).await?;
 
+        let mut api_errors = Vec::new();
         let tags = match self.tag_mode {
             MetadataCopy::Suppress => None,
-            MetadataCopy::BestEffort => self
-                .tagging(&key, &bucket)
-                .await
-                .ok()
-                .map(|output| Self::format_tag_set(output.tag_set())),
+            // Best effort copies proceed without tags on any tagging error, not just access
+            // denied, because tagging support varies across S3-compatible endpoints. The error
+            // is still recorded so it appears in the copy stats rather than disappearing.
+            MetadataCopy::BestEffort => match self.tagging(&key, &bucket).await {
+                Ok(output) => Some(Self::format_tag_set(output.tag_set())),
+                Err(ref err) => {
+                    api_errors.push(ApiError::from(err));
+                    None
+                }
+            },
             MetadataCopy::Copy => Some(Self::format_tag_set(
                 self.tagging(&key, &bucket).await?.tag_set(),
             )),
@@ -276,7 +282,8 @@ impl S3 {
 
         Ok(CopyState::new(size, tags, metadata)
             .with_system_metadata(system_metadata)
-            .with_etag(head.e_tag))
+            .with_etag(head.e_tag)
+            .with_api_errors(api_errors))
     }
 
     /// Format a tag set as URL query parameters. The tag keys and values must be URL-encoded
@@ -2103,6 +2110,64 @@ mod test {
             result.is_err(),
             "Copy mode should propagate tagging errors, but got Ok"
         );
+    }
+
+    /// Best effort copies proceed without tags on a tagging error, but the error must still be
+    /// recorded so that it appears in the copy stats rather than being swallowed.
+    #[tokio::test]
+    async fn best_effort_tagging_error_is_recorded() {
+        let head_object = head_object_rule();
+        let get_object_tagging = mock!(Client::get_object_tagging)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_error(|| {
+                GetObjectTaggingError::generic(
+                    ErrorMetadata::builder()
+                        .code("AccessDenied")
+                        .message("Access Denied")
+                        .build(),
+                )
+            });
+
+        let client = retrying_mock_client(&[&head_object, &get_object_tagging]);
+        let s3 = s3_source_with_tag_mode(client, MetadataCopy::BestEffort);
+
+        let state = s3
+            .initialize_state(KEY.to_string(), BUCKET.to_string())
+            .await
+            .unwrap();
+
+        assert!(state.tags().is_none());
+        assert_eq!(state.api_errors().len(), 1);
+        assert!(state.api_errors()[0].is_access_denied());
+    }
+
+    /// Tagging support varies across S3-compatible endpoints, so a best effort copy proceeds on
+    /// any tagging error, not only access denied. The error is still recorded.
+    #[tokio::test]
+    async fn best_effort_tagging_records_non_access_denied_errors() {
+        let head_object = head_object_rule();
+        let get_object_tagging = mock!(Client::get_object_tagging)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_error(|| {
+                GetObjectTaggingError::generic(
+                    ErrorMetadata::builder()
+                        .code("InvalidArgument")
+                        .message("unsupported")
+                        .build(),
+                )
+            });
+
+        let client = retrying_mock_client(&[&head_object, &get_object_tagging]);
+        let s3 = s3_source_with_tag_mode(client, MetadataCopy::BestEffort);
+
+        let state = s3
+            .initialize_state(KEY.to_string(), BUCKET.to_string())
+            .await
+            .unwrap();
+
+        assert!(state.tags().is_none());
+        assert_eq!(state.api_errors().len(), 1);
+        assert!(!state.api_errors()[0].is_access_denied());
     }
 
     /// Preservation: HeadObject size and metadata extraction is consistent regardless of tag_mode.

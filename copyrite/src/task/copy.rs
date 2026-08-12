@@ -5,7 +5,7 @@ use crate::checksum::Ctx;
 use crate::checksum::aws_etag::PREFERRED_PART_SIZES;
 use crate::checksum::file::{Checksum, SumsFile};
 use crate::cli::{CopyMode, MetadataCopy};
-use crate::error::Error::CopyError;
+use crate::error::Error::{AwsError, CopyError};
 use crate::error::{ApiError, Error, Result};
 use crate::io::Provider;
 use crate::io::S3Client;
@@ -411,7 +411,7 @@ impl CopyTaskBuilder {
     }
 
     /// Build a copy task.
-    pub async fn build(self) -> Result<CopyTask> {
+    pub async fn build(mut self) -> Result<CopyTask> {
         if self.source.is_empty() || self.destination.is_empty() {
             return Err(CopyError("source and destination required".to_string()));
         }
@@ -458,6 +458,9 @@ impl CopyTaskBuilder {
         let destination_copy = destination_builder.build().await?;
 
         let state = source_copy.initialize_state().await?;
+        // Errors on best-effort paths while initializing the state are recoverable, so they are
+        // recorded rather than propagated.
+        self.api_errors.extend(state.api_errors().iter().cloned());
 
         let (this, settings) = self
             .use_settings(destination.clone(), destination_copy.as_ref(), &state)
@@ -599,11 +602,19 @@ impl CopyTask {
             .run_multipart_parts(part_size, download_fn, upload_fn, &mut upload_id)
             .await;
 
-        // Abort a failed multipart copy so that incomplete parts do not accure.
+        // Abort a failed multipart copy so that incomplete parts do not accure. This stays
+        // best-effort: propagating an abort error here would mask the copy error that caused it,
+        // and aborts can fail benignly, e.g. a 404 when the upload is already gone. Record the
+        // error instead so that it is visible in the stats. Orphaned parts are backstopped by an
+        // `AbortIncompleteMultipartUpload` lifecycle rule on the bucket.
         if result.is_err()
             && let Some(upload_id) = upload_id
+            && let Err(AwsError {
+                api_error: Some(api_error),
+                ..
+            }) = self.destination_copy.abort_multipart(&upload_id).await
         {
-            let _ = self.destination_copy.abort_multipart(&upload_id).await;
+            self.recoverable_errors.insert(api_error);
         }
 
         result
@@ -842,6 +853,7 @@ pub(crate) mod test {
     struct TestDestination {
         max_object_size: u64,
         aborted: Arc<Mutex<Vec<String>>>,
+        abort_error: Option<ApiError>,
     }
 
     impl TestDestination {
@@ -849,6 +861,14 @@ pub(crate) mod test {
             Self {
                 max_object_size: u64::MAX,
                 ..Default::default()
+            }
+        }
+
+        /// A destination where `abort_multipart` fails with an API error.
+        fn failing_abort(api_error: ApiError) -> Self {
+            Self {
+                abort_error: Some(api_error),
+                ..Self::unlimited()
             }
         }
 
@@ -909,7 +929,13 @@ pub(crate) mod test {
 
         async fn abort_multipart(&self, upload_id: &str) -> error::Result<()> {
             self.aborted.lock().unwrap().push(upload_id.to_string());
-            Ok(())
+            match self.abort_error.clone() {
+                Some(api_error) => Err(AwsError {
+                    message: api_error.to_string(),
+                    api_error: Some(api_error),
+                }),
+                None => Ok(()),
+            }
         }
 
         async fn initialize_state(&self) -> error::Result<CopyState> {
@@ -1126,6 +1152,74 @@ pub(crate) mod test {
 
         assert!(result.is_err());
         assert_eq!(destination.aborted(), vec!["upload-id".to_string()]);
+    }
+
+    /// A failing abort must not mask the error that caused the copy to fail. The abort error is
+    /// recorded as recoverable instead.
+    #[tokio::test]
+    async fn failing_abort_records_the_error_without_masking_the_copy_error() {
+        let object_size = 25u64;
+        let part_size = 10u64;
+
+        let destination = TestDestination::failing_abort(ApiError::new(
+            "NoSuchUpload".to_string(),
+            "AbortMultipartUpload".to_string(),
+            "the upload does not exist".to_string(),
+        ));
+
+        let mut task = CopyTask {
+            additional_sums: Ctx::default(),
+            additional_sum: None,
+            part_size: Some(part_size),
+            source: Provider::try_from("s3://bucket/source").unwrap(),
+            destination: Provider::try_from("s3://bucket/destination").unwrap(),
+            source_copy: Box::new(TestDestination::unlimited()),
+            destination_copy: Box::new(destination.clone()),
+            copy_mode: CopyMode::DownloadUpload,
+            object_size,
+            concurrency: 4,
+            state: CopyState::new(object_size, None, None),
+            ordered_upload: true,
+            bytes_transferred: 0,
+            n_retries: 0,
+            recoverable_errors: HashSet::new(),
+            pb: None,
+        };
+
+        let result = task
+            .run_multipart(
+                part_size,
+                |options: MultiPartOptions, _state: CopyState| async move {
+                    Ok(options.part_number.unwrap_or_default())
+                },
+                |part_number: u64, options: MultiPartOptions, _state: CopyState| async move {
+                    if part_number >= 2 {
+                        return Err(CopyError("part failed".to_string()));
+                    }
+                    CopyResult::new(
+                        Some(Part {
+                            part_number,
+                            ..Default::default()
+                        }),
+                        Some("upload-id".to_string()),
+                        options.bytes_transferred(),
+                        vec![],
+                    )
+                },
+            )
+            .await;
+
+        // The upload error is returned, not the abort error.
+        assert!(matches!(result, Err(CopyError(msg)) if msg == "part failed"));
+        assert_eq!(destination.aborted(), vec!["upload-id".to_string()]);
+
+        let errors = task.api_errors();
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.to_string().contains("NoSuchUpload"))
+        );
     }
 
     #[tokio::test]
