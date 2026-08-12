@@ -626,6 +626,17 @@ impl S3 {
     }
 
     /// Send the ranged `GetObject` request for the source.
+    /// Whether the SDK should validate the response checksum for a read of this range.
+    ///
+    /// The SDK compares a full-object `x-amz-checksum-*` response header against whatever body
+    /// it receives, with no special casing for a 206. It skips composite values by their `-N`
+    /// suffix, but not full-object ones, so validating a partial body either fails or passes
+    /// vacuously depending on what the endpoint returns. Only whole-object reads are meaningful.
+    /// Copyrite verifies ranged reads end-to-end itself regardless.
+    fn validate_response_checksum(range: Option<&str>) -> bool {
+        range.is_none()
+    }
+
     async fn send_get_object(
         &self,
         multi_part: Option<MultiPartOptions>,
@@ -636,9 +647,11 @@ impl S3 {
             .as_ref()
             .and_then(|multi_part| multi_part.format_range());
 
+        let validate_response = Self::validate_response_checksum(range.as_deref());
+
         Ok(self
             .client
-            .get_object(|b| {
+            .get_object_validating(validate_response, |b| {
                 b.bucket(&source.bucket)
                     .key(&source.key)
                     .set_range(range)
@@ -1787,6 +1800,48 @@ mod test {
             .unwrap();
 
         assert_eq!(complete.num_calls(), 1);
+    }
+
+    #[test]
+    fn only_whole_object_reads_validate_response_checksums() {
+        // The mock harness does not run the response checksum interceptor, so assert the
+        // decision itself rather than trying to observe the config override through a request.
+        assert!(S3::validate_response_checksum(None));
+        assert!(!S3::validate_response_checksum(Some("bytes=0-3")));
+        assert!(!S3::validate_response_checksum(Some("bytes=0-8388607")));
+    }
+
+    #[tokio::test]
+    async fn ranged_download_reads_partial_body() {
+        // A ranged read returns a partial body alongside a full-object checksum header, which is
+        // the shape that SDK validation cannot handle.
+        let get_object = mock!(Client::get_object)
+            .match_requests(|req| req.range() == Some("bytes=0-3"))
+            .sequence()
+            .output(|| {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from_static(&BODY[..4]))
+                    .checksum_crc32("AAAAAA==")
+                    .build()
+            })
+            .build();
+
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+        let options = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: 4,
+            ..Default::default()
+        };
+        let mut content = source
+            .download(Some(options), &CopyState::default())
+            .await
+            .unwrap();
+
+        let mut buf = Vec::new();
+        content.data.read_to_end(buf.as_mut()).await.unwrap();
+        assert_eq!(buf, &BODY[..4]);
+        assert_eq!(get_object.num_calls(), 1);
     }
 
     #[tokio::test]
