@@ -140,7 +140,8 @@ impl CopyTaskBuilder {
         self
     }
 
-    /// Set the S3 client to use for S3 copies.
+    /// Set the number of simultaneous copy tasks. This must be at least 1, which is checked
+    /// when building the task.
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = Some(concurrency);
         self
@@ -390,6 +391,15 @@ impl CopyTaskBuilder {
             return Err(CopyError("source and destination required".to_string()));
         }
 
+        let concurrency = self
+            .concurrency
+            .ok_or_else(|| CopyError("concurrency not set".to_string()))?;
+        // A concurrency of zero panics when chunking parts, so reject it before doing any work
+        // rather than relying on the CLI to be the only caller.
+        if concurrency == 0 {
+            return Err(CopyError("concurrency must be at least 1".to_string()));
+        }
+
         let source = Provider::try_from(self.source.as_str())?;
         let destination = Provider::try_from(self.destination.as_str())?;
 
@@ -423,10 +433,6 @@ impl CopyTaskBuilder {
         let destination_copy = destination_builder.build().await?;
 
         let state = source_copy.initialize_state().await?;
-
-        let concurrency = self
-            .concurrency
-            .ok_or_else(|| CopyError("concurrency not set".to_string()))?;
 
         let (this, settings) = self
             .use_settings(destination.clone(), destination_copy.as_ref(), &state)
@@ -1101,6 +1107,20 @@ pub(crate) mod test {
         assert_eq!(contents, b"test");
 
         Ok(())
+    }
+
+    /// A concurrency of zero would panic in `slice::chunks`, so the builder must reject it. The
+    /// CLI also rejects it, but the builder is public so it cannot rely on that.
+    #[tokio::test]
+    async fn zero_concurrency_is_rejected() {
+        let result = CopyTaskBuilder::default()
+            .with_concurrency(0)
+            .with_source("s3://bucket/key".to_string())
+            .with_destination("s3://bucket/key2".to_string())
+            .build()
+            .await;
+
+        assert!(matches!(result, Err(CopyError(msg)) if msg.contains("at least 1")));
     }
 
     #[tokio::test]

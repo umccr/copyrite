@@ -15,6 +15,7 @@ use crate::task::ClientInput;
 use crate::task::check::{CheckTask, CheckTaskBuilder, GroupBy};
 use crate::task::copy::CopyTaskBuilder;
 use crate::task::generate::{GenerateTaskBuilder, SumCtxPairs};
+use clap::builder::RangedU64ValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use console::style;
 use humantime::Duration;
@@ -675,8 +676,14 @@ pub struct Copy {
     pub part_size: Option<u64>,
     /// The number of simultaneous copy tasks to run when using multipart copies.
     ///
-    /// This controls how many simultaneous connections are made to copy files.
-    #[arg(long, env = "COPYRITE_CONCURRENCY", default_value_t = 10)]
+    /// This controls how many simultaneous connections are made to copy files. Must be at
+    /// least 1.
+    #[arg(
+        long,
+        env = "COPYRITE_CONCURRENCY",
+        default_value_t = 10,
+        value_parser = RangedU64ValueParser::<usize>::new().range(1..)
+    )]
     pub concurrency: usize,
     /// Do not check the checksums of the copied files after copying.
     ///
