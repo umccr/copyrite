@@ -1098,8 +1098,10 @@ impl ObjectCopy for S3 {
     }
 
     fn max_object_size(&self) -> u64 {
-        // S3 objects can be at most 50 TiB.
-        54975581388800
+        // S3 objects can be at most 48.8 TiB, which is the maximum number of parts multiplied by
+        // the maximum part size, i.e. 10000 * 5 GiB.
+        // See https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
+        53687091200000
     }
 
     async fn abort_multipart(&self, upload_id: &str) -> Result<()> {
@@ -2232,6 +2234,17 @@ mod test {
             metadata.get("custom-key").map(String::as_str),
             Some("custom-value")
         );
+    }
+
+    /// The maximum object size is the maximum number of parts multiplied by the maximum part
+    /// size, so it must stay consistent with those limits.
+    /// See https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
+    #[test]
+    fn max_object_size_matches_the_part_limits() {
+        let s3 = s3_destination(retrying_mock_client(&[]), MetadataCopy::Copy);
+
+        assert_eq!(s3.max_object_size(), 53687091200000);
+        assert_eq!(s3.max_object_size(), s3.max_parts() * s3.max_part_size());
     }
 
     #[test]
