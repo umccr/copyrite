@@ -39,7 +39,7 @@ use std::io;
 use std::pin::Pin;
 use std::result;
 use std::sync::{Arc, Mutex};
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -351,9 +351,14 @@ impl S3 {
                 .create_multipart_upload(|b| {
                     let b = match checksum {
                         UploadChecksum::Computed(algorithm) => b.checksum_algorithm(algorithm),
-                        // Precalculated values are only sent at `CompleteMultipartUpload`.
-                        UploadChecksum::Precalculated(_, _) | UploadChecksum::None => b,
+                        // Algorithms without SDK support must be declared here, otherwise S3
+                        // rejects the value at `CompleteMultipartUpload` with `InvalidRequest`.
+                        UploadChecksum::Precalculated(ctx, _) => b
+                            .checksum_algorithm(ChecksumAlgorithm::from(Ctx::Regular(*ctx)))
+                            .checksum_type(ChecksumType::FullObject),
+                        UploadChecksum::None => b,
                     };
+
                     b.set_tagging(tagging)
                         .set_metadata(metadata)
                         .set_content_type(system_metadata.content_type)
@@ -602,6 +607,7 @@ impl S3 {
                 upload_id.to_string(),
                 parts,
                 self.upload_checksum(state),
+                state.size(),
             )
             .await?;
 
@@ -754,6 +760,23 @@ impl S3 {
         Self::retryable_body(Some(content.data), Arc::new(content.reopen))
     }
 
+    /// Buffer a part into memory and compute its checksum value. Declared algorithms without
+    /// SDK support have no trailers, so the value must be sent as a header before the body.
+    async fn buffered_part_body(
+        mut content: CopyContent,
+        ctx: &StandardCtx,
+        size_hint: u64,
+    ) -> Result<(ByteStream, String)> {
+        let mut buf = Vec::with_capacity(usize::try_from(size_hint)?);
+        content.data.read_to_end(&mut buf).await?;
+
+        let mut ctx = ctx.reset();
+        ctx.update(Arc::from(buf.as_slice()))?;
+        let digest = ctx.finalize()?;
+
+        Ok((ByteStream::from(buf), BASE64_STANDARD.encode(digest)))
+    }
+
     /// Put the object to S3 by streaming the content directly to the destination.
     pub async fn put_object(&self, content: CopyContent, state: &CopyState) -> Result<CopyResult> {
         // Best effort tagging needs to reissue the upload without tags.
@@ -894,20 +917,57 @@ impl S3 {
             let content_length = i64::try_from(multi_part.bytes_transferred())?;
             // Only SDK-computable algorithms have trailers.
             let additional_checksum = Self::additional_checksum_algorithm(state);
+
+            // A precalculated algorithm is declared on the upload, so every part must have
+            // the checksum value.
+            let (body, part_sum) = match self.upload_checksum(state) {
+                UploadChecksum::Precalculated(ctx, _) => {
+                    let (body, sum) =
+                        Self::buffered_part_body(content, &ctx, multi_part.bytes_transferred())
+                            .await?;
+                    (body, Some((ctx, sum)))
+                }
+                _ => (Self::upload_body(content), None),
+            };
+
             let part = self
                 .client
                 .upload_part(|b| {
+                    let b = match &part_sum {
+                        Some((ctx, sum)) => match ctx.as_ref() {
+                            StandardCtx::MD5(_) => b.checksum_md5(sum),
+                            StandardCtx::SHA512(_) => b.checksum_sha512(sum),
+                            StandardCtx::XXHash64(_) => b.checksum_xxhash64(sum),
+                            StandardCtx::XXHash3(_) => b.checksum_xxhash3(sum),
+                            StandardCtx::XXHash128(_) => b.checksum_xxhash128(sum),
+                            _ => b,
+                        },
+                        None => b.set_checksum_algorithm(additional_checksum),
+                    };
                     b.upload_id(&upload_id)
-                        .set_checksum_algorithm(additional_checksum)
                         .content_length(content_length)
                         .part_number(part_number_i32)
                         .key(&destination.key)
                         .bucket(&destination.bucket)
-                        .body(Self::upload_body(content))
+                        .body(body)
                 })
                 .await?;
 
             let mut result: CopyResult = (part, part_number, upload_id).into();
+            // Keep the computed value for the completion in case the endpoint does not return it.
+            if let (Some(part), Some((ctx, sum))) = (result.part.as_mut(), part_sum) {
+                let to_insert = match ctx.as_ref() {
+                    StandardCtx::MD5(_) => Some(&mut part.md5),
+                    StandardCtx::SHA512(_) => Some(&mut part.sha512),
+                    StandardCtx::XXHash64(_) => Some(&mut part.xxhash64),
+                    StandardCtx::XXHash3(_) => Some(&mut part.xxhash3),
+                    StandardCtx::XXHash128(_) => Some(&mut part.xxhash128),
+                    _ => None,
+                };
+                if let Some(to_insert) = to_insert {
+                    to_insert.get_or_insert(sum);
+                }
+            }
             result.bytes_transferred = multi_part.bytes_transferred();
             result = result.with_api_errors(err)?;
 
@@ -922,6 +982,7 @@ impl S3 {
                 upload_id.to_string(),
                 parts,
                 self.upload_checksum(state),
+                state.size(),
             )
             .await?;
 
@@ -937,10 +998,12 @@ impl S3 {
         upload_id: String,
         mut parts: Vec<Part>,
         checksum: UploadChecksum,
+        object_size: u64,
     ) -> Result<()> {
         // Parts must be ordered.
         parts.sort_by_key(|a| a.part_number);
 
+        let object_size = i64::try_from(object_size)?;
         let parts = parts
             .into_iter()
             .map(|part| part.try_into())
@@ -959,6 +1022,7 @@ impl S3 {
                             _ => b,
                         };
                         b.checksum_type(ChecksumType::FullObject)
+                            .mpu_object_size(object_size)
                     }
                     _ => b,
                 };
@@ -1552,9 +1616,12 @@ mod test {
     #[tokio::test]
     async fn multipart_md5_algorithm_completes() {
         let expected = BASE64_STANDARD.encode(hex::decode(EXPECTED_MD5_SUM).unwrap());
+        let expected_part =
+            BASE64_STANDARD.encode(hex::decode("098f6bcd4621d373cade4e832627b4f6").unwrap());
         let create = mock!(Client::create_multipart_upload)
             .match_requests(|req| {
-                req.checksum_algorithm().is_none() && req.checksum_type().is_none()
+                req.checksum_algorithm() == Some(&ChecksumAlgorithm::Md5)
+                    && req.checksum_type() == Some(&ChecksumType::FullObject)
             })
             .sequence()
             .output(|| {
@@ -1563,15 +1630,27 @@ mod test {
                     .build()
             })
             .build();
+        let part_sum = expected_part.clone();
         let upload_part = mock!(Client::upload_part)
-            .match_requests(|req| req.checksum_algorithm().is_none())
+            .match_requests(move |req| {
+                req.checksum_algorithm().is_none() && req.checksum_md5() == Some(part_sum.as_str())
+            })
             .sequence()
             .output(|| UploadPartOutput::builder().e_tag("etag").build())
             .build();
+        let complete_sum = expected.clone();
+        let complete_part_sum = expected_part.clone();
         let complete = mock!(Client::complete_multipart_upload)
             .match_requests(move |req| {
-                req.checksum_md5() == Some(expected.as_str())
+                req.checksum_md5() == Some(complete_sum.as_str())
                     && req.checksum_type() == Some(&ChecksumType::FullObject)
+                    && req.mpu_object_size() == Some(BODY.len() as i64)
+                    && req.multipart_upload().is_some_and(|upload| {
+                        upload
+                            .parts()
+                            .iter()
+                            .all(|part| part.checksum_md5() == Some(complete_part_sum.as_str()))
+                    })
             })
             .sequence()
             .output(|| CompleteMultipartUploadOutput::builder().build())
@@ -1595,19 +1674,18 @@ mod test {
             retrying_mock_client(&[&create, &upload_part, &complete]),
             MetadataCopy::Copy,
         );
-        destination
+        let result = destination
             .put_object_multipart(content, options, &state)
             .await
             .unwrap();
 
+        let part = result.part.unwrap();
+        assert_eq!(part.md5, Some(expected_part));
+
         let completion = MultiPartOptions {
             part_number: None,
             upload_id: Some("upload-id".to_string()),
-            parts: Some(vec![Part {
-                part_number: 1,
-                e_tag: Some("etag".to_string()),
-                ..Default::default()
-            }]),
+            parts: Some(vec![part]),
             ..Default::default()
         };
         destination
@@ -1790,8 +1868,6 @@ mod test {
     /// Preservation: tag_mode = Copy with successful GetObjectTagging returns formatted tags.
     #[tokio::test]
     async fn preservation_copy_mode_with_tags_returns_formatted_tags() {
-        use aws_sdk_s3::types::Tag;
-
         let head_object = head_object_rule();
         let get_object_tagging = mock!(Client::get_object_tagging)
             .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
@@ -1855,8 +1931,6 @@ mod test {
     /// Preservation: HeadObject size and metadata extraction is consistent regardless of tag_mode.
     #[tokio::test]
     async fn preservation_head_object_size_consistent_across_tag_modes() {
-        use aws_sdk_s3::types::Tag;
-
         // Copy mode - size should be extracted correctly
         let head_object = head_object_rule();
         let get_object_tagging = mock!(Client::get_object_tagging)
@@ -1885,8 +1959,6 @@ mod test {
     /// Preservation: HeadObject metadata is passed through in Copy mode.
     #[tokio::test]
     async fn preservation_head_object_metadata_passed_through() {
-        use aws_sdk_s3::types::Tag;
-
         let head_object = mock!(Client::head_object)
             .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
             .then_output(|| {
