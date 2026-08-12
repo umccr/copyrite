@@ -136,9 +136,14 @@ impl Ctx {
     }
 }
 
-impl From<Ctx> for ChecksumAlgorithm {
-    fn from(ctx: Ctx) -> Self {
-        match ctx.into_standard() {
+impl TryFrom<Ctx> for ChecksumAlgorithm {
+    type Error = Error;
+
+    /// Not every checksum has an S3 algorithm, so this fails rather than substituting one. The
+    /// match is exhaustive so that a new checksum does not compile until it is decided whether
+    /// S3 supports it.
+    fn try_from(ctx: Ctx) -> Result<Self> {
+        Ok(match ctx.into_standard() {
             StandardCtx::CRC64NVME(_, _) => ChecksumAlgorithm::Crc64Nvme,
             StandardCtx::CRC32C(_, _) => ChecksumAlgorithm::Crc32C,
             StandardCtx::CRC32(_, _) => ChecksumAlgorithm::Crc32,
@@ -149,20 +154,27 @@ impl From<Ctx> for ChecksumAlgorithm {
             StandardCtx::XXHash64(_) => ChecksumAlgorithm::Xxhash64,
             StandardCtx::XXHash3(_) => ChecksumAlgorithm::Xxhash3,
             StandardCtx::XXHash128(_) => ChecksumAlgorithm::Xxhash128,
-            // By default, set some algorithm if the context doesn't line up.
-            _ => ChecksumAlgorithm::Crc64Nvme,
-        }
+            // Not formatted with `Display`, which is unimplemented for this variant.
+            StandardCtx::QuickXor => {
+                return Err(Error::aws_error(
+                    "`quickxor` is not an S3 checksum algorithm".to_string(),
+                ));
+            }
+        })
     }
 }
 
 /// The checksum type to declare when creating a multipart upload.
 ///
-/// Note that only the [`MultipartChecksumType::Composite`] case is currently reachable.
+/// Note that only the [`MultipartChecksumType::Composite`] case is currently reachable, because
+/// the precalculated path is the only caller and every algorithm on it is composite-only.
 impl From<MultipartChecksumType> for ChecksumType {
     fn from(checksum_type: MultipartChecksumType) -> Self {
         match checksum_type {
             MultipartChecksumType::FullObject => ChecksumType::FullObject,
-            _ => ChecksumType::Composite,
+            MultipartChecksumType::Composite => ChecksumType::Composite,
+            // Composite is chosen for algorithms that support both, see the type's documentation.
+            MultipartChecksumType::Either => ChecksumType::Composite,
         }
     }
 }
@@ -198,6 +210,37 @@ pub(crate) mod test {
     use anyhow::Result;
     use tokio::fs::File;
     use tokio::join;
+
+    /// Every checksum S3 supports maps to its own algorithm, and one that S3 does not support
+    /// fails instead of being mislabelled as something else.
+    #[test]
+    fn checksum_algorithm_conversion_is_exhaustive() -> Result<()> {
+        let cases = [
+            ("md5", ChecksumAlgorithm::Md5),
+            ("sha1", ChecksumAlgorithm::Sha1),
+            ("sha256", ChecksumAlgorithm::Sha256),
+            ("sha512", ChecksumAlgorithm::Sha512),
+            ("crc32", ChecksumAlgorithm::Crc32),
+            ("crc32c", ChecksumAlgorithm::Crc32C),
+            ("crc64nvme", ChecksumAlgorithm::Crc64Nvme),
+            ("xxhash64", ChecksumAlgorithm::Xxhash64),
+            ("xxhash3", ChecksumAlgorithm::Xxhash3),
+            ("xxhash128", ChecksumAlgorithm::Xxhash128),
+        ];
+
+        for (name, expected) in cases {
+            let ctx = Ctx::from_str(name)?;
+            assert_eq!(ChecksumAlgorithm::try_from(ctx)?, expected, "{}", name);
+        }
+
+        // QuickXor has no S3 algorithm, and no parse name either, so it is built directly.
+        assert!(
+            ChecksumAlgorithm::try_from(Ctx::Regular(StandardCtx::QuickXor)).is_err(),
+            "quickxor must not be mislabelled as another algorithm"
+        );
+
+        Ok(())
+    }
 
     pub(crate) async fn test_checksum(checksum: &str, expected: &str) -> Result<()> {
         let test_file = TestFileBuilder::new()?.generate_test_defaults()?;

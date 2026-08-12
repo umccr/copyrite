@@ -221,10 +221,52 @@ impl From<&HeadObjectOutput> for SystemMetadata {
 enum UploadChecksum {
     /// An algorithm the SDK computes while streaming the upload.
     Computed(ChecksumAlgorithm),
-    /// A precalculated base64 digest for an algorithm.
-    Precalculated(Box<StandardCtx>, String),
+    /// A precalculated base64 digest for an algorithm. The context is kept alongside the
+    /// algorithm because the per-part digests are computed locally.
+    Precalculated(Box<StandardCtx>, PrecalculatedAlgorithm, String),
     /// No additional checksum applies to this upload.
     None,
+}
+
+/// An algorithm that S3 accepts only as a precalculated value, because the SDK cannot compute it
+/// during an upload. Converting into this enumerates the set in one place so that the request
+/// builders can match exhaustively instead of silently dropping an unexpected algorithm.
+///
+/// This is the complement of [`StandardCtx::is_sdk_computable_ctx`] within the algorithms S3
+/// supports, see [`StandardCtx::is_aws_additional_ctx`].
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PrecalculatedAlgorithm {
+    MD5,
+    SHA512,
+    XXHash64,
+    XXHash3,
+    XXHash128,
+}
+
+impl TryFrom<&StandardCtx> for PrecalculatedAlgorithm {
+    type Error = Error;
+
+    fn try_from(ctx: &StandardCtx) -> Result<Self> {
+        Ok(match ctx {
+            StandardCtx::MD5(_) => Self::MD5,
+            StandardCtx::SHA512(_) => Self::SHA512,
+            StandardCtx::XXHash64(_) => Self::XXHash64,
+            StandardCtx::XXHash3(_) => Self::XXHash3,
+            StandardCtx::XXHash128(_) => Self::XXHash128,
+            // Either the SDK computes it, so it is never sent as a value, or S3 does not support
+            // it at all. Both are a bug in the caller rather than something to send blindly.
+            StandardCtx::CRC32(_, _)
+            | StandardCtx::CRC32C(_, _)
+            | StandardCtx::CRC64NVME(_, _)
+            | StandardCtx::SHA1(_)
+            | StandardCtx::SHA256(_)
+            | StandardCtx::QuickXor => {
+                return Err(Error::aws_error(
+                    "not an algorithm S3 accepts as a precalculated checksum value".to_string(),
+                ));
+            }
+        })
+    }
 }
 
 /// Represents an S3 bucket and key.
@@ -352,22 +394,30 @@ impl S3 {
         system_metadata: SystemMetadata,
         checksum: UploadChecksum,
     ) -> Result<(String, Vec<ApiError>)> {
-        let do_upload = |tagging, metadata, checksum: UploadChecksum| async {
+        // The algorithm and type to declare on the create. Algorithms without SDK support must be
+        // declared here, otherwise S3 rejects the value at `CompleteMultipartUpload` with
+        // `InvalidRequest`. This is resolved up front because it can fail for a checksum S3 does
+        // not support, and the request builder closure cannot propagate an error.
+        // See https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html
+        let declaration = match &checksum {
+            UploadChecksum::Computed(algorithm) => Some((algorithm.clone(), None)),
+            UploadChecksum::Precalculated(ctx, _, _) => Some((
+                ChecksumAlgorithm::try_from(Ctx::Regular(*ctx.clone()))?,
+                ctx.multipart_checksum_type().map(ChecksumType::from),
+            )),
+            UploadChecksum::None => None,
+        };
+
+        let do_upload = |tagging, metadata| async {
             let system_metadata = system_metadata.clone();
+            let declaration = declaration.clone();
             self.client
                 .create_multipart_upload(|b| {
-                    let b = match checksum {
-                        UploadChecksum::Computed(algorithm) => b.checksum_algorithm(algorithm),
-                        // Algorithms without SDK support must be declared here, otherwise S3
-                        // rejects the value at `CompleteMultipartUpload` with `InvalidRequest`.
-                        // See https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html
-                        UploadChecksum::Precalculated(ctx, _) => {
-                            let checksum_type =
-                                ctx.multipart_checksum_type().map(ChecksumType::from);
-                            b.checksum_algorithm(ChecksumAlgorithm::from(Ctx::Regular(*ctx)))
-                                .set_checksum_type(checksum_type)
-                        }
-                        UploadChecksum::None => b,
+                    let b = match declaration {
+                        Some((algorithm, checksum_type)) => b
+                            .checksum_algorithm(algorithm)
+                            .set_checksum_type(checksum_type),
+                        None => b,
                     };
 
                     b.set_tagging(tagging)
@@ -383,13 +433,13 @@ impl S3 {
                 .await
         };
 
-        let result = do_upload(tagging.clone(), metadata.clone(), checksum.clone()).await;
+        let result = do_upload(tagging.clone(), metadata.clone()).await;
 
         // Retry if this is a best effort copy and the error was access denied.
         let (upload, err) = if let Err(ref err) = result {
             let err = ApiError::from(err);
             if self.tag_mode.is_best_effort() && err.is_access_denied() {
-                (do_upload(None, metadata, checksum).await?, vec![err])
+                (do_upload(None, metadata).await?, vec![err])
             } else {
                 (result?, vec![])
             }
@@ -424,11 +474,13 @@ impl S3 {
             return None;
         }
 
+        // Every SDK-computable algorithm is one S3 supports, so the conversion cannot fail here.
+        // Falling back to no additional checksum is still the right answer if it ever does.
         state
             .additional_ctx()
             .map(Ctx::into_standard)
             .filter(StandardCtx::is_sdk_computable_ctx)
-            .map(|ctx| ChecksumAlgorithm::from(Ctx::Regular(ctx)))
+            .and_then(|ctx| ChecksumAlgorithm::try_from(Ctx::Regular(ctx)).ok())
     }
 
     /// A precalculated additional checksum for algorithms that S3 accepts but the SDK cannot
@@ -457,8 +509,10 @@ impl S3 {
             // Some endpoints reject uploads that declare checksum algorithms which are not
             // computed by the SDK, so no additional checksum can be applied here.
             UploadChecksum::None
-        } else if let Some((ctx, sum)) = Self::precalculated_sum(state) {
-            UploadChecksum::Precalculated(Box::new(ctx), sum)
+        } else if let Some((ctx, sum)) = Self::precalculated_sum(state)
+            && let Ok(algorithm) = PrecalculatedAlgorithm::try_from(&ctx)
+        {
+            UploadChecksum::Precalculated(Box::new(ctx), algorithm, sum)
         } else {
             UploadChecksum::None
         }
@@ -858,13 +912,12 @@ impl S3 {
                 // S3 validates the uploaded data against a precalculated checksum.
                 let b = match checksum {
                     UploadChecksum::Computed(algorithm) => b.checksum_algorithm(algorithm),
-                    UploadChecksum::Precalculated(ctx, sum) => match *ctx {
-                        StandardCtx::MD5(_) => b.checksum_md5(sum),
-                        StandardCtx::SHA512(_) => b.checksum_sha512(sum),
-                        StandardCtx::XXHash64(_) => b.checksum_xxhash64(sum),
-                        StandardCtx::XXHash3(_) => b.checksum_xxhash3(sum),
-                        StandardCtx::XXHash128(_) => b.checksum_xxhash128(sum),
-                        _ => b,
+                    UploadChecksum::Precalculated(_, algorithm, sum) => match algorithm {
+                        PrecalculatedAlgorithm::MD5 => b.checksum_md5(sum),
+                        PrecalculatedAlgorithm::SHA512 => b.checksum_sha512(sum),
+                        PrecalculatedAlgorithm::XXHash64 => b.checksum_xxhash64(sum),
+                        PrecalculatedAlgorithm::XXHash3 => b.checksum_xxhash3(sum),
+                        PrecalculatedAlgorithm::XXHash128 => b.checksum_xxhash128(sum),
                     },
                     UploadChecksum::None => b,
                 };
@@ -962,11 +1015,11 @@ impl S3 {
             // A precalculated algorithm is declared on the upload, so every part must have
             // the checksum value.
             let (body, part_sum) = match self.upload_checksum(state) {
-                UploadChecksum::Precalculated(ctx, _) => {
+                UploadChecksum::Precalculated(ctx, algorithm, _) => {
                     let (body, sum) =
                         Self::buffered_part_body(content, &ctx, multi_part.bytes_transferred())
                             .await?;
-                    (body, Some((ctx, sum)))
+                    (body, Some((algorithm, sum)))
                 }
                 _ => (Self::upload_body(content), None),
             };
@@ -975,13 +1028,12 @@ impl S3 {
                 .client
                 .upload_part(|b| {
                     let b = match &part_sum {
-                        Some((ctx, sum)) => match ctx.as_ref() {
-                            StandardCtx::MD5(_) => b.checksum_md5(sum),
-                            StandardCtx::SHA512(_) => b.checksum_sha512(sum),
-                            StandardCtx::XXHash64(_) => b.checksum_xxhash64(sum),
-                            StandardCtx::XXHash3(_) => b.checksum_xxhash3(sum),
-                            StandardCtx::XXHash128(_) => b.checksum_xxhash128(sum),
-                            _ => b,
+                        Some((algorithm, sum)) => match algorithm {
+                            PrecalculatedAlgorithm::MD5 => b.checksum_md5(sum),
+                            PrecalculatedAlgorithm::SHA512 => b.checksum_sha512(sum),
+                            PrecalculatedAlgorithm::XXHash64 => b.checksum_xxhash64(sum),
+                            PrecalculatedAlgorithm::XXHash3 => b.checksum_xxhash3(sum),
+                            PrecalculatedAlgorithm::XXHash128 => b.checksum_xxhash128(sum),
                         },
                         None => b.set_checksum_algorithm(additional_checksum),
                     };
@@ -996,18 +1048,15 @@ impl S3 {
 
             let mut result: CopyResult = (part, part_number, upload_id).into();
             // Keep the computed value for the completion in case the endpoint does not return it.
-            if let (Some(part), Some((ctx, sum))) = (result.part.as_mut(), part_sum) {
-                let to_insert = match ctx.as_ref() {
-                    StandardCtx::MD5(_) => Some(&mut part.md5),
-                    StandardCtx::SHA512(_) => Some(&mut part.sha512),
-                    StandardCtx::XXHash64(_) => Some(&mut part.xxhash64),
-                    StandardCtx::XXHash3(_) => Some(&mut part.xxhash3),
-                    StandardCtx::XXHash128(_) => Some(&mut part.xxhash128),
-                    _ => None,
+            if let (Some(part), Some((algorithm, sum))) = (result.part.as_mut(), part_sum) {
+                let to_insert = match algorithm {
+                    PrecalculatedAlgorithm::MD5 => &mut part.md5,
+                    PrecalculatedAlgorithm::SHA512 => &mut part.sha512,
+                    PrecalculatedAlgorithm::XXHash64 => &mut part.xxhash64,
+                    PrecalculatedAlgorithm::XXHash3 => &mut part.xxhash3,
+                    PrecalculatedAlgorithm::XXHash128 => &mut part.xxhash128,
                 };
-                if let Some(to_insert) = to_insert {
-                    to_insert.get_or_insert(sum);
-                }
+                to_insert.get_or_insert(sum);
             }
             result.bytes_transferred = multi_part.bytes_transferred();
             result = result.with_api_errors(err)?;
@@ -2256,6 +2305,38 @@ mod test {
 
         assert_eq!(s3.max_object_size(), 53687091200000);
         assert_eq!(s3.max_object_size(), s3.max_parts() * s3.max_part_size());
+    }
+
+    /// Only the algorithms the SDK cannot compute are sent as precalculated values. Anything else
+    /// fails to convert rather than being silently dropped from the request.
+    #[test]
+    fn precalculated_algorithms_are_the_non_computable_ones() {
+        let precalculated = [
+            (StandardCtx::md5(), PrecalculatedAlgorithm::MD5),
+            (StandardCtx::sha512(), PrecalculatedAlgorithm::SHA512),
+            (StandardCtx::xxhash64(), PrecalculatedAlgorithm::XXHash64),
+            (StandardCtx::xxhash3(), PrecalculatedAlgorithm::XXHash3),
+            (StandardCtx::xxhash128(), PrecalculatedAlgorithm::XXHash128),
+        ];
+        for (ctx, expected) in precalculated {
+            assert!(!ctx.is_sdk_computable_ctx());
+            assert_eq!(PrecalculatedAlgorithm::try_from(&ctx).unwrap(), expected);
+        }
+
+        // The SDK computes these, so they are never sent as a value.
+        for ctx in [
+            StandardCtx::crc32(),
+            StandardCtx::crc32c(),
+            StandardCtx::crc64nvme(),
+            StandardCtx::sha1(),
+            StandardCtx::sha256(),
+        ] {
+            assert!(ctx.is_sdk_computable_ctx());
+            assert!(PrecalculatedAlgorithm::try_from(&ctx).is_err());
+        }
+
+        // S3 does not support this one at all.
+        assert!(PrecalculatedAlgorithm::try_from(&StandardCtx::QuickXor).is_err());
     }
 
     #[test]

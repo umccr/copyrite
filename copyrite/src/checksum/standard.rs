@@ -390,7 +390,9 @@ impl StandardCtx {
             | StandardCtx::XXHash64(_)
             | StandardCtx::XXHash3(_)
             | StandardCtx::XXHash128(_) => Some(MultipartChecksumType::Composite),
-            _ => None,
+            // S3 does not support this algorithm at all. Matched explicitly so that a new
+            // algorithm does not compile until the AWS table above is consulted for it.
+            StandardCtx::QuickXor => None,
         }
     }
 }
