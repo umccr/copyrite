@@ -18,8 +18,10 @@ use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
 use aws_sdk_s3::operation::upload_part::UploadPartOutput;
 use aws_sdk_s3::types::{
     ChecksumAlgorithm, ChecksumType, CompletedMultipartUpload, CompletedPart, CopyPartResult,
-    MetadataDirective, TaggingDirective,
+    MetadataDirective, Tag, TaggingDirective,
 };
+use aws_smithy_http::label::EncodingStrategy;
+use aws_smithy_http::{label, query};
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_types::body::SdkBody;
@@ -237,23 +239,14 @@ impl S3 {
 
         let tags = match self.tag_mode {
             MetadataCopy::Suppress => None,
-            MetadataCopy::BestEffort => self.tagging(&key, &bucket).await.ok().map(|output| {
-                output
-                    .tag_set
-                    .iter()
-                    .map(|tag| format!("{}={}", tag.key(), tag.value()))
-                    .collect::<Vec<_>>()
-                    .join("&")
-            }),
-            MetadataCopy::Copy => Some(
-                self.tagging(&key, &bucket)
-                    .await?
-                    .tag_set
-                    .iter()
-                    .map(|tag| format!("{}={}", tag.key(), tag.value()))
-                    .collect::<Vec<_>>()
-                    .join("&"),
-            ),
+            MetadataCopy::BestEffort => self
+                .tagging(&key, &bucket)
+                .await
+                .ok()
+                .map(|output| Self::format_tag_set(output.tag_set())),
+            MetadataCopy::Copy => Some(Self::format_tag_set(
+                self.tagging(&key, &bucket).await?.tag_set(),
+            )),
         };
 
         let size = head
@@ -264,6 +257,25 @@ impl S3 {
         let metadata = head.metadata;
 
         Ok(CopyState::new(size, tags, metadata).with_etag(head.e_tag))
+    }
+
+    /// Format a tag set as URL query parameters. The tag keys and values must be URL-encoded
+    /// because S3 decodes the `x-amz-tagging` header server-side and the SDK doesn't do this
+    /// encoding.
+    ///
+    /// See https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html#AmazonS3-PutObject-request-header-Tagging
+    pub fn format_tag_set(tag_set: &[Tag]) -> String {
+        tag_set
+            .iter()
+            .map(|tag| {
+                format!(
+                    "{}={}",
+                    query::fmt_string(tag.key()),
+                    query::fmt_string(tag.value())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&")
     }
 
     /// Get the head object output.
@@ -465,9 +477,16 @@ impl S3 {
         CopyResult::new(None, None, size, err)
     }
 
-    /// Get the copy source.
-    fn copy_source(key: &str, bucket: &str) -> String {
-        format!("{}/{}", bucket, key)
+    /// Get the copy source. The value must be URL-encoded because S3 decodes the
+    /// `x-amz-copy-source` header server-side and the SDK doesn't do this encoding.
+    ///
+    /// See https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html#AmazonS3-CopyObject-request-header-CopySource
+    pub fn copy_source(key: &str, bucket: &str) -> String {
+        format!(
+            "{}/{}",
+            label::fmt_string(bucket, EncodingStrategy::Greedy),
+            label::fmt_string(key, EncodingStrategy::Greedy)
+        )
     }
 
     /// Extract the metadata directive and metadata to be set.
@@ -1866,6 +1885,61 @@ mod test {
             metadata.get("custom-key").map(String::as_str),
             Some("custom-value")
         );
+    }
+
+    #[test]
+    fn copy_source_url_encodes_special_characters() {
+        assert_eq!(S3::copy_source("key", "bucket"), "bucket/key");
+        assert_eq!(
+            S3::copy_source("prefix/file with spaces+plus%percent~tilde", "bucket"),
+            "bucket/prefix/file%20with%20spaces%2Bplus%25percent~tilde"
+        );
+        assert_eq!(S3::copy_source("🦀.rs", "bucket"), "bucket/%F0%9F%A6%80.rs");
+    }
+
+    #[test]
+    fn sdk_encoders_match_uri_encode_reference() {
+        let inputs = ('\0'..='\u{7f}')
+            .map(String::from)
+            .chain(["prefix/file with spaces+plus%percent~tilde".to_string()]);
+
+        for input in inputs {
+            let expected = urlencoding::encode(&input).into_owned();
+            assert_eq!(query::fmt_string(&input), expected,);
+            assert_eq!(
+                label::fmt_string(&input, EncodingStrategy::Greedy),
+                expected.replace("%2F", "/"),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_state_url_encodes_tags() {
+        let head_object = head_object_rule();
+        let get_object_tagging = mock!(Client::get_object_tagging)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_output(|| {
+                GetObjectTaggingOutput::builder()
+                    .tag_set(
+                        Tag::builder()
+                            .key("my key")
+                            .value("a+b=c/d@e")
+                            .build()
+                            .unwrap(),
+                    )
+                    .build()
+                    .unwrap()
+            });
+
+        let client = retrying_mock_client(&[&head_object, &get_object_tagging]);
+        let s3 = s3_source_with_tag_mode(client, MetadataCopy::Copy);
+
+        let state = s3
+            .initialize_state(KEY.to_string(), BUCKET.to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(state.tags(), Some("my%20key=a%2Bb%3Dc%2Fd%40e".to_string()));
     }
 }
 
