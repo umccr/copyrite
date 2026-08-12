@@ -9,7 +9,7 @@ use crate::error::Error::{CopyError, ParseError};
 use crate::error::{ApiError, Error, Result};
 use crate::io::S3Client;
 use crate::io::copy::{
-    CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part, Reopen,
+    CopyContent, CopyResult, CopyState, MultiPartOptions, ObjectCopy, Part, Reopen, SystemMetadata,
 };
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::get_object_tagging::{GetObjectTaggingError, GetObjectTaggingOutput};
@@ -204,6 +204,18 @@ impl TryFrom<Part> for CompletedPart {
     }
 }
 
+impl From<&HeadObjectOutput> for SystemMetadata {
+    fn from(head: &HeadObjectOutput) -> Self {
+        Self {
+            content_type: head.content_type.clone(),
+            cache_control: head.cache_control.clone(),
+            content_disposition: head.content_disposition.clone(),
+            content_encoding: head.content_encoding.clone(),
+            content_language: head.content_language.clone(),
+        }
+    }
+}
+
 /// The additional checksum to attach to an upload.
 #[derive(Debug, Clone)]
 enum UploadChecksum {
@@ -254,9 +266,17 @@ impl S3 {
             .map(u64::try_from)
             .transpose()?
             .ok_or_else(|| Error::aws_error("missing size".to_string()))?;
-        let metadata = head.metadata;
 
-        Ok(CopyState::new(size, tags, metadata).with_etag(head.e_tag))
+        // System metadata follows the same mode as user metadata, so `Suppress` resets the
+        // destination to defaults.
+        let (metadata, system_metadata) = match self.metadata_mode {
+            MetadataCopy::Suppress => (None, SystemMetadata::default()),
+            _ => (head.metadata.clone(), SystemMetadata::from(&head)),
+        };
+
+        Ok(CopyState::new(size, tags, metadata)
+            .with_system_metadata(system_metadata)
+            .with_etag(head.e_tag))
     }
 
     /// Format a tag set as URL query parameters. The tag keys and values must be URL-encoded
@@ -322,9 +342,11 @@ impl S3 {
         bucket: &str,
         tagging: Option<String>,
         metadata: Option<HashMap<String, String>>,
+        system_metadata: SystemMetadata,
         checksum: UploadChecksum,
     ) -> Result<(String, Vec<ApiError>)> {
         let do_upload = |tagging, metadata, checksum: UploadChecksum| async {
+            let system_metadata = system_metadata.clone();
             self.client
                 .create_multipart_upload(|b| {
                     let b = match checksum {
@@ -334,6 +356,11 @@ impl S3 {
                     };
                     b.set_tagging(tagging)
                         .set_metadata(metadata)
+                        .set_content_type(system_metadata.content_type)
+                        .set_cache_control(system_metadata.cache_control)
+                        .set_content_disposition(system_metadata.content_disposition)
+                        .set_content_encoding(system_metadata.content_encoding)
+                        .set_content_language(system_metadata.content_language)
                         .bucket(bucket)
                         .key(key)
                 })
@@ -531,6 +558,7 @@ impl S3 {
                 &destination.bucket,
                 tagging,
                 state.metadata(),
+                state.system_metadata(),
                 self.upload_checksum(state),
             )
             .await?
@@ -738,8 +766,7 @@ impl S3 {
             destination,
             Self::upload_body(content),
             state.tags(),
-            state.metadata(),
-            self.upload_checksum(state),
+            state,
             i64::try_from(state.size())?,
         )
         .await?;
@@ -747,18 +774,21 @@ impl S3 {
         CopyResult::new(None, None, state.size(), vec![])
     }
 
-    /// Send a streaming `PutObject` request to the destination.
+    /// Send a streaming `PutObject` request to the destination. Tags are passed separately from
+    /// the state because best-effort tagging retries without them.
     async fn send_put_object(
         &self,
         destination: &BucketKey,
         body: ByteStream,
         tags: Option<String>,
-        metadata: Option<HashMap<String, String>>,
-        checksum: UploadChecksum,
+        state: &CopyState,
         content_length: i64,
     ) -> result::Result<PutObjectOutput, SdkError<PutObjectError, HttpResponse>> {
         let bucket = destination.bucket.clone();
         let key = destination.key.clone();
+        let metadata = state.metadata();
+        let system_metadata = state.system_metadata();
+        let checksum = self.upload_checksum(state);
         self.client
             .put_object(move |b| {
                 // S3 validates the uploaded data against a precalculated checksum.
@@ -776,6 +806,11 @@ impl S3 {
                 };
                 b.set_tagging(tags)
                     .set_metadata(metadata)
+                    .set_content_type(system_metadata.content_type)
+                    .set_cache_control(system_metadata.cache_control)
+                    .set_content_disposition(system_metadata.content_disposition)
+                    .set_content_encoding(system_metadata.content_encoding)
+                    .set_content_language(system_metadata.content_language)
                     .content_length(content_length)
                     .bucket(bucket)
                     .key(key)
@@ -792,7 +827,6 @@ impl S3 {
         state: &CopyState,
     ) -> Result<CopyResult> {
         let destination = self.get_destination()?;
-        let checksum = self.upload_checksum(state);
         let content_length = i64::try_from(state.size())?;
 
         let CopyContent { data, reopen } = content;
@@ -803,8 +837,7 @@ impl S3 {
                 destination,
                 Self::retryable_body(Some(data), Arc::clone(&reopen)),
                 state.tags(),
-                state.metadata(),
-                checksum.clone(),
+                state,
                 content_length,
             )
             .await;
@@ -824,8 +857,7 @@ impl S3 {
             destination,
             Self::retryable_body(None, reopen),
             None,
-            state.metadata(),
-            checksum,
+            state,
             content_length,
         )
         .await?;
@@ -851,6 +883,7 @@ impl S3 {
                 &destination.bucket,
                 state.tags(),
                 state.metadata(),
+                state.system_metadata(),
                 self.upload_checksum(state),
             )
             .await?
@@ -1940,6 +1973,168 @@ mod test {
             .unwrap();
 
         assert_eq!(state.tags(), Some("my%20key=a%2Bb%3Dc%2Fd%40e".to_string()));
+    }
+
+    #[tokio::test]
+    async fn initialize_state_captures_system_metadata() {
+        let head_object = mock!(Client::head_object)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_output(|| {
+                HeadObjectOutput::builder()
+                    .content_length(BODY.len() as i64)
+                    .content_type("application/json")
+                    .cache_control("no-cache")
+                    .content_disposition("inline")
+                    .content_encoding("gzip")
+                    .content_language("en-AU")
+                    .build()
+            });
+        let get_object_tagging = mock!(Client::get_object_tagging)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_output(|| {
+                GetObjectTaggingOutput::builder()
+                    .set_tag_set(Some(vec![]))
+                    .build()
+                    .unwrap()
+            });
+
+        let client = retrying_mock_client(&[&head_object, &get_object_tagging]);
+        let s3 = s3_source_with_tag_mode(client, MetadataCopy::Copy);
+
+        let state = s3
+            .initialize_state(KEY.to_string(), BUCKET.to_string())
+            .await
+            .unwrap();
+
+        let system_metadata = state.system_metadata();
+        assert_eq!(
+            system_metadata.content_type.as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(system_metadata.cache_control.as_deref(), Some("no-cache"));
+        assert_eq!(
+            system_metadata.content_disposition.as_deref(),
+            Some("inline")
+        );
+        assert_eq!(system_metadata.content_encoding.as_deref(), Some("gzip"));
+        assert_eq!(system_metadata.content_language.as_deref(), Some("en-AU"));
+    }
+
+    #[tokio::test]
+    async fn initialize_state_suppresses_metadata() {
+        let head_object = mock!(Client::head_object)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .then_output(|| {
+                HeadObjectOutput::builder()
+                    .content_length(BODY.len() as i64)
+                    .content_type("application/json")
+                    .metadata("custom-key", "custom-value")
+                    .build()
+            });
+
+        let client = retrying_mock_client(&[&head_object]);
+        let s3 = S3Builder::default()
+            .with_client(S3Client::new(Arc::new(client), false, false))
+            .with_copy_metadata(MetadataCopy::Suppress)
+            .with_copy_tags(MetadataCopy::Suppress)
+            .with_source(BUCKET, KEY)
+            .build()
+            .unwrap();
+
+        let state = s3
+            .initialize_state(KEY.to_string(), BUCKET.to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(state.tags(), None);
+        assert_eq!(state.metadata(), None);
+        assert_eq!(state.system_metadata().content_type, None);
+    }
+
+    #[tokio::test]
+    async fn put_object_has_system_metadata() {
+        let get_object = get_object_rule();
+        let put_object = mock!(Client::put_object)
+            .match_requests(|req| {
+                req.content_type() == Some("text/plain")
+                    && req.cache_control() == Some("max-age=60")
+                    && req.content_disposition() == Some("attachment")
+                    && req.content_encoding() == Some("gzip")
+                    && req.content_language() == Some("en")
+            })
+            .sequence()
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+
+        let state = copy_state().with_system_metadata(SystemMetadata {
+            content_type: Some("text/plain".to_string()),
+            cache_control: Some("max-age=60".to_string()),
+            content_disposition: Some("attachment".to_string()),
+            content_encoding: Some("gzip".to_string()),
+            content_language: Some("en".to_string()),
+        });
+
+        let result = download(&get_object, |content| {
+            let destination =
+                s3_destination(retrying_mock_client(&[&put_object]), MetadataCopy::Copy);
+            async move { destination.put_object(content, &state).await }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(put_object.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_create_has_system_metadata() {
+        let create = mock!(Client::create_multipart_upload)
+            .match_requests(|req| {
+                req.content_type() == Some("text/plain")
+                    && req.cache_control() == Some("max-age=60")
+            })
+            .sequence()
+            .output(|| {
+                CreateMultipartUploadOutput::builder()
+                    .upload_id("upload-id")
+                    .build()
+            })
+            .build();
+        let upload_part = mock!(Client::upload_part)
+            .match_requests(|req| req.bucket() == Some(BUCKET) && req.key() == Some(KEY))
+            .sequence()
+            .output(|| UploadPartOutput::builder().e_tag("etag").build())
+            .build();
+
+        let state = copy_state().with_system_metadata(SystemMetadata {
+            content_type: Some("text/plain".to_string()),
+            cache_control: Some("max-age=60".to_string()),
+            ..Default::default()
+        });
+
+        let get_object = get_object_rule();
+        let source = s3_source(retrying_mock_client(&[&get_object]));
+        let options = MultiPartOptions {
+            part_number: Some(1),
+            start: 0,
+            end: BODY.len() as u64,
+            ..Default::default()
+        };
+        let content = source
+            .download(Some(options.clone()), &CopyState::default())
+            .await
+            .unwrap();
+
+        let destination = s3_destination(
+            retrying_mock_client(&[&create, &upload_part]),
+            MetadataCopy::Copy,
+        );
+        destination
+            .put_object_multipart(content, options, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(create.num_calls(), 1);
+        assert_eq!(upload_part.num_calls(), 1);
     }
 }
 
