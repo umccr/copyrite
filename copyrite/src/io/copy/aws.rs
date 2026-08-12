@@ -1093,6 +1093,19 @@ impl ObjectCopy for S3 {
         54975581388800
     }
 
+    async fn abort_multipart(&self, upload_id: &str) -> Result<()> {
+        let destination = self.get_destination()?;
+        self.client
+            .abort_multipart_upload(|b| {
+                b.bucket(&destination.bucket)
+                    .key(&destination.key)
+                    .upload_id(upload_id)
+            })
+            .await?;
+
+        Ok(())
+    }
+
     async fn initialize_state(&self) -> Result<CopyState> {
         let source = self.get_source()?;
 
@@ -1109,6 +1122,7 @@ mod test {
     use aws_sdk_s3::Client;
     use aws_sdk_s3::config::SharedAsyncSleep;
     use aws_sdk_s3::config::retry::RetryConfig;
+    use aws_sdk_s3::operation::abort_multipart_upload::AbortMultipartUploadOutput;
     use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadOutput;
     use aws_sdk_s3::operation::copy_object::CopyObjectOutput;
     use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadOutput;
@@ -2207,6 +2221,24 @@ mod test {
 
         assert_eq!(create.num_calls(), 1);
         assert_eq!(upload_part.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn abort_multipart_sends_abort() {
+        let abort = mock!(Client::abort_multipart_upload)
+            .match_requests(|req| {
+                req.bucket() == Some(BUCKET)
+                    && req.key() == Some(KEY)
+                    && req.upload_id() == Some("upload-id")
+            })
+            .sequence()
+            .output(|| AbortMultipartUploadOutput::builder().build())
+            .build();
+
+        let destination = s3_destination(retrying_mock_client(&[&abort]), MetadataCopy::Copy);
+        destination.abort_multipart("upload-id").await.unwrap();
+
+        assert_eq!(abort.num_calls(), 1);
     }
 }
 

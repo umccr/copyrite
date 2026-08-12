@@ -4,6 +4,7 @@
 use crate::error::Error::AwsError;
 use crate::stats::{CheckStats, CopyStats, GenerateStats};
 use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::abort_multipart_upload::AbortMultipartUploadError;
 use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError;
 use aws_sdk_s3::operation::copy_object::CopyObjectError;
 use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadError;
@@ -248,6 +249,7 @@ generate_aws_error_impl!(PutObjectError);
 generate_aws_error_impl!(GetObjectTaggingError);
 generate_aws_error_impl!(CreateMultipartUploadError);
 generate_aws_error_impl!(CompleteMultipartUploadError);
+generate_aws_error_impl!(AbortMultipartUploadError);
 generate_aws_error_impl!(CopyObjectError);
 generate_aws_error_impl!(UploadPartCopyError);
 generate_aws_error_impl!(GetObjectError);

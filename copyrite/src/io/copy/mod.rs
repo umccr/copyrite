@@ -293,6 +293,11 @@ pub trait ObjectCopy: DynClone {
         u64::MAX
     }
 
+    /// Abort an unfinished multipart copy at the destination.
+    async fn abort_multipart(&self, _upload_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Get the size of the object.
     async fn initialize_state(&self) -> Result<CopyState>;
 }

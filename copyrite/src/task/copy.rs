@@ -549,11 +549,41 @@ impl CopyTask {
             pb.set_position(min(self.bytes_transferred, self.object_size));
         }
     }
+
     async fn run_multipart<FnC, FutC, FnR, FutR, R>(
         &mut self,
         part_size: u64,
         download_fn: FnC,
         upload_fn: FnR,
+    ) -> Result<()>
+    where
+        FnC: FnOnce(MultiPartOptions, CopyState) -> FutC + Clone + Send + 'static,
+        FutC: Future<Output = Result<R>> + Send,
+        FnR: FnOnce(R, MultiPartOptions, CopyState) -> FutR + Clone + Send + 'static,
+        FutR: Future<Output = Result<CopyResult>> + Send,
+        R: Send + 'static,
+    {
+        let mut upload_id = None;
+        let result = self
+            .run_multipart_parts(part_size, download_fn, upload_fn, &mut upload_id)
+            .await;
+
+        // Abort a failed multipart copy so that incomplete parts do not accure.
+        if result.is_err()
+            && let Some(upload_id) = upload_id
+        {
+            let _ = self.destination_copy.abort_multipart(&upload_id).await;
+        }
+
+        result
+    }
+
+    async fn run_multipart_parts<FnC, FutC, FnR, FutR, R>(
+        &mut self,
+        part_size: u64,
+        download_fn: FnC,
+        upload_fn: FnR,
+        upload_id: &mut Option<String>,
     ) -> Result<()>
     where
         FnC: FnOnce(MultiPartOptions, CopyState) -> FutC + Clone + Send + 'static,
@@ -573,8 +603,6 @@ impl CopyTask {
                 parts.push(part);
             }
         };
-
-        let mut upload_id = None;
         // First part must be run without concurrency to set the upload id for subsequent parts.
         for chunk in [[1].as_slice()].into_iter().chain(
             (2..n_parts + 1)
@@ -613,7 +641,7 @@ impl CopyTask {
                     let (options, result) = result?;
                     let result = upload_fn.clone()(result?, options, self.state.clone()).await?;
 
-                    upload_id = result.upload_id;
+                    *upload_id = result.upload_id;
                     push_part(&mut parts, result.part);
                     self.update_bytes(result.bytes_transferred);
                     self.n_retries += result.n_retries;
@@ -634,7 +662,7 @@ impl CopyTask {
 
                 for result in join_all(upload_tasks).await {
                     let result = result??;
-                    upload_id = result.upload_id;
+                    *upload_id = result.upload_id;
                     push_part(&mut parts, result.part);
                     self.update_bytes(result.bytes_transferred);
                     self.n_retries += result.n_retries;
@@ -761,6 +789,7 @@ pub(crate) mod test {
     use super::*;
     use crate::checksum::file::Checksum;
     use crate::error;
+    use crate::io::copy::{CopyContent, Part};
     use crate::io::sums::aws::test::{
         mock_multi_part_etag_only_rule, mock_single_part_etag_only_rule,
     };
@@ -773,14 +802,35 @@ pub(crate) mod test {
     use aws_sdk_s3::types::error::NoSuchKey;
     use aws_smithy_mocks::{Rule, RuleMode, mock, mock_client};
     use std::str::FromStr;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
     use tokio::fs::File;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     struct TestDestination {
         max_object_size: u64,
+        aborted: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TestDestination {
+        fn unlimited() -> Self {
+            Self {
+                max_object_size: u64::MAX,
+                ..Default::default()
+            }
+        }
+
+        fn with_max_object_size(max_object_size: u64) -> Self {
+            Self {
+                max_object_size,
+                ..Default::default()
+            }
+        }
+
+        fn aborted(&self) -> Vec<String> {
+            self.aborted.lock().unwrap().clone()
+        }
     }
 
     #[async_trait::async_trait]
@@ -797,13 +847,13 @@ pub(crate) mod test {
             &self,
             _multi_part: Option<MultiPartOptions>,
             _state: &CopyState,
-        ) -> error::Result<crate::io::copy::CopyContent> {
+        ) -> error::Result<CopyContent> {
             unimplemented!()
         }
 
         async fn upload(
             &self,
-            _data: crate::io::copy::CopyContent,
+            _data: CopyContent,
             _multi_part: Option<MultiPartOptions>,
             _state: &CopyState,
         ) -> error::Result<CopyResult> {
@@ -824,6 +874,11 @@ pub(crate) mod test {
 
         fn max_object_size(&self) -> u64 {
             self.max_object_size
+        }
+
+        async fn abort_multipart(&self, upload_id: &str) -> error::Result<()> {
+            self.aborted.lock().unwrap().push(upload_id.to_string());
+            Ok(())
         }
 
         async fn initialize_state(&self) -> error::Result<CopyState> {
@@ -882,9 +937,7 @@ pub(crate) mod test {
     async fn use_settings_rejects_too_large() {
         let builder = CopyTaskBuilder::default();
         let destination = Provider::try_from("s3://bucket/key").unwrap();
-        let destination_copy = TestDestination {
-            max_object_size: 100,
-        };
+        let destination_copy = TestDestination::with_max_object_size(100);
         let state = CopyState::new(200, None, None);
 
         let result = builder
@@ -904,9 +957,6 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn run_multipart_uploads_all_parts() {
-        use crate::io::copy::Part;
-        use std::sync::{Arc, Mutex};
-
         let object_size = 25u64;
         let part_size = 10u64;
 
@@ -918,12 +968,8 @@ pub(crate) mod test {
             part_size: Some(part_size),
             source: Provider::try_from("s3://bucket/source").unwrap(),
             destination: Provider::try_from("s3://bucket/destination").unwrap(),
-            source_copy: Box::new(TestDestination {
-                max_object_size: u64::MAX,
-            }),
-            destination_copy: Box::new(TestDestination {
-                max_object_size: u64::MAX,
-            }),
+            source_copy: Box::new(TestDestination::unlimited()),
+            destination_copy: Box::new(TestDestination::unlimited()),
             copy_mode: CopyMode::DownloadUpload,
             object_size,
             concurrency: 4,
@@ -970,6 +1016,61 @@ pub(crate) mod test {
         parts.sort_unstable();
         assert_eq!(parts, vec![1, 2, 3]);
         assert_eq!(task.bytes_transferred, object_size);
+    }
+
+    #[tokio::test]
+    async fn run_multipart_aborts_on_failure() {
+        let object_size = 25u64;
+        let part_size = 10u64;
+
+        let destination = TestDestination::unlimited();
+
+        let mut task = CopyTask {
+            additional_sums: Ctx::default(),
+            additional_sum: None,
+            part_size: Some(part_size),
+            source: Provider::try_from("s3://bucket/source").unwrap(),
+            destination: Provider::try_from("s3://bucket/destination").unwrap(),
+            source_copy: Box::new(TestDestination::unlimited()),
+            destination_copy: Box::new(destination.clone()),
+            copy_mode: CopyMode::DownloadUpload,
+            object_size,
+            concurrency: 4,
+            state: CopyState::new(object_size, None, None),
+            ordered_upload: true,
+            bytes_transferred: 0,
+            n_retries: 0,
+            recoverable_errors: HashSet::new(),
+            pb: None,
+        };
+
+        // The first part succeeds and establishes the upload id, a later part fails so that
+        // the multipart copy is left unfinished and must be aborted.
+        let result = task
+            .run_multipart(
+                part_size,
+                |options: MultiPartOptions, _state: CopyState| async move {
+                    Ok(options.part_number.unwrap_or_default())
+                },
+                |part_number: u64, options: MultiPartOptions, _state: CopyState| async move {
+                    if part_number >= 2 {
+                        return Err(CopyError("part failed".to_string()));
+                    }
+                    CopyResult::new(
+                        Some(Part {
+                            part_number,
+                            ..Default::default()
+                        }),
+                        Some("upload-id".to_string()),
+                        options.bytes_transferred(),
+                        vec![],
+                    )
+                },
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(destination.aborted(), vec!["upload-id".to_string()]);
     }
 
     #[tokio::test]
