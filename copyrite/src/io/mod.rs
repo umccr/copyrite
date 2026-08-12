@@ -28,6 +28,7 @@ pub struct S3Client {
     no_get_object_attributes: bool,
     no_checksum_mode: bool,
     no_precalculated_checksum: bool,
+    no_request_checksum: bool,
     stalled_stream_protection: StalledStreamProtection,
 }
 
@@ -86,6 +87,7 @@ impl S3Client {
             no_get_object_attributes,
             no_checksum_mode,
             no_precalculated_checksum: false,
+            no_request_checksum: false,
             stalled_stream_protection,
         }
     }
@@ -93,6 +95,12 @@ impl S3Client {
     /// Set whether to skip precalculated checksum values on uploads.
     pub fn with_no_precalculated_checksum(mut self, no_precalculated_checksum: bool) -> Self {
         self.no_precalculated_checksum = no_precalculated_checksum;
+        self
+    }
+
+    /// Set whether to skip request checksums that are not required by the operation.
+    pub fn with_no_request_checksum(mut self, no_request_checksum: bool) -> Self {
+        self.no_request_checksum = no_request_checksum;
         self
     }
 
@@ -119,7 +127,8 @@ impl S3Client {
             compatibility.source_no_checksum_mode(),
             compatibility.source_stalled_stream_protection(),
         )
-        .with_no_precalculated_checksum(compatibility.source_no_precalculated_checksum()))
+        .with_no_precalculated_checksum(compatibility.source_no_precalculated_checksum())
+        .with_no_request_checksum(compatibility.source_no_request_checksum()))
     }
 
     /// Create a new destination S3Client from CLI compatibility and credentials options.
@@ -145,7 +154,8 @@ impl S3Client {
             compatibility.destination_no_checksum_mode(),
             compatibility.destination_stalled_stream_protection(),
         )
-        .with_no_precalculated_checksum(compatibility.destination_no_precalculated_checksum()))
+        .with_no_precalculated_checksum(compatibility.destination_no_precalculated_checksum())
+        .with_no_request_checksum(compatibility.destination_no_request_checksum()))
     }
 
     /// Whether to avoid `GetObjectAttributes` calls.
@@ -161,6 +171,11 @@ impl S3Client {
     /// Whether to skip precalculated checksum values on uploads.
     pub fn no_precalculated_checksum(&self) -> bool {
         self.no_precalculated_checksum
+    }
+
+    /// Whether to skip request checksums that are not required by the operation.
+    pub fn no_request_checksum(&self) -> bool {
+        self.no_request_checksum
     }
 
     /// The SSP mode for this client.
@@ -286,6 +301,7 @@ impl S3Client {
     s3_wrapper_call!(head_object, disable_all);
     s3_wrapper_call!(complete_multipart_upload, disable_all);
     s3_wrapper_call!(create_multipart_upload, disable_all);
+    s3_wrapper_call!(abort_multipart_upload, disable_all);
     s3_wrapper_call!(get_object_tagging, disable_all);
     s3_wrapper_call!(get_object_attributes, disable_all);
     s3_wrapper_call!(copy_object, disable_copy_object);

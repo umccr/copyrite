@@ -151,8 +151,10 @@ impl S3 {
         }
     }
 
-    /// Get the `GetObjectAttributes` output for the target file. This caches the result in
-    /// memory so that subsequent calls do not repeat the query.
+    /// Get the `GetObjectAttributes` output for the target file. Object parts are paginated
+    /// because S3 returns at most 1000 parts per response, so all pages are merged into a
+    /// single output. This caches the result in memory so that subsequent calls do not repeat
+    /// the query.
     pub async fn get_object_attributes(&mut self) -> Option<&GetObjectAttributesOutput> {
         if self.client.no_get_object_attributes() {
             return None;
@@ -161,25 +163,63 @@ impl S3 {
         if let Some(ref attributes) = self.get_object_attributes {
             return Some(attributes);
         }
-        let attributes = self
-            .client
-            .get_object_attributes(|b| {
-                b.bucket(&self.bucket)
-                    .key(SumsFile::format_target_file(&self.key))
-                    .object_attributes(ObjectAttributes::Etag)
-                    .object_attributes(ObjectAttributes::Checksum)
-                    .object_attributes(ObjectAttributes::ObjectSize)
-                    .object_attributes(ObjectAttributes::ObjectParts)
-            })
-            .await;
 
-        match attributes {
-            Ok(attributes) => Some(self.get_object_attributes.insert(attributes)),
-            Err(ref err) => {
-                self.api_errors.insert(ApiError::from(err));
-                None
+        let mut part_number_marker: Option<String> = None;
+        let mut output: Option<GetObjectAttributesOutput> = None;
+        loop {
+            let marker = part_number_marker.take();
+            let attributes = self
+                .client
+                .get_object_attributes(|b| {
+                    b.bucket(&self.bucket)
+                        .key(SumsFile::format_target_file(&self.key))
+                        .set_part_number_marker(marker)
+                        .object_attributes(ObjectAttributes::Etag)
+                        .object_attributes(ObjectAttributes::Checksum)
+                        .object_attributes(ObjectAttributes::ObjectSize)
+                        .object_attributes(ObjectAttributes::ObjectParts)
+                })
+                .await;
+
+            let page = match attributes {
+                Ok(page) => page,
+                Err(ref err) => {
+                    self.api_errors.insert(ApiError::from(err));
+                    return None;
+                }
+            };
+
+            let next_marker = page.object_parts().and_then(|parts| {
+                if parts.is_truncated().unwrap_or_default() {
+                    parts.next_part_number_marker().map(str::to_string)
+                } else {
+                    None
+                }
+            });
+
+            match output.as_mut() {
+                None => output = Some(page),
+                Some(merged) => {
+                    if let (Some(merged_parts), Some(page_parts)) =
+                        (merged.object_parts.as_mut(), page.object_parts)
+                    {
+                        merged_parts.is_truncated = page_parts.is_truncated;
+                        merged_parts.next_part_number_marker = page_parts.next_part_number_marker;
+                        merged_parts
+                            .parts
+                            .get_or_insert_with(Vec::new)
+                            .extend(page_parts.parts.unwrap_or_default());
+                    }
+                }
+            }
+
+            match next_marker {
+                Some(marker) => part_number_marker = Some(marker),
+                None => break,
             }
         }
+
+        Some(self.get_object_attributes.insert(output?))
     }
 
     /// Get the `HeadObjectOutput` output for the target file for a specific part. This caches
@@ -510,12 +550,17 @@ impl S3 {
     pub async fn put_sums(&self, sums_file: &SumsFile) -> Result<()> {
         let key = SumsFile::format_sums_file(&self.key);
         let body = ByteStream::from(sums_file.to_json_string()?.into_bytes());
+        // An explicit algorithm overrides the SDK-level `WhenRequired` setting, so it must be
+        // skipped when request checksums are disabled for compatibility.
+        let no_request_checksum = self.client.no_request_checksum();
         self.client
             .put_object(move |b| {
-                b.checksum_algorithm(ChecksumAlgorithm::Crc64Nvme)
-                    .bucket(&self.bucket)
-                    .key(&key)
-                    .body(body)
+                let b = if no_request_checksum {
+                    b
+                } else {
+                    b.checksum_algorithm(ChecksumAlgorithm::Crc64Nvme)
+                };
+                b.bucket(&self.bucket).key(&key).body(body)
             })
             .await?;
         Ok(())
@@ -562,6 +607,7 @@ pub(crate) mod test {
     use crate::test::{TEST_FILE_NAME, TEST_FILE_SIZE};
     use aws_sdk_s3::Client;
     use aws_sdk_s3::operation::head_object::builders::HeadObjectOutputBuilder;
+    use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::types;
     use aws_sdk_s3::types::GetObjectAttributesParts;
     use aws_smithy_mocks::{Rule, RuleMode, mock, mock_client};
@@ -1161,5 +1207,108 @@ pub(crate) mod test {
             RuleMode::Sequential,
             &[&head_object, &get_object_attributes]
         )
+    }
+
+    #[tokio::test]
+    async fn get_object_attributes_paginates_parts() -> anyhow::Result<()> {
+        let first_page = mock!(Client::get_object_attributes)
+            .match_requests(|req| {
+                req.bucket() == Some("bucket")
+                    && req.key() == Some("key")
+                    && req.part_number_marker().is_none()
+            })
+            .then_output(|| {
+                GetObjectAttributesOutput::builder()
+                    .object_parts(
+                        GetObjectAttributesParts::builder()
+                            .is_truncated(true)
+                            .next_part_number_marker("2")
+                            .parts(ObjectPart::builder().part_number(1).size(5).build())
+                            .parts(ObjectPart::builder().part_number(2).size(5).build())
+                            .build(),
+                    )
+                    .object_size(12)
+                    .build()
+            });
+        let second_page = mock!(Client::get_object_attributes)
+            .match_requests(|req| {
+                req.bucket() == Some("bucket")
+                    && req.key() == Some("key")
+                    && req.part_number_marker() == Some("2")
+            })
+            .then_output(|| {
+                GetObjectAttributesOutput::builder()
+                    .object_parts(
+                        GetObjectAttributesParts::builder()
+                            .is_truncated(false)
+                            .parts(ObjectPart::builder().part_number(3).size(2).build())
+                            .build(),
+                    )
+                    .object_size(12)
+                    .build()
+            });
+
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&first_page, &second_page]);
+        let mut s3 = S3Builder::default()
+            .with_client(S3Client::new(Arc::new(client), false, false))
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
+            .build()?;
+
+        // All pages are merged, so the parts span both responses in order.
+        let parts = s3.aws_parts_from_attributes().await?;
+        assert_eq!(parts, Some(vec![Some(5), Some(5), Some(2)]));
+        assert_eq!(first_page.num_calls(), 1);
+        assert_eq!(second_page.num_calls(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_sums_sets_checksum_algorithm() -> anyhow::Result<()> {
+        let put_object = mock!(Client::put_object)
+            .match_requests(|req| {
+                req.bucket() == Some("bucket")
+                    && req.key() == Some("key.sums")
+                    && req.checksum_algorithm() == Some(&ChecksumAlgorithm::Crc64Nvme)
+            })
+            .then_output(|| PutObjectOutput::builder().build());
+
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_object]);
+        let s3 = S3Builder::default()
+            .with_client(S3Client::new(Arc::new(client), false, false))
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
+            .build()?;
+
+        s3.put_sums(&SumsFile::default()).await?;
+        assert_eq!(put_object.num_calls(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_sums_skips_checksum_algorithm_when_no_request_checksum() -> anyhow::Result<()> {
+        let put_object = mock!(Client::put_object)
+            .match_requests(|req| {
+                req.bucket() == Some("bucket")
+                    && req.key() == Some("key.sums")
+                    && req.checksum_algorithm().is_none()
+            })
+            .then_output(|| PutObjectOutput::builder().build());
+
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_object]);
+        let s3 = S3Builder::default()
+            .with_client(
+                S3Client::new(Arc::new(client), false, false).with_no_request_checksum(true),
+            )
+            .with_bucket("bucket".to_string())
+            .with_key("key".to_string())
+            .build()?;
+
+        s3.put_sums(&SumsFile::default()).await?;
+        assert_eq!(put_object.num_calls(), 1);
+
+        Ok(())
     }
 }
