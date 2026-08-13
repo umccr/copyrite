@@ -23,7 +23,27 @@ install -D target/release/%{name} %{buildroot}%{_bindir}/%{name}
 %{_bindir}/%{name}
 
 %changelog
+* Thu Aug 13 2026 Marko Malenic <mmalenic1@gmail.com> - 0.9.2-1
+- Use default client-side checksum calculation for multipart uploads (@mmalenic)
+- Assert multipart uploads store a full object checksum (@mmalenic)
+- Match checksum algorithms exhaustively (@mmalenic)
+- Document memory use of precalculated part buffering (@mmalenic)
+- Correct the S3 maximum object size (@mmalenic)
+- Record errors not captured on best-effort paths (@mmalenic)
+- Warn when an explicit part size is ignored (@mmalenic)
+- Require concurrency to be at least 1 (@mmalenic)
+- Add S3-compatible endpoint and Ceph docs (@mmalenic)
+- Skip SDK response checksum validation on ranged reads (@mmalenic)
+- No additional checksum should be supplied when it's configured off (@mmalenic)
+- Add full object and composite checksum tracking (@mmalenic)
+- Abort unfinished multipart copies (@mmalenic)
+- Paginate object parts (@mmalenic)
+- Send per-part checksums for precalculated algorithms (@mmalenic)
+- Carry system metadata through download-upload copies (@mmalenic)
+- URL-encode copy source and tagging headers (@mmalenic)
+
 * Tue Aug 11 2026 Marko Malenic <mmalenic1@gmail.com> - 0.9.1-1
+- Regenerate Debian and RPM changelogs (@mmalenic)
 - Do not send pre-calculated checksum on create multipart (@mmalenic)
 
 * Tue Aug 11 2026 Marko Malenic <mmalenic1@gmail.com> - 0.9.0-1

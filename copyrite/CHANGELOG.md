@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2](https://github.com/umccr/copyrite/compare/v0.9.1...v0.9.2) - 2026-08-13
+
+### Added
+
+- warn when an explicit part size is ignored
+- add full object and composite checksum tracking
+- abort unfinished multipart copies
+- carry system metadata through download-upload copies
+
+### Fixed
+
+- use default client-side checksum calculation for multipart uploads
+- match checksum algorithms exhaustively
+- correct the S3 maximum object size
+- record errors not captured on best-effort paths
+- require concurrency to be at least 1
+- skip SDK response checksum validation on ranged reads
+- no additional checksum should be supplied when it's configured off
+- paginate object parts
+- send per-part checksums for precalculated algorithms
+- URL-encode copy source and tagging headers
+
+### Other
+
+- Merge pull request #120 from umccr/fix/stream-and-checksums
+- assert multipart uploads store a full object checksum
+- document memory use of precalculated part buffering
+- add S3-compatible endpoint and Ceph docs
+
 ## [0.9.1](https://github.com/umccr/copyrite/compare/v0.9.0...v0.9.1) - 2026-08-11
 
 ### Fixed
