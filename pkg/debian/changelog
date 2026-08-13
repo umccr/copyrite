@@ -1,8 +1,31 @@
+copyrite (0.9.2-1) unstable; urgency=low
+
+  * Use default client-side checksum calculation for multipart uploads (@mmalenic)
+  * Assert multipart uploads store a full object checksum (@mmalenic)
+  * Match checksum algorithms exhaustively (@mmalenic)
+  * Document memory use of precalculated part buffering (@mmalenic)
+  * Correct the S3 maximum object size (@mmalenic)
+  * Record errors not captured on best-effort paths (@mmalenic)
+  * Warn when an explicit part size is ignored (@mmalenic)
+  * Require concurrency to be at least 1 (@mmalenic)
+  * Add S3-compatible endpoint and Ceph docs (@mmalenic)
+  * Skip SDK response checksum validation on ranged reads (@mmalenic)
+  * No additional checksum should be supplied when it's configured off (@mmalenic)
+  * Add full object and composite checksum tracking (@mmalenic)
+  * Abort unfinished multipart copies (@mmalenic)
+  * Paginate object parts (@mmalenic)
+  * Send per-part checksums for precalculated algorithms (@mmalenic)
+  * Carry system metadata through download-upload copies (@mmalenic)
+  * URL-encode copy source and tagging headers (@mmalenic)
+
+ -- Marko Malenic <mmalenic1@gmail.com>  Thu, 13 Aug 2026 03:48:25 +0000
+
 copyrite (0.9.1-1) unstable; urgency=low
 
+  * Regenerate Debian and RPM changelogs (@mmalenic)
   * Do not send pre-calculated checksum on create multipart (@mmalenic)
 
- -- Marko Malenic <mmalenic1@gmail.com>  Tue, 11 Aug 2026 04:55:44 +0000
+ -- Marko Malenic <mmalenic1@gmail.com>  Tue, 11 Aug 2026 05:31:57 +0000
 
 copyrite (0.9.0-1) unstable; urgency=low
 
