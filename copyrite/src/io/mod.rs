@@ -28,6 +28,7 @@ pub struct S3Client {
     no_get_object_attributes: bool,
     no_checksum_mode: bool,
     no_precalculated_checksum: bool,
+    no_request_checksum: bool,
     stalled_stream_protection: StalledStreamProtection,
 }
 
@@ -86,6 +87,7 @@ impl S3Client {
             no_get_object_attributes,
             no_checksum_mode,
             no_precalculated_checksum: false,
+            no_request_checksum: false,
             stalled_stream_protection,
         }
     }
@@ -93,6 +95,12 @@ impl S3Client {
     /// Set whether to skip precalculated checksum values on uploads.
     pub fn with_no_precalculated_checksum(mut self, no_precalculated_checksum: bool) -> Self {
         self.no_precalculated_checksum = no_precalculated_checksum;
+        self
+    }
+
+    /// Set whether to skip request checksums that are not required by the operation.
+    pub fn with_no_request_checksum(mut self, no_request_checksum: bool) -> Self {
+        self.no_request_checksum = no_request_checksum;
         self
     }
 
@@ -119,7 +127,8 @@ impl S3Client {
             compatibility.source_no_checksum_mode(),
             compatibility.source_stalled_stream_protection(),
         )
-        .with_no_precalculated_checksum(compatibility.source_no_precalculated_checksum()))
+        .with_no_precalculated_checksum(compatibility.source_no_precalculated_checksum())
+        .with_no_request_checksum(compatibility.source_no_request_checksum()))
     }
 
     /// Create a new destination S3Client from CLI compatibility and credentials options.
@@ -145,7 +154,8 @@ impl S3Client {
             compatibility.destination_no_checksum_mode(),
             compatibility.destination_stalled_stream_protection(),
         )
-        .with_no_precalculated_checksum(compatibility.destination_no_precalculated_checksum()))
+        .with_no_precalculated_checksum(compatibility.destination_no_precalculated_checksum())
+        .with_no_request_checksum(compatibility.destination_no_request_checksum()))
     }
 
     /// Whether to avoid `GetObjectAttributes` calls.
@@ -161,6 +171,11 @@ impl S3Client {
     /// Whether to skip precalculated checksum values on uploads.
     pub fn no_precalculated_checksum(&self) -> bool {
         self.no_precalculated_checksum
+    }
+
+    /// Whether to skip request checksums that are not required by the operation.
+    pub fn no_request_checksum(&self) -> bool {
+        self.no_request_checksum
     }
 
     /// The SSP mode for this client.
@@ -181,6 +196,18 @@ impl S3Client {
             )
         } else {
             customize
+        }
+    }
+
+    /// Apply the checksum-related SDK config that is common to all clients.
+    fn apply_checksum_config(
+        builder: config::Builder,
+        no_request_checksum: bool,
+    ) -> config::Builder {
+        if no_request_checksum {
+            builder.request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+        } else {
+            builder
         }
     }
 
@@ -240,21 +267,19 @@ impl S3Client {
             };
 
             let merged = overrides.merge_with(base.as_ref())?;
-            let mut builder = config::Builder::from(&sdk_config)
-                .credentials_provider(merged)
-                .force_path_style(force_path_style);
-            if no_request_checksum {
-                builder =
-                    builder.request_checksum_calculation(RequestChecksumCalculation::WhenRequired);
-            }
-            builder.build()
+            Self::apply_checksum_config(
+                config::Builder::from(&sdk_config)
+                    .credentials_provider(merged)
+                    .force_path_style(force_path_style),
+                no_request_checksum,
+            )
+            .build()
         } else {
-            let mut builder = config::Builder::from(&sdk_config).force_path_style(force_path_style);
-            if no_request_checksum {
-                builder =
-                    builder.request_checksum_calculation(RequestChecksumCalculation::WhenRequired);
-            }
-            builder.build()
+            Self::apply_checksum_config(
+                config::Builder::from(&sdk_config).force_path_style(force_path_style),
+                no_request_checksum,
+            )
+            .build()
         };
 
         Ok(Client::from_conf(s3_config))
@@ -286,6 +311,7 @@ impl S3Client {
     s3_wrapper_call!(head_object, disable_all);
     s3_wrapper_call!(complete_multipart_upload, disable_all);
     s3_wrapper_call!(create_multipart_upload, disable_all);
+    s3_wrapper_call!(abort_multipart_upload, disable_all);
     s3_wrapper_call!(get_object_tagging, disable_all);
     s3_wrapper_call!(get_object_attributes, disable_all);
     s3_wrapper_call!(copy_object, disable_copy_object);
@@ -552,13 +578,34 @@ impl CredentialOverrides {
 
 #[cfg(test)]
 mod tests {
-    use crate::io::{CredentialOverrides, Provider, SecretsManagerCredentials};
+    use crate::io::{
+        CredentialOverrides, Provider, RequestChecksumCalculation, S3Client,
+        SecretsManagerCredentials, config,
+    };
     use anyhow::Result;
     use aws_credential_types::Credentials;
     use serde_json::json;
     use std::env;
     use std::time::{Duration, SystemTime};
     use tempfile::{NamedTempFile, tempdir};
+
+    #[test]
+    fn checksum_config_leaves_response_validation_at_the_default() {
+        for no_request_checksum in [false, true] {
+            let config =
+                S3Client::apply_checksum_config(config::Builder::default(), no_request_checksum)
+                    .build();
+
+            assert_eq!(config.response_checksum_validation(), None);
+
+            let expected = if no_request_checksum {
+                Some(&RequestChecksumCalculation::WhenRequired)
+            } else {
+                None
+            };
+            assert_eq!(config.request_checksum_calculation(), expected);
+        }
+    }
 
     #[tokio::test]
     pub async fn test_parse_url() -> Result<()> {

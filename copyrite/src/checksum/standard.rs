@@ -375,11 +375,42 @@ impl StandardCtx {
                 | StandardCtx::SHA256(_)
         )
     }
+
+    /// The checksum types S3 supports for this algorithm in a multipart upload.
+    pub fn multipart_checksum_type(&self) -> Option<MultipartChecksumType> {
+        match self {
+            StandardCtx::CRC64NVME(_, _) => Some(MultipartChecksumType::FullObject),
+            StandardCtx::CRC32(_, _) | StandardCtx::CRC32C(_, _) => {
+                Some(MultipartChecksumType::Either)
+            }
+            StandardCtx::MD5(_)
+            | StandardCtx::SHA1(_)
+            | StandardCtx::SHA256(_)
+            | StandardCtx::SHA512(_)
+            | StandardCtx::XXHash64(_)
+            | StandardCtx::XXHash3(_)
+            | StandardCtx::XXHash128(_) => Some(MultipartChecksumType::Composite),
+            StandardCtx::QuickXor => None,
+        }
+    }
+}
+
+/// The checksum types that S3 supports for an algorithm in a multipart upload.
+///
+/// See https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum MultipartChecksumType {
+    /// Composite checksum.
+    Composite,
+    /// Full object checksum.
+    FullObject,
+    /// Either composite or full object checksum.
+    Either,
 }
 
 #[cfg(test)]
 pub(crate) mod test {
-    use super::StandardCtx;
+    use super::{MultipartChecksumType, StandardCtx};
     use crate::checksum::test::test_checksum;
     use anyhow::Result;
     use std::str::FromStr;
@@ -497,6 +528,33 @@ pub(crate) mod test {
             let ctx = StandardCtx::from_str(name)?;
             assert_eq!(ctx.to_string(), name);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn multipart_checksum_types_match_aws_table() -> Result<()> {
+        let expected = [
+            ("crc64nvme", Some(MultipartChecksumType::FullObject)),
+            ("crc32", Some(MultipartChecksumType::Either)),
+            ("crc32c", Some(MultipartChecksumType::Either)),
+            ("sha1", Some(MultipartChecksumType::Composite)),
+            ("sha256", Some(MultipartChecksumType::Composite)),
+            ("md5", Some(MultipartChecksumType::Composite)),
+            ("xxhash64", Some(MultipartChecksumType::Composite)),
+            ("xxhash3", Some(MultipartChecksumType::Composite)),
+            ("xxhash128", Some(MultipartChecksumType::Composite)),
+            ("sha512", Some(MultipartChecksumType::Composite)),
+        ];
+
+        for (name, checksum_type) in expected {
+            assert_eq!(
+                StandardCtx::from_str(name)?.multipart_checksum_type(),
+                checksum_type
+            );
+        }
+
+        assert_eq!(StandardCtx::QuickXor.multipart_checksum_type(), None);
+
         Ok(())
     }
 }

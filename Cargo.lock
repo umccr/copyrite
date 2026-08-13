@@ -1163,6 +1163,7 @@ dependencies = [
  "aws-sdk-s3",
  "aws-sdk-secretsmanager",
  "aws-smithy-async",
+ "aws-smithy-http",
  "aws-smithy-mocks",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
@@ -1196,6 +1197,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "urlencoding",
  "xxhash-rust",
 ]
 

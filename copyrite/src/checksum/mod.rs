@@ -6,10 +6,10 @@ pub mod file;
 pub mod standard;
 
 use crate::checksum::aws_etag::AWSETagCtx;
-use crate::checksum::standard::StandardCtx;
+use crate::checksum::standard::{MultipartChecksumType, StandardCtx};
 use crate::error::{Error, Result};
 use crate::io::Provider;
-use aws_sdk_s3::types::ChecksumAlgorithm;
+use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumType};
 use futures_util::{Stream, StreamExt, pin_mut};
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -136,9 +136,11 @@ impl Ctx {
     }
 }
 
-impl From<Ctx> for ChecksumAlgorithm {
-    fn from(ctx: Ctx) -> Self {
-        match ctx.into_standard() {
+impl TryFrom<Ctx> for ChecksumAlgorithm {
+    type Error = Error;
+
+    fn try_from(ctx: Ctx) -> Result<Self> {
+        Ok(match ctx.into_standard() {
             StandardCtx::CRC64NVME(_, _) => ChecksumAlgorithm::Crc64Nvme,
             StandardCtx::CRC32C(_, _) => ChecksumAlgorithm::Crc32C,
             StandardCtx::CRC32(_, _) => ChecksumAlgorithm::Crc32,
@@ -149,8 +151,23 @@ impl From<Ctx> for ChecksumAlgorithm {
             StandardCtx::XXHash64(_) => ChecksumAlgorithm::Xxhash64,
             StandardCtx::XXHash3(_) => ChecksumAlgorithm::Xxhash3,
             StandardCtx::XXHash128(_) => ChecksumAlgorithm::Xxhash128,
-            // By default, set some algorithm if the context doesn't line up.
-            _ => ChecksumAlgorithm::Crc64Nvme,
+            StandardCtx::QuickXor => {
+                return Err(Error::aws_error(
+                    "`quickxor` is not implemented".to_string(),
+                ));
+            }
+        })
+    }
+}
+
+/// The checksum type to declare when creating a multipart upload.
+impl From<MultipartChecksumType> for ChecksumType {
+    fn from(checksum_type: MultipartChecksumType) -> Self {
+        match checksum_type {
+            MultipartChecksumType::FullObject => ChecksumType::FullObject,
+            MultipartChecksumType::Composite => ChecksumType::Composite,
+            // Composite is chosen for algorithms that support both.
+            MultipartChecksumType::Either => ChecksumType::Composite,
         }
     }
 }
@@ -186,6 +203,31 @@ pub(crate) mod test {
     use anyhow::Result;
     use tokio::fs::File;
     use tokio::join;
+
+    #[test]
+    fn checksum_algorithm_conversion_is_exhaustive() -> Result<()> {
+        let cases = [
+            ("md5", ChecksumAlgorithm::Md5),
+            ("sha1", ChecksumAlgorithm::Sha1),
+            ("sha256", ChecksumAlgorithm::Sha256),
+            ("sha512", ChecksumAlgorithm::Sha512),
+            ("crc32", ChecksumAlgorithm::Crc32),
+            ("crc32c", ChecksumAlgorithm::Crc32C),
+            ("crc64nvme", ChecksumAlgorithm::Crc64Nvme),
+            ("xxhash64", ChecksumAlgorithm::Xxhash64),
+            ("xxhash3", ChecksumAlgorithm::Xxhash3),
+            ("xxhash128", ChecksumAlgorithm::Xxhash128),
+        ];
+
+        for (name, expected) in cases {
+            let ctx = Ctx::from_str(name)?;
+            assert_eq!(ChecksumAlgorithm::try_from(ctx)?, expected);
+        }
+
+        assert!(ChecksumAlgorithm::try_from(Ctx::Regular(StandardCtx::QuickXor)).is_err(),);
+
+        Ok(())
+    }
 
     pub(crate) async fn test_checksum(checksum: &str, expected: &str) -> Result<()> {
         let test_file = TestFileBuilder::new()?.generate_test_defaults()?;

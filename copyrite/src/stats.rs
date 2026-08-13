@@ -135,6 +135,16 @@ impl ChecksumPair {
     pub fn new(kind: Ctx, value: Checksum) -> Self {
         Self { kind, value }
     }
+
+    /// Get the kind of checksum.
+    pub fn kind(&self) -> &Ctx {
+        &self.kind
+    }
+
+    /// Get the value of the checksum.
+    pub fn value(&self) -> &Checksum {
+        &self.value
+    }
 }
 
 impl From<&CheckStats> for Option<ChecksumPair> {
@@ -159,6 +169,11 @@ pub struct CopySuccessReason {
 }
 
 impl CopySuccessReason {
+    /// Get the matching checksum, if a checksum comparison determined the copy was correct.
+    pub fn checksum_match(&self) -> Option<&ChecksumPair> {
+        self.checksum_match.as_ref()
+    }
+
     /// Create a new copy reason.
     pub fn new(checksum_match: Option<ChecksumPair>, message: impl Into<String>) -> Self {
         Self {
@@ -385,6 +400,41 @@ impl From<CopyTaskError> for Box<CopyStats> {
 }
 
 impl CopyStats {
+    /// Get the total bytes transferred to the destination.
+    pub fn bytes_transferred(&self) -> u64 {
+        self.bytes_transferred
+    }
+
+    /// Whether the copy was skipped because the destination already had matching sums.
+    pub fn skipped(&self) -> bool {
+        self.skipped
+    }
+
+    /// Whether the copy occurred because the destination sums did not match the source sums.
+    pub fn sums_mismatch(&self) -> bool {
+        self.sums_mismatch
+    }
+
+    /// Get the mode of the copy.
+    pub fn copy_mode(&self) -> CopyMode {
+        self.copy_mode
+    }
+
+    /// Get the reason the copy was considered successful or was skipped.
+    pub fn success_reason(&self) -> Option<&CopySuccessReason> {
+        self.success_reason.as_ref()
+    }
+
+    /// Get the number of retries caused by permission issues copying metadata or tags.
+    pub fn n_retries(&self) -> u64 {
+        self.n_retries
+    }
+
+    /// Get the recoverable API errors encountered on best-effort paths.
+    pub fn api_errors(&self) -> &HashSet<ApiError> {
+        &self.api_errors
+    }
+
     /// Create check stats from a generate task.
     pub fn from_check_stats(
         source: String,

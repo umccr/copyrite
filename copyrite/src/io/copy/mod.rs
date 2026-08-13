@@ -158,15 +158,29 @@ impl From<(Part, String)> for CopyResult {
     }
 }
 
+/// System-defined metadata headers carried from the source object to the destination. Unlike
+/// user-defined metadata, these are not part of `x-amz-meta-*` and must be set individually
+/// on uploads.
+#[derive(Debug, Clone, Default)]
+pub struct SystemMetadata {
+    pub(crate) content_type: Option<String>,
+    pub(crate) cache_control: Option<String>,
+    pub(crate) content_disposition: Option<String>,
+    pub(crate) content_encoding: Option<String>,
+    pub(crate) content_language: Option<String>,
+}
+
 /// The state of the copy operation.
 #[derive(Debug, Clone, Default)]
 pub struct CopyState {
     size: u64,
     tags: Option<String>,
     metadata: Option<HashMap<String, String>>,
+    system_metadata: SystemMetadata,
     additional_ctx: Option<Ctx>,
     additional_sum: Option<String>,
     etag: Option<String>,
+    api_errors: Vec<ApiError>,
 }
 
 impl CopyState {
@@ -183,6 +197,11 @@ impl CopyState {
     /// Get the object metadata.
     pub fn metadata(&self) -> Option<HashMap<String, String>> {
         self.metadata.clone()
+    }
+
+    /// Get the system metadata headers.
+    pub fn system_metadata(&self) -> SystemMetadata {
+        self.system_metadata.clone()
     }
 
     /// Get the additional context.
@@ -206,9 +225,11 @@ impl CopyState {
             size,
             tags,
             metadata,
+            system_metadata: SystemMetadata::default(),
             additional_ctx: None,
             additional_sum: None,
             etag: None,
+            api_errors: Vec::new(),
         }
     }
 
@@ -216,6 +237,24 @@ impl CopyState {
     pub fn with_etag(mut self, etag: Option<String>) -> Self {
         self.etag = etag;
         self
+    }
+
+    /// Set the system metadata headers.
+    pub fn with_system_metadata(mut self, system_metadata: SystemMetadata) -> Self {
+        self.system_metadata = system_metadata;
+        self
+    }
+
+    /// Set the errors encountered while initializing the state on a best-effort path. These are
+    /// recoverable, so they are recorded for stats rather than propagated.
+    pub fn with_api_errors(mut self, api_errors: Vec<ApiError>) -> Self {
+        self.api_errors = api_errors;
+        self
+    }
+
+    /// Get the errors encountered while initializing the state.
+    pub fn api_errors(&self) -> &[ApiError] {
+        &self.api_errors
     }
 
     /// Set the additional context.
@@ -266,6 +305,11 @@ pub trait ObjectCopy: DynClone {
     /// The maximum total object size supported by the destination.
     fn max_object_size(&self) -> u64 {
         u64::MAX
+    }
+
+    /// Abort an unfinished multipart copy at the destination.
+    async fn abort_multipart(&self, _upload_id: &str) -> Result<()> {
+        Ok(())
     }
 
     /// Get the size of the object.
